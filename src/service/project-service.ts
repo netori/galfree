@@ -8,10 +8,12 @@
  */
 import { access, mkdir } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { GalfreeError } from './error.ts'
 import { runGit } from './git.ts'
 import { ProjectRegistry, type RegistryEntry } from './registry.ts'
+import { commitSnapshot, fileDiff, fileHistory, rollbackFile, type SnapshotEntry } from './snapshot.ts'
 import { PROJECT_NAME_RE, renderTemplateFiles, templateKeepFiles } from './template.ts'
 import { TemplateValidator } from './validation/template-validator.ts'
 import { WriteGateway, type ChangeEvent, type FileSnapshot, type WriteLogEntry, type WriteOp, type WriteResult } from './write-gateway.ts'
@@ -82,7 +84,7 @@ export class ProjectService {
 
     // 模板内容一律经网关落盘(网关是唯一写通道)。
     const files = [...renderTemplateFiles({ name: input.name, title, id }), ...templateKeepFiles()]
-    const gateway = new WriteGateway(root)
+    const gateway = this.#newGateway(root)
     await gateway.writeBatch(
       files.map((file): WriteOp => ({ path: file.path, content: file.content, expectVersion: 'absent' })),
       { origin: 'workbench', reason: 'scaffold' },
@@ -154,6 +156,36 @@ export class ProjectService {
     return [...gateway.log]
   }
 
+  // ─── 快照(T3)───────────────────────────────────────────────────────
+
+  /** 单文件快照历史(最新在前)。 */
+  async snapshotHistory(projectRef: string, relPath: string): Promise<SnapshotEntry[]> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    return fileHistory(entry.path, relPath)
+  }
+
+  /** 单文件两版本间 diff。 */
+  async snapshotDiff(projectRef: string, relPath: string, fromCommit: string, toCommit: string): Promise<string> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    return fileDiff(entry.path, relPath, fromCommit, toCommit)
+  }
+
+  /** 回滚一个文件到历史版本(经网关写 → 自动产生回滚快照)。 */
+  async snapshotRollback(projectRef: string, relPath: string, toCommit: string): Promise<WriteResult> {
+    const entry = await this.#resolve(projectRef)
+    const gateway = await this.#gatewayFor(projectRef)
+    const current = await gateway.read(relPath)
+    return rollbackFile(
+      entry.path,
+      relPath,
+      toCommit,
+      (ops, reason) => gateway.writeBatch(ops, reason),
+      current.version,
+    )
+  }
+
   /** 校验回路:对当前激活项目跑验证器(T1 假验证器;T4 接方言解析契约)。 */
   async validateActiveProject(): Promise<ValidationReport> {
     const active = await this.getActiveProject()
@@ -170,13 +202,23 @@ export class ProjectService {
 
   // ─── 内部 ────────────────────────────────────────────────────────────
 
+  /** 建网关并挂快照钩子(ADR-0004 挂载点;git 未初始化时钩子跳过)。 */
+  #newGateway(root: string): WriteGateway {
+    const gateway = new WriteGateway(root)
+    gateway.onBatchCommit(async ({ batchId, reason }) => {
+      if (!existsSync(join(root, '.git'))) return // scaffold 批:稍后 #initGit 建初始快照
+      await commitSnapshot(root, reason, batchId)
+    })
+    return gateway
+  }
+
   /** 按 id 或 name 解析项目,返回其网关(懒建)。 */
   async #gatewayFor(projectRef: string): Promise<WriteGateway> {
     const entry = await this.#resolve(projectRef)
     let gateway = this.#gateways.get(entry.id)
     if (gateway === undefined) {
       await this.#assertPresent(entry)
-      gateway = new WriteGateway(entry.path)
+      gateway = this.#newGateway(entry.path)
       this.#gateways.set(entry.id, gateway)
     }
     return gateway

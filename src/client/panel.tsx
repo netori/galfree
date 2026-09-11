@@ -4,19 +4,27 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import { GalfreeApi } from './api.ts'
-import type { StateView, TreeNode } from './api.ts'
+import type { SnapshotEntry, StateView, TreeNode } from './api.ts'
 
-function TreeView({ nodes }: { nodes: TreeNode[] }) {
+function TreeView({ nodes, onSelect, selected }: { nodes: TreeNode[]; onSelect?: (path: string) => void; selected?: string }) {
   return (
     <ul style={{ listStyle: 'none', margin: 0, paddingInlineStart: 0 }}>
       {nodes.map((node) => (
         <li key={node.path}>
-          <span style={{ opacity: node.dir ? 1 : 0.75, userSelect: 'none' }}>
-            {node.dir ? '▸ ' : ''}{node.name}
-          </span>
+          {!node.dir ? (
+            <button
+              type="button"
+              onClick={() => onSelect?.(node.path)}
+              style={{ background: 'none', border: 0, cursor: 'pointer', padding: 0, fontWeight: selected === node.path ? 700 : 400 }}
+            >
+              {node.name}
+            </button>
+          ) : (
+            <span style={{ opacity: 0.8, userSelect: 'none' }}>▸ {node.name}</span>
+          )}
           {node.dir && (node.children?.length ?? 0) > 0 ? (
             <div style={{ paddingInlineStart: 14 }}>
-              <TreeView nodes={node.children!} />
+              <TreeView nodes={node.children!} onSelect={onSelect} selected={selected} />
             </div>
           ) : null}
         </li>
@@ -31,6 +39,20 @@ export function WorkbenchPanel() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState({ name: '', title: '', projectsRoot: '' })
+  const [selectedFile, setSelectedFile] = useState<string | null>(null)
+  const [history, setHistory] = useState<SnapshotEntry[]>([])
+  const [diff, setDiff] = useState<string | null>(null)
+
+  const selectFile = useCallback(async (path: string) => {
+    setSelectedFile(path)
+    setDiff(null)
+    try {
+      setHistory(await api.snapshots(path))
+    } catch (e) {
+      setError(String(e))
+      setHistory([])
+    }
+  }, [api])
 
   const refresh = useCallback(async () => {
     try {
@@ -125,11 +147,36 @@ export function WorkbenchPanel() {
       ) : null}
 
       <section aria-label="文件树">
-        <div style={{ fontWeight: 600, marginBlockEnd: 4 }}>文件</div>
+        <div style={{ fontWeight: 600, marginBlockEnd: 4 }}>文件(点击看快照历史)</div>
         {active !== null && !active.missing && state !== null
-          ? <TreeView nodes={state.tree} />
+          ? <TreeView nodes={state.tree} onSelect={(p) => void selectFile(p)} selected={selectedFile ?? undefined} />
           : <div style={{ opacity: 0.6 }}>(无项目或目录缺失)</div>}
       </section>
+
+      {selectedFile !== null ? (
+        <section aria-label="快照历史" style={{ marginTop: 12 }}>
+          <div style={{ fontWeight: 600, marginBlockEnd: 4 }}>快照历史 · {selectedFile}</div>
+          {history.length === 0 ? <div style={{ opacity: 0.6 }}>(无历史)</div> : (
+            <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+              {history.map((entry) => (
+                <li key={entry.commit} style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                  <code style={{ opacity: 0.7 }}>{entry.commit.slice(0, 8)}</code>
+                  <span style={{ flex: 1 }}>{entry.subject}</span>
+                  <button type="button" onClick={() => {
+                    const idx = history.indexOf(entry)
+                    const prev = history[idx + 1]
+                    if (prev === undefined) return
+                    void api.snapshotDiff(selectedFile, prev.commit, entry.commit).then(setDiff).catch((e) => setError(String(e)))
+                  }}>diff</button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {diff !== null ? (
+            <pre style={{ background: 'rgba(127,127,127,0.08)', padding: 8, overflowX: 'auto', maxHeight: 320, whiteSpace: 'pre-wrap' }}>{diff}</pre>
+          ) : null}
+        </section>
+      ) : null}
     </div>
   )
 }

@@ -49,6 +49,14 @@ async function readJson<T>(response: Response): Promise<T> {
   return body as T
 }
 
+export interface SnapshotEntry {
+  path: string
+  commit: string
+  subject: string
+  author: string
+  at: string
+}
+
 export class GalfreeApi {
   async state(): Promise<StateView> {
     return readJson<StateView>(await fetch('/api/galfree/state'))
@@ -68,5 +76,16 @@ export class GalfreeApi {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id }),
     }))
+  }
+
+  async snapshots(relPath: string): Promise<SnapshotEntry[]> {
+    const body = await readJson<{ history: SnapshotEntry[] }>(await fetch(`/api/galfree/snapshots?path=${encodeURIComponent(relPath)}`))
+    return body.history
+  }
+
+  async snapshotDiff(relPath: string, from: string, to: string): Promise<string> {
+    const qs = new URLSearchParams({ path: relPath, from, to }).toString()
+    const body = await readJson<{ diff: string }>(await fetch(`/api/galfree/snapshots/diff?${qs}`))
+    return body.diff
   }
 }

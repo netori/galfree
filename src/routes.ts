@@ -124,6 +124,29 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
+  // 快照历史(最小历史浏览器的数据源,T3)。
+  if (method === 'GET' && path === '/snapshots') {
+    const rel = url.searchParams.get('path')
+    if (rel === null || rel === '') return writeJson(res, 400, { error: '需要 path 查询参数' })
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const history = await service.snapshotHistory(active.id, rel)
+    writeJson(res, 200, { history })
+    return
+  }
+
+  if (method === 'GET' && path === '/snapshots/diff') {
+    const rel = url.searchParams.get('path')
+    const from = url.searchParams.get('from')
+    const to = url.searchParams.get('to')
+    if (rel === null || from === null || to === null) return writeJson(res, 400, { error: '需要 path/from/to' })
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const diff = await service.snapshotDiff(active.id, rel, from, to)
+    writeJson(res, 200, { diff })
+    return
+  }
+
   // 变更推送(SSE):外部修改 → 网关观察 → 工作台无刷新即更新(T2;协议在 T7 定稿)。
   if (method === 'GET' && path === '/events') {
     const active = await service.getActiveProject()
