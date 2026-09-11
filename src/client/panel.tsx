@@ -48,6 +48,7 @@ export function WorkbenchPanel() {
   const [history, setHistory] = useState<SnapshotEntry[]>([])
   const [diff, setDiff] = useState<string | null>(null)
   const [progress, setProgress] = useState<ProgressView | null>(null)
+  const [playing, setPlaying] = useState(false)
 
   const selectFile = useCallback(async (path: string) => {
     setSelectedFile(path)
@@ -166,8 +167,21 @@ export function WorkbenchPanel() {
             <Chip label={`缺素材 ${progress.summary.missingSlots}`} tone={progress.summary.missingSlots ? 'warn' : 'ok'} />
             <Chip label={`待复审 ${progress.summary.awaitingReview}`} tone={progress.summary.awaitingReview ? 'warn' : 'ok'} />
             {progress.degraded ? <Chip label="含只读降级" tone="warn" /> : null}
+            {progress.playtest === null
+              ? <Chip label="试玩未跑" tone="warn" />
+              : <Chip label={progress.playtest.state === 'pass' ? '试玩:技术通过' : progress.playtest.state === 'fail' ? '试玩:有报错' : '试玩:已过期'} tone={progress.playtest.state === 'pass' ? 'ok' : 'bad'} />}
+            <button type="button" disabled={playing} onClick={() => {
+              setPlaying(true)
+              void api.playtest()
+                .then(() => refresh())
+                .catch((e) => setError(String(e)))
+                .finally(() => setPlaying(false))
+            }}>{playing ? '试玩运行中…' : '启动试玩'}</button>
           </div>
         )}
+        {progress?.playtest?.traceback != null ? (
+          <pre style={{ background: 'rgba(200,60,60,0.08)', padding: 8, overflowX: 'auto', maxHeight: 200, whiteSpace: 'pre-wrap' }}>{progress.playtest.traceback}</pre>
+        ) : null}
         {progress !== null && progress.scenes.length > 0 ? (
           <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
             {progress.scenes.map((scene) => (

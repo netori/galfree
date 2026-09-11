@@ -9,14 +9,6 @@ import type { ProvisionStatus } from '../sdk-provision.ts'
 
 const exec = promisify(execFile)
 
-/** SDK 启动器调用形态(平台):返回 argv。 */
-export function sdkLintArgs(sdkLauncher: string, projectDir: string): { command: string; args: string[] } {
-  const isWin = process.platform === 'win32'
-  if (isWin) return { command: sdkLauncher, args: [projectDir, 'lint'] }
-  // renpy.sh 是 bash 脚本;非 Windows 直接执行需要它可执行位。
-  return { command: sdkLauncher, args: [projectDir, 'lint'] }
-}
-
 export interface SdkValidatorOptions {
   /** 当前供给状态(含 sdkDir 与覆盖路径解析后的启动器)。 */
   resolveLauncher: () => Promise<string | null>

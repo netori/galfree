@@ -20,6 +20,7 @@ import { deriveGraph, parseRpy, type RpyFile } from './rpy/parse.ts'
 import type { BranchGraph } from './rpy/dialect.ts'
 import { computeProgress, sceneFingerprint, slotAssetPath, type ProgressSnapshot } from './progress.ts'
 import { readStamps, sceneTarget, slotTarget, stampsDocument, withStamp, type StampRecord } from './stamps.ts'
+import { contentFingerprint, launchPlaytest, playtestDocument, readPlaytest, PLAYTEST_FILE, type PlaytestPorts, type PlaytestRun } from './playtest.ts'
 import { createHash } from 'node:crypto'
 import { readFile as readFileNode } from 'node:fs/promises'
 import { WriteGateway, type ChangeEvent, type FileSnapshot, type WriteLogEntry, type WriteOp, type WriteResult } from './write-gateway.ts'
@@ -53,16 +54,20 @@ export interface ProjectServiceOptions {
   dataDir: string
   /** 注入验证器(T1 假验证器;T5 真 SDK 适配器实现同一契约)。 */
   validator?: FakeValidator
+  /** 试玩端口(T7;缺省 = SDK 未就绪的诚实失败)。 */
+  playtest?: PlaytestPorts
 }
 
 export class ProjectService {
   #registry: ProjectRegistry
   #validator: FakeValidator
+  #playtestPorts: PlaytestPorts
   #gateways = new Map<string, WriteGateway>()
 
   constructor(options: ProjectServiceOptions) {
     this.#registry = new ProjectRegistry(join(options.dataDir, 'registry.json'))
     this.#validator = options.validator ?? new FakeValidator()
+    this.#playtestPorts = options.playtest ?? { resolveLauncher: async () => null, spawn: async () => ({ code: 0, log: '' }) }
   }
 
   // ─── 注册表与模板新建(T1)────────────────────────────────────────────
@@ -215,11 +220,35 @@ export class ProjectService {
 
   // ─── 推导进度 + 审读戳(T6)───────────────────────────────────────────
 
-  /** 阶段板:纯推导(文件 + 解析 + 校验 + 戳),可全量重算、幂等、无手写通道。 */
+  /** 阶段板:纯推导(文件 + 解析 + 校验 + 戳 + 试玩事实),可全量重算、幂等、无手写通道。 */
   async progress(projectRef: string): Promise<ProgressSnapshot> {
     const graph = await this.branchGraph(projectRef)
     const entry = await this.#resolve(projectRef)
-    return computeProgress(entry.path, { scenes: graph.scenes, problems: graph.problems })
+    const ledger = await readPlaytest(entry.path)
+    return computeProgress(entry.path, {
+      scenes: graph.scenes,
+      problems: graph.problems,
+      playtest: { last: ledger?.last ?? null, currentFingerprint: contentFingerprint(graph) },
+    })
+  }
+
+  /**
+   * 一键试玩:钉版 SDK 启动当前项目、退出回传;运行事实经网关落 `.studio/playtest.json`
+   * 并进快照。技术通过是推导(退出码/日志),不是人盖的戳。
+   */
+  async playtestStart(projectRef: string): Promise<PlaytestRun> {
+    const graph = await this.branchGraph(projectRef)
+    const entry = await this.#resolve(projectRef)
+    const gateway = await this.#gatewayFor(projectRef)
+    const run = await launchPlaytest(this.#playtestPorts, entry.path, contentFingerprint(graph))
+    const ledger = (await readPlaytest(entry.path)) ?? { schemaVersion: 1 as const, last: null, history: [] }
+    const next = { schemaVersion: 1 as const, last: run, history: [...ledger.history, run] }
+    const current = await gateway.read(PLAYTEST_FILE)
+    await gateway.writeBatch(
+      [{ path: PLAYTEST_FILE, content: playtestDocument(next), expectVersion: current.version }],
+      { origin: 'workbench', reason: 'playtest' },
+    )
+    return run
   }
 
   /** 审读戳账本(历史记录,含失效者)。 */

@@ -13,6 +13,9 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createProjectService } from './service/project-service.ts'
 import { makeRoutes } from './routes.ts'
+import { SdkProvisioner } from './service/sdk-provision.ts'
+import { extractZip, httpsDownloader, platformLauncherName } from './service/sdk-real.ts'
+import { defaultLauncher, realSpawn } from './service/playtest.ts'
 
 /** 稳定的 cordis 插件名(与 cordis.patch.yml 的 insert id 对齐)。 */
 export const name = 'galfree'
@@ -25,7 +28,7 @@ export interface Config {
   enabled?: boolean
   /** 新建项目的默认父目录(空 = 每次显式传入)。 */
   defaultProjectsRoot?: string
-  /** 既有 Ren'Py SDK 路径覆盖(空 = 用钉版自动供给,T5 起生效)。 */
+  /** 既有 Ren'Py SDK 路径覆盖(空 = 用钉版自动供给)。 */
   sdkPath?: string
 }
 
@@ -59,10 +62,47 @@ export function apply(ctx: Context, config?: Config): void {
   const settingsScope = ctx.settings.register(CONFIG_NAMESPACE, GalfreeSettingsSchema, { base })
   const current = () => settingsScope.get()
 
-  const service = createProjectService({ dataDir: galfreeDataDir() })
+  const dataDir = galfreeDataDir()
+  const sdkDir = () => current().sdkPath !== '' ? current().sdkPath : join(dataDir, 'sdk')
+
+  // 钉版 SDK 供给(首次需要时下载;进度经 /sdk/status 可见)。
+  const provisioner = new SdkProvisioner(join(dataDir, 'sdk'), {
+    download: httpsDownloader,
+    extract: extractZip,
+    launcherName: platformLauncherName(),
+  })
+
+  const service = createProjectService({
+    dataDir,
+    playtest: {
+      resolveLauncher: async () => {
+        const dir = sdkDir()
+        // 覆盖路径直接用;钉版目录若未就绪则先供给(首次下载)。
+        if (current().sdkPath === '' && (await defaultLauncher(dir)) === null) {
+          const status = await provisioner.ensure().catch(() => null)
+          if (status === null || status.state !== 'ready') return null
+        }
+        return defaultLauncher(dir)
+      },
+      spawn: realSpawn,
+    },
+  })
+
   ctx.effect(
     () => {
-      const disposers = makeRoutes({ service, config: current }).map((route) => ctx.webServer.register(route))
+      const disposers = makeRoutes({
+        service,
+        config: current,
+        sdk: {
+          status: () => ({ requested: current().sdkPath !== '' ? 'override' : 'pinned', dir: sdkDir(), provision: provisioner.status }),
+          ensure: async () => {
+            try {
+              await provisioner.ensure()
+            } catch { /* 状态对象里如实呈现 failed + error */ }
+            return provisioner.status
+          },
+        },
+      }).map((route) => ctx.webServer.register(route))
       return () => {
         for (const dispose of disposers) dispose()
       }

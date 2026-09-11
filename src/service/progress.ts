@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { DialectProblem, SceneNode, Statement } from './rpy/dialect.ts'
+import type { PlaytestRun } from './playtest.ts'
 import { readStamps, sceneTarget, slotTarget } from './stamps.ts'
 
 export type StampState = 'none' | 'pending' | 'approved' | 'stale' | 'missing'
@@ -46,6 +47,19 @@ export interface ProgressSummary {
   /** 盖过戳但内容已变(待复审)的戳数(场景 + 槽)。 */
   awaitingReview: number
   degraded: number
+  /** 最近试玩技术不通过(0/1)。 */
+  playtestFail: number
+  /** 从未成功跑过试玩(0/1)。 */
+  playtestNotRun: number
+}
+
+export interface PlaytestView {
+  at: string
+  /** pass = 技术通过且内容未再变动;fail = 有 traceback/非零退出;stale = 跑过后内容又变了。 */
+  state: 'pass' | 'fail' | 'stale'
+  exitCode: number
+  technicalPass: boolean
+  traceback: string | null
 }
 
 export interface ProgressSnapshot {
@@ -53,6 +67,8 @@ export interface ProgressSnapshot {
   /** 顶层(非场景内)结构问题。 */
   problems: DialectProblem[]
   lint: { ok: boolean; errors: number; warnings: number }
+  /** 最近一次试玩事实的推导视图(无记录 = null)。 */
+  playtest: PlaytestView | null
   summary: ProgressSummary
   degraded: boolean
 }
@@ -96,6 +112,8 @@ export interface ProgressInputs {
   scenes: SceneNode[]
   /** 顶层结构问题(来自 parseRpy.problems)。 */
   problems: DialectProblem[]
+  /** 试玩事实(账本 last + 当前内容指纹);缺省视为未跑过。 */
+  playtest?: { last: PlaytestRun | null; currentFingerprint: string }
 }
 
 /** 纯推导:读磁盘(戳账本 + 素材文件指纹)+ 已解析结构 → 进度快照。 */
@@ -155,6 +173,19 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
   const awaitingReview = sceneProgress.filter((s) => s.stamp === 'stale').length
     + [...uniqueSlots.values()].filter((s) => s.stamp === 'stale').length
 
+  let playtest: PlaytestView | null = null
+  const last = inputs.playtest?.last ?? null
+  if (last !== null) {
+    const fresh = last.fingerprint === (inputs.playtest?.currentFingerprint ?? '')
+    playtest = {
+      at: last.at,
+      state: !fresh ? 'stale' : last.technicalPass ? 'pass' : 'fail',
+      exitCode: last.exitCode,
+      technicalPass: last.technicalPass,
+      traceback: last.traceback,
+    }
+  }
+
   const summary: ProgressSummary = {
     scenes: sceneProgress.length,
     missingDialogue: sceneProgress.filter((s) => s.missingDialogue).length,
@@ -162,12 +193,15 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
     lintErrors,
     awaitingReview,
     degraded: sceneProgress.filter((s) => s.readOnly).length,
+    playtestFail: playtest !== null && playtest.state === 'fail' ? 1 : 0,
+    playtestNotRun: playtest === null ? 1 : 0,
   }
 
   return {
     scenes: sceneProgress,
     problems: inputs.problems,
     lint: { ok: lintErrors === 0, errors: lintErrors, warnings: lintWarnings },
+    playtest,
     summary,
     degraded: summary.degraded > 0 || inputs.problems.length > 0,
   }

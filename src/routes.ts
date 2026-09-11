@@ -7,11 +7,17 @@ import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { GalfreeError } from './service/error.ts'
 import type { ProjectService } from './service/project-service.ts'
+import type { ProvisionStatus } from './service/sdk-provision.ts'
 
 export interface RouteDeps {
   service: ProjectService
   /** 解析后的插件设置(enabled/defaultProjectsRoot/sdkPath…)。 */
   config: () => { enabled: boolean; defaultProjectsRoot: string }
+  /** SDK 供给(T5;未装配时路由如实报告不可用)。 */
+  sdk?: {
+    status: () => { requested: 'override' | 'pinned'; dir: string; provision: ProvisionStatus }
+    ensure: () => Promise<ProvisionStatus>
+  }
 }
 
 export interface GalfreeRoute {
@@ -174,6 +180,28 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
+  // 一键试玩(T7):接缝同一控制器,无第二管线。
+  if (method === 'POST' && path === '/playtest') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const run = await service.playtestStart(active.id)
+    writeJson(res, 200, { run })
+    return
+  }
+
+  // SDK 供给状态 / 触发下载(T5:首次使用自动下载、进度可见)。
+  if (method === 'GET' && path === '/sdk') {
+    if (deps.sdk === undefined) return writeJson(res, 503, { error: 'SDK 供给未装配' })
+    writeJson(res, 200, deps.sdk.status())
+    return
+  }
+  if (method === 'POST' && path === '/sdk/ensure') {
+    if (deps.sdk === undefined) return writeJson(res, 503, { error: 'SDK 供给未装配' })
+    const status = await deps.sdk.ensure()
+    writeJson(res, 200, { state: status.state, error: status.error ?? null, progress: status.progress })
+    return
+  }
+
   // 变更推送(SSE):外部修改 → 网关观察 → 工作台无刷新即更新(T2;协议在 T7 定稿)。
   if (method === 'GET' && path === '/events') {
     const active = await service.getActiveProject()
@@ -222,9 +250,10 @@ export function makeRoutes(deps: RouteDeps): GalfreeRoute[] {
         await dispatch(deps, req, res)
       } catch (error) {
         if (error instanceof GalfreeError) {
-          const status = error.code === 'no-active-project' || error.code === 'unknown-project' ? 404
+          const status = error.code === 'no-active-project' || error.code === 'unknown-project' || error.code === 'unknown-scene' ? 404
             : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' ? 400
             : error.code === 'body-too-large' ? 413
+            : error.code === 'version-drift' || error.code === 'stamp-forbidden' || error.code === 'slot-not-filled' || error.code === 'sdk-not-ready' ? 409
             : 500
           writeJson(res, status, { error: error.message, code: error.code })
         } else {

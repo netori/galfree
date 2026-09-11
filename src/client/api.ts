@@ -79,7 +79,8 @@ export interface SceneProgressView {
 export interface ProgressView {
   scenes: SceneProgressView[]
   lint: { ok: boolean; errors: number; warnings: number }
-  summary: { scenes: number; missingDialogue: number; missingSlots: number; lintErrors: number; awaitingReview: number; degraded: number }
+  playtest: { at: string; state: 'pass' | 'fail' | 'stale'; exitCode: number; technicalPass: boolean; traceback: string | null } | null
+  summary: { scenes: number; missingDialogue: number; missingSlots: number; lintErrors: number; awaitingReview: number; degraded: number; playtestFail: number; playtestNotRun: number }
   degraded: boolean
 }
 
@@ -98,6 +99,11 @@ export class GalfreeApi {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ label }),
     }))
+  }
+
+  async playtest(): Promise<{ at: string; exitCode: number; technicalPass: boolean; traceback: string | null }> {
+    const body = await readJson<{ run: { at: string; exitCode: number; technicalPass: boolean; traceback: string | null } }>(await fetch('/api/galfree/playtest', { method: 'POST' }))
+    return body.run
   }
 
   async createProject(name: string, title?: string, projectsRoot?: string): Promise<void> {
