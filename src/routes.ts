@@ -75,12 +75,15 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
 const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['/state', ['GET']],
   ['/projects/create', ['POST']],
+  ['/projects/activate', ['POST']],
   ['/validate', ['GET']],
   ['/progress', ['GET']],
   ['/stamps/scene', ['POST']],
   ['/stamps/slot', ['POST']],
   ['/snapshots', ['GET']],
   ['/snapshots/diff', ['GET']],
+  ['/snapshots/rollback', ['POST']],
+  ['/files/content', ['GET']],
   ['/playtest', ['POST']],
   ['/sdk', ['GET']],
   ['/sdk/ensure', ['POST']],
@@ -164,8 +167,18 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
-  // 注册表数据模型 v1(单激活位);切换 UI 明确"后补"(spec R7/User Story 29),
-  // 因此不提供 activate 路由 —— 激活位随"新建即激活"移动。
+  // 切换激活项目。spec 原本把"切换 UI"划在 v1 之外(US29「切换 UI 后补」);
+  // 这个路由与面板切换器是**经发起人明确批准**解除该延迟的产物(见接缝契约)。
+  // 仍然只动注册表的激活位:项目内容一律走网关,这里不写任何项目文件。
+  if (method === 'POST' && path === '/projects/activate') {
+    const body = await readJsonBody(req)
+    const id = String(body.project ?? '')
+    if (id === '') throw new GalfreeError('unknown-project', '需要 project(id 或唯一 name)')
+    await service.setActive(id)
+    const project = await service.getActiveProject()
+    writeJson(res, 200, { project })
+    return
+  }
 
   if (method === 'GET' && path === '/validate') {
     const report = await service.validateActiveProject()
@@ -220,6 +233,36 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
     const diff = await service.snapshotDiff(active.id, rel, from, to)
     writeJson(res, 200, { diff })
+    return
+  }
+
+  // 回滚一个文件到历史版本。**回滚本身是一次写**,必须走网关 → 自动产生一条
+  // 回滚快照(接缝的 snapshotRollback 就是这么做的,路由只做参数搬运)。
+  if (method === 'POST' && path === '/snapshots/rollback') {
+    const body = await readJsonBody(req)
+    const rel = String(body.path ?? '')
+    const to = String(body.to ?? '')
+    if (rel === '' || to === '') throw new GalfreeError('bad-json', '需要 path 与 to(commit)')
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const result = await service.snapshotRollback(active.id, rel, to)
+    writeJson(res, 200, { result })
+    return
+  }
+
+  // 文件内容(只读预览)。读走网关口径(磁盘为真 + 当前版本戳),不经网关写。
+  if (method === 'GET' && path === '/files/content') {
+    const rel = url.searchParams.get('path')
+    if (rel === null || rel === '') return writeJson(res, 400, { error: '需要 path 查询参数' })
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const snapshot = await service.readProjectFile(active.id, rel)
+    writeJson(res, 200, {
+      path: rel,
+      content: snapshot.content,
+      version: snapshot.version,
+      bytes: Buffer.byteLength(snapshot.content, 'utf8'),
+    })
     return
   }
 

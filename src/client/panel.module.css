@@ -265,6 +265,103 @@ button.slotChip:disabled { opacity: 0.5; cursor: default; }
 .diffMeta { color: var(--gf-text-4); }
 .diffPlain { white-space: pre-wrap; word-break: break-word; }
 
+/* ─── 项目切换 ─────────────────────────────────────────────────────── */
+
+.switcher { position: relative; }
+.menu {
+  position: absolute;
+  inset-inline-end: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  min-width: 240px;
+  background: var(--dsw-alias-bg-layer-1, #fff);
+  border: 0.5px solid var(--gf-border-2);
+  border-radius: 10px;
+  padding: 4px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.menuItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.menuItem:hover { background: var(--gf-hover); }
+.menuItem:focus-visible { outline: 2px solid var(--gf-accent); outline-offset: -1px; }
+.menuItemActive { background: var(--gf-active); font-weight: 600; }
+.menuItemMain { flex: 1; min-width: 0; }
+.menuItemTitle { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menuItemPath { display: block; font-family: var(--gf-mono); font-size: 10.5px; color: var(--gf-text-4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menuSep { height: 0.5px; background: var(--gf-border); margin: 4px 2px; }
+
+/* ─── 文件预览 ─────────────────────────────────────────────────────── */
+
+.preview {
+  font-family: var(--gf-mono);
+  font-size: 11.5px;
+  line-height: 1.65;
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: rgba(128, 128, 128, 0.07);
+  max-height: 400px;
+  overflow: auto;
+  white-space: pre;
+  tab-size: 4;
+}
+.previewLine { display: flex; gap: 10px; }
+.previewNo {
+  flex: none;
+  width: 34px;
+  text-align: right;
+  color: var(--gf-text-4);
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+.previewText { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; }
+
+.tabs { display: inline-flex; background: var(--gf-hover); border-radius: 8px; padding: 2px; gap: 2px; }
+.tab {
+  padding: 4px 11px;
+  font-family: inherit;
+  font-size: 11.5px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--gf-text-2);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.tab:hover { color: var(--gf-text); }
+.tab:focus-visible { outline: 2px solid var(--gf-accent); outline-offset: -1px; }
+.tabActive { background: var(--gf-active); color: var(--gf-text); font-weight: 600; }
+
+.danger { color: var(--gf-danger); }
+.confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: rgba(209, 36, 47, 0.07);
+  color: var(--gf-danger);
+  margin-top: 6px;
+}
+
 /* ─── 提示与空态 ───────────────────────────────────────────────────── */
 
 .notice {

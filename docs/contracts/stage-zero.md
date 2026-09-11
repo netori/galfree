@@ -74,10 +74,21 @@ GALFree v1 的**唯一测试接缝** = Host 侧项目服务(`src/service/project
 
 | 方法 | 语义 |
 |---|---|
-| `progress(ref)` | 纯推导快照(无时间戳、幂等):场景视图 `{label,readOnly,missingDialogue,slots[],missingSlots[],stamp,lintErrors}` + `lint` + `playtest` + `summary` |
+| `progress(ref)` | 纯推导快照(无时间戳、幂等):场景视图 `{label,readOnly,missingDialogue,dialogueCount,slots[],missingSlots[],stamp,stampable,stampableBlockedBy?,lintErrors,marks[]}` + `lint` + `playtest` + `summary` |
 | `stampRecords(ref)` | 历史戳(含失效者) |
 | `stampScene(ref,label,{via})` | 人盖场景戳(记场景内容指纹);`via!=='human'` → `stamp-forbidden` |
 | `stampSlot(ref,slot,{via})` | 人盖槽戳;未填 → `slot-not-filled` |
+
+**场景视图里的派生便利字段**(均为推导,UI 只渲染、不复述规则):
+
+- `marks[] = {code,severity,label,count?,detail?}` —— 舞台板一行要显示的"这一场怎么了",
+  由 `deriveSceneMarks()` 按 `error → warn → info` 排序给出。`label` **不带计数**
+  (计数走 `count`),文案与严重度都由接缝定,agent 工具面与工作台读同一份。
+  code 取值:`lint-error` / `missing-slots` / `missing-dialogue` / `content-changed` /
+  `read-only-degraded` / `settled`(已定稿)/ `clear`(暂时无毛病但未盖戳)。
+- `slot.approvable` + `approvableBlockedBy` —— 这一槽**能不能**给人盖戳(与 `stampSlot`
+  的守卫同源:未填不可),UI 不再自己复述 `slot-not-filled` 这条规则。
+- `scene.stampable` + `stampableBlockedBy` —— 只读降级的场景不可盖戳(先改回子集内)。
 
 戳失效**判定是推导**:盖戳时存内容指纹(场景 = **原始文本块**哈希 —— 含被解析器
 跳过的子集外内容,防止"加一段怪代码但戳还绿"的旁路;槽 = 素材文件哈希),推导时对比
@@ -126,12 +137,20 @@ GALFree v1 的**唯一测试接缝** = Host 侧项目服务(`src/service/project
 
 - HTTP 路由族前缀 `/api/galfree`(仅回环;精确路径匹配):
   - `GET /state` → `{projects, activeId, tree, activeRoot, activeMissing, gatewayErrors[]}`
-  - `POST /projects/create` → 201(**新建即激活**;无 activate 路由 —— 切换 UI 明确"后补",见 spec User Story 29)
+  - `POST /projects/create` → 201(**新建即激活**)
+  - `POST /projects/activate` → `{project}` —— **环节零之后的追加例外**:环节零当时
+    无 activate 路由(切换 UI 明确"后补",见 spec User Story 29 / #9「切换 UI 不做」),
+    此处由**发起人明确批准**解除该延迟。只动注册表激活位,不写任何项目文件
   - `GET /progress` → 推导快照;`POST /stamps/scene|slot`(**仅人**经由工作台触发;agent 工具面永远不接此端口)
   - `POST /playtest` → `{run}`;`GET /sdk` → `{requested,dir,launcherReady,version,mismatch,provision}`、`POST /sdk/ensure` → 触发下载(首次使用进度可见)
   - `GET /snapshots?path=` / `GET /snapshots/diff?path=&from=&to=`
+  - `POST /snapshots/rollback` → `{result}`(`{path,to}`)—— 回滚是**写**:经接缝的
+    `snapshotRollback` 走网关落盘,并自动产生一条回滚快照(历史不改写)
+  - `GET /files/content?path=` → `{path,content,version,bytes}` —— 只读预览;读走网关口径
+    (磁盘为真 + 当前版本戳),不产生写
   - `GET /validate` → `ValidationReport`
-  - 错误响应 `{error, code}` + 状态码:漂移/越权/缺版本戳/未就绪 = 409
+  - 错误响应 `{error, code}` + 状态码:漂移/越权/缺版本戳/未就绪 = 409;
+    目标不存在(含项目目录被挪走)= 404;请求体不合法 = 400;路径存在但方法不对 = 405 + `Allow`
 - `GET /events`(**SSE**):仅推 `{type:'external-change'}`(外部写观察,100ms 合并;
   网关自写不推 —— 写窗口(1.5s TTL)内该路径的监听事件按自身写噪声抑制,
   Windows 截断写的中间态不可信,窗口内的真实外部改动由 8s 轮询兜底)。
@@ -145,3 +164,17 @@ GALFree v1 的**唯一测试接缝** = Host 侧项目服务(`src/service/project
 - 真 git + 临时目录参与断言;图像上游用假 HTTP;校验快带用假验证器。
 - 慢集成带 = `*.slow.test.ts`(`npm run test:slow`):真钉版 SDK lint/compile 冒烟;
   CI 默认跳过,发版前必跑。GUI 启动试玩本身由人经工作台验收(非自动化面)。
+
+### 记录在案的一处例外:路由适配层契约测试(环节零之后追加)
+
+`src/service/routes.slow.test.ts` 用真 HTTP 驱动 `makeRoutes`,断言的是**薄适配器
+自己的对外行为**:状态码映射、方法守卫、回环 Host 守卫、SSE 帧形状,以及"工作台
+实际调用的每个端点都存在"。它**不是**第二个接缝:
+
+- 断言面不碰任何项目逻辑(项目逻辑仍只经 `ProjectService` 断言,见其余 seam 测试);
+- 它住在**慢带**,快集成带保持 100% 符合上面的接缝纪律;
+- 例外的理由已被现实证明:这一层在环节零期间没人走过,于是"坏 JSON → 500"
+  与"项目目录消失 → 500"两个错误映射静默存活到了交付之后。
+
+若将来要把适配层断言收回到 seam(例如改成只断言接缝抛出的错误码映射),删掉该
+文件即可,接缝纪律的其他部分不受影响。

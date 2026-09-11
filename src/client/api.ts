@@ -64,6 +64,18 @@ export interface SlotProgressView {
   filled: boolean
   fingerprint: string
   stamp: string
+  /** 人能否盖戳 —— 由接缝判定,UI 不复述规则。 */
+  approvable: boolean
+  approvableBlockedBy?: string
+}
+
+/** 舞台上那一行要显示的派生事实(由推导引擎给出,UI 只渲染)。 */
+export interface SceneMarkView {
+  code: string
+  severity: 'info' | 'warn' | 'error'
+  label: string
+  count?: number
+  detail?: string
 }
 
 export interface SceneProgressView {
@@ -76,7 +88,10 @@ export interface SceneProgressView {
   slots: SlotProgressView[]
   missingSlots: string[]
   stamp: string
+  stampable: boolean
+  stampableBlockedBy?: string
   lintErrors: number
+  marks: SceneMarkView[]
 }
 
 /** 方言子集外的结构问题(如实上板,不吞)。 */
@@ -134,6 +149,32 @@ export class GalfreeApi {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name, title, projectsRoot }),
+    }))
+  }
+
+  /**
+   * 切换激活项目。spec 原把切换 UI 划在 v1 外(US29「切换 UI 后补」);
+   * 本入口经发起人明确批准解除该延迟,只动注册表激活位,不写任何项目文件。
+   */
+  async activateProject(project: string): Promise<void> {
+    await readJson<unknown>(await fetch('/api/galfree/projects/activate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ project }),
+    }))
+  }
+
+  /** 文件当前内容(只读预览;读走网关口径 = 磁盘为真)。 */
+  async fileContent(path: string): Promise<{ path: string; content: string; version: string; bytes: number }> {
+    return readJson(await fetch(`/api/galfree/files/content?path=${encodeURIComponent(path)}`))
+  }
+
+  /** 回滚一个文件到历史版本(本身是一次写,走网关 → 自动产生回滚快照)。 */
+  async rollbackFile(path: string, to: string): Promise<void> {
+    await readJson<unknown>(await fetch('/api/galfree/snapshots/rollback', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path, to }),
     }))
   }
 

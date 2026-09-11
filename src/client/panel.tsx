@@ -1,22 +1,24 @@
 /**
- * GALFree 工作台面板 —— 制作现场的控制台。
+ * GALFree 工作台面板 —— 制作现场的控制台(装配层)。
  *
- * 正确性标准仍是接缝契约:这里只渲染 /api/galfree 吐出的状态,不自己判断进度
- * (进度是推导的;ADR-0008)。本文件负责的是"把推导结果讲清楚":
- *   · 舞台板 —— 场景是舞台单元,一眼看出哪一幕缺东西、哪一幕的戳过期了
- *   · 印章   —— 审读戳的视觉形态:**人**留下的印(agent 无权,接缝层已守)
- *   · 素材槽 —— 它就在场景行上,填没填、盖没盖,不用展开就知道
- *   · 快照   —— 每个写批一条 commit,diff 内联在历史下方
+ * 这里只做三件事:拉接缝状态、把状态分发给各卡、把人的动作送回接缝。
+ * 判断在哪:
+ *   · 进度/标记/能不能盖戳 —— 推导引擎(src/service/progress.ts)
+ *   · 写与回滚             —— 网关(src/service/write-gateway.ts)
+ *   · 面板职责             —— 只渲染(ADR-0002:独占逻辑零 UI 化)
+ * 视觉语言(舞台 / 印章 / 素材槽)见 panel.module.css 顶部注释。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { GalfreeApi, GalfreeApiError } from './api.ts'
-import type {
-  ProgressView, SceneProgressView, SdkView, SnapshotEntry, StateView, TreeNode,
-} from './api.ts'
-import { Chip, DiffView, Notice, Seal, Spinner, relativeTime } from './ui.tsx'
+import type { ProgressView, SdkView, StateView, StampTarget } from './types.ts'
+import { stampKey } from './types.ts'
+import { Chip, Notice, Spinner, relativeTime } from './ui.tsx'
+import { StageBoard } from './stage-board.tsx'
+import { FileInspector } from './file-inspector.tsx'
+import { ProjectSwitcher } from './project-switcher.tsx'
+import { SdkCard } from './sdk-card.tsx'
 import s from './panel.module.css'
 
-/** 一次提示:错误与警告都进同一个通道,顶部一条一条列出来。 */
 interface NoticeItem {
   id: number
   tone: 'bad' | 'warn'
@@ -25,7 +27,7 @@ interface NoticeItem {
 
 function describeError(error: unknown): string {
   if (error instanceof GalfreeApiError) return error.message
-  return String(error)
+  return error instanceof Error ? error.message : String(error)
 }
 
 export function WorkbenchPanel() {
@@ -37,21 +39,12 @@ export function WorkbenchPanel() {
   const [loading, setLoading] = useState(true)
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null)
 
-  // 新建项目表单
   const [showCreate, setShowCreate] = useState(false)
   const [draft, setDraft] = useState({ name: '', title: '', projectsRoot: '' })
   const [creating, setCreating] = useState(false)
+  const [switching, setSwitching] = useState(false)
 
-  // 文件树
-  const [filter, setFilter] = useState('')
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
-  const [selectedFile, setSelectedFile] = useState<string | null>(null)
-  const [history, setHistory] = useState<SnapshotEntry[]>([])
-  const [diff, setDiff] = useState<string | null>(null)
-  const [diffLabel, setDiffLabel] = useState<string>('')
-
-  // 动作中的目标(label / slot),用于局部 loading
-  const [stamping, setStamping] = useState<string | null>(null)
+  const [busyKey, setBusyKey] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
   const [ensuring, setEnsuring] = useState(false)
 
@@ -59,7 +52,7 @@ export function WorkbenchPanel() {
   const pushNotice = useCallback((tone: 'bad' | 'warn', text: string) => {
     noticeSeq.current += 1
     const id = noticeSeq.current
-    setNotices((current) => (current.some((n) => n.text === text && n.tone === tone) ? current : [...current, { id, tone, text }]))
+    setNotices((current) => (current.some((n) => n.text === text) ? current : [...current, { id, tone, text }]))
   }, [])
 
   const refresh = useCallback(async (options?: { quiet?: boolean }) => {
@@ -72,7 +65,7 @@ export function WorkbenchPanel() {
         try {
           setProgress(await api.progress())
         } catch (error) {
-          // 目录在两次请求之间被挪走是正常竞态:如实降级,不当成故障刷屏。
+          // 目录在两次请求之间被挪走是正常竞态:如实降级,不当故障刷屏。
           setProgress(null)
           if (!options?.quiet) pushNotice('warn', `进度读不到:${describeError(error)}`)
         }
@@ -93,7 +86,7 @@ export function WorkbenchPanel() {
     }
   }, [api])
 
-  // 首屏 + 激活项目变化:重取;SSE 推送优先,8s 轮询仅兜底(页面隐藏时暂停)。
+  // 首屏 + 激活项目变化:重取。SSE 推送优先,8s 轮询兜底(页面隐藏时暂停)。
   useEffect(() => {
     void refresh()
     void loadSdk()
@@ -117,24 +110,9 @@ export function WorkbenchPanel() {
   // 试玩进行中:进度是推导的,跑完要重新读一次(能推就推,不靠人点刷新)。
   useEffect(() => {
     if (!playing) return
-    const timer = window.setInterval(() => {
-      void refresh({ quiet: true })
-      void loadSdk()
-    }, 2500)
+    const timer = window.setInterval(() => void refresh({ quiet: true }), 2500)
     return () => window.clearInterval(timer)
-  }, [playing, refresh, loadSdk])
-
-  const selectFile = useCallback(async (path: string) => {
-    setSelectedFile(path)
-    setDiff(null)
-    setDiffLabel('')
-    try {
-      setHistory(await api.snapshots(path))
-    } catch (error) {
-      setHistory([])
-      pushNotice('bad', `快照历史读不到:${describeError(error)}`)
-    }
-  }, [api, pushNotice])
+  }, [playing, refresh])
 
   const create = async (): Promise<void> => {
     setCreating(true)
@@ -150,27 +128,29 @@ export function WorkbenchPanel() {
     }
   }
 
-  const stampScene = async (label: string): Promise<void> => {
-    setStamping(`scene:${label}`)
+  const activate = async (id: string): Promise<void> => {
+    setSwitching(true)
     try {
-      await api.stampScene(label)
+      await api.activateProject(id)
       await refresh()
     } catch (error) {
-      pushNotice('bad', `盖戳失败(${label}):${describeError(error)}`)
+      pushNotice('bad', `切换失败:${describeError(error)}`)
     } finally {
-      setStamping(null)
+      setSwitching(false)
     }
   }
 
-  const stampSlot = async (slot: string): Promise<void> => {
-    setStamping(`slot:${slot}`)
+  const stamp = async (target: StampTarget): Promise<void> => {
+    const key = stampKey(target)
+    setBusyKey(key)
     try {
-      await api.stampSlot(slot)
+      if (target.kind === 'scene') await api.stampScene(target.label)
+      else await api.stampSlot(target.slot)
       await refresh()
     } catch (error) {
-      pushNotice('bad', `盖戳失败(${slot}):${describeError(error)}`)
+      pushNotice('bad', `盖戳失败(${target.kind === 'scene' ? target.label : target.slot}):${describeError(error)}`)
     } finally {
-      setStamping(null)
+      setBusyKey(null)
     }
   }
 
@@ -200,20 +180,8 @@ export function WorkbenchPanel() {
   }
 
   const projects = state?.projects ?? []
-  const active = projects.find((p) => p.id === state?.activeId) ?? null
-  const visibleTree = useMemo(() => filterTree(state?.tree ?? [], filter.trim().toLowerCase()), [state?.tree, filter])
-  const dirPaths = useMemo(() => collectDirs(state?.tree ?? []), [state?.tree])
-  const allExpanded = dirPaths.length > 0 && dirPaths.every((path) => expanded.has(path))
-  const sdkBusy = sdk !== null && (sdk.provision.state === 'downloading' || sdk.provision.state === 'extracting')
-
-  const toggleDir = (path: string): void => {
-    setExpanded((current) => {
-      const next = new Set(current)
-      if (next.has(path)) next.delete(path)
-      else next.add(path)
-      return next
-    })
-  }
+  const active = projects.find((project) => project.id === state?.activeId) ?? null
+  const hasProject = active !== null && !active.missing
 
   return (
     <div className={s.panel}>
@@ -234,17 +202,17 @@ export function WorkbenchPanel() {
             )}
           </div>
           <div className={s.headerAside}>
-            {projects.length > 0 ? <Chip tone="quiet" num={projects.length}>项目</Chip> : null}
+            <ProjectSwitcher projects={projects} activeId={state?.activeId ?? null} switching={switching} onActivate={(id) => void activate(id)} />
             <button
               type="button"
               className={s.button}
-              onClick={() => { void refresh() }}
+              onClick={() => void refresh()}
               disabled={loading}
               title={refreshedAt === null ? '重新读取状态' : `上次读取 ${refreshedAt.toLocaleTimeString()}`}
             >
               {loading ? <Spinner /> : '刷新'}
             </button>
-            <button type="button" className={`${s.button} ${s.primary}`} onClick={() => setShowCreate((v) => !v)} aria-expanded={showCreate}>
+            <button type="button" className={`${s.button} ${s.primary}`} onClick={() => setShowCreate((value) => !value)} aria-expanded={showCreate}>
               {showCreate ? '收起' : '新建项目'}
             </button>
           </div>
@@ -287,7 +255,7 @@ export function WorkbenchPanel() {
                   <span className={s.fieldLabel}>父目录 · 留空用默认设置</span>
                   <input
                     className={s.input}
-                    placeholder="D:\\galgame"
+                    placeholder="D:\galgame"
                     value={draft.projectsRoot}
                     onChange={(e) => setDraft({ ...draft, projectsRoot: e.target.value })}
                   />
@@ -308,12 +276,11 @@ export function WorkbenchPanel() {
 
         <StageBoard
           progress={progress}
-          busyLabel={stamping}
+          busyKey={busyKey}
           playing={playing}
-          onStampScene={(label) => void stampScene(label)}
-          onStampSlot={(slot) => void stampSlot(slot)}
+          onStamp={(target) => void stamp(target)}
           onPlaytest={() => void runPlaytest()}
-          hasProject={active !== null && !active.missing}
+          hasProject={hasProject}
         />
 
         {state !== null && state.gatewayErrors.length > 0 ? (
@@ -334,495 +301,15 @@ export function WorkbenchPanel() {
           </section>
         ) : null}
 
-        <FileTree
-          tree={visibleTree}
-          filter={filter}
-          onFilter={setFilter}
-          selected={selectedFile}
-          onSelect={(path) => void selectFile(path)}
-          expanded={expanded}
-          onToggleDir={toggleDir}
-          allExpanded={allExpanded}
-          onToggleAll={() => setExpanded(allExpanded ? new Set() : new Set(dirPaths))}
-          hasProject={active !== null && !active.missing}
+        <FileInspector
+          tree={state?.tree ?? []}
+          api={api}
+          hasProject={hasProject}
+          onNotice={pushNotice}
         />
 
-        {selectedFile !== null ? (
-          <SnapshotPanel
-            path={selectedFile}
-            history={history}
-            diff={diff}
-            diffLabel={diffLabel}
-            onDiff={(entry, previous) => {
-              setDiffLabel(`${previous.commit.slice(0, 8)} → ${entry.commit.slice(0, 8)}`)
-              void api.snapshotDiff(selectedFile, previous.commit, entry.commit)
-                .then(setDiff)
-                .catch((error) => pushNotice('bad', `diff 读不到:${describeError(error)}`))
-            }}
-            onClose={() => { setSelectedFile(null); setHistory([]); setDiff(null) }}
-          />
-        ) : null}
-
-        <SdkCard sdk={sdk} busy={sdkBusy} ensuring={ensuring} onEnsure={() => void ensureSdk()} />
+        <SdkCard sdk={sdk} ensuring={ensuring} onEnsure={() => void ensureSdk()} />
       </div>
     </div>
-  )
-}
-
-/* ─── 舞台板 ─────────────────────────────────────────────────────────── */
-
-function sceneMarks(scene: SceneProgressView): Array<{ tone: 'ok' | 'warn' | 'bad' | 'quiet'; label: string; title: string }> {
-  const marks: Array<{ tone: 'ok' | 'warn' | 'bad' | 'quiet'; label: string; title: string }> = []
-  if (scene.readOnly) marks.push({ tone: 'quiet', label: '只读降级', title: '这一场用了方言子集外的语法,结构只按能解析的部分算' })
-  if (scene.missingDialogue) marks.push({ tone: 'warn', label: '缺对白', title: '这一场没有任何对白行' })
-  if (scene.lintErrors > 0) marks.push({ tone: 'bad', label: `lint ${scene.lintErrors}`, title: `${scene.lintErrors} 个 error 级问题落在这一场` })
-  if (scene.slots.length > 0 && scene.missingSlots.length === 0) marks.push({ tone: 'ok', label: `素材 ${scene.slots.length} 齐`, title: '本场引用的素材槽都已有文件' })
-  if (scene.missingSlots.length > 0) marks.push({ tone: 'warn', label: `缺素材 ${scene.missingSlots.length}`, title: scene.missingSlots.join('、') })
-  if (marks.length === 0) marks.push({ tone: 'ok', label: '结构完整', title: '对白、素材、lint 都齐' })
-  return marks
-}
-
-function StageBoard({ progress, busyLabel, playing, onStampScene, onStampSlot, onPlaytest, hasProject }: {
-  progress: ProgressView | null
-  busyLabel: string | null
-  playing: boolean
-  onStampScene: (label: string) => void
-  onStampSlot: (slot: string) => void
-  onPlaytest: () => void
-  hasProject: boolean
-}) {
-  const summary = progress?.summary ?? null
-  const [openScene, setOpenScene] = useState<string | null>(null)
-
-  return (
-    <section className={s.card} aria-label="舞台板">
-      <div className={s.cardHead}>
-        <span className={s.cardTitle}>舞台板</span>
-        <span className={s.cardCount}>
-          {summary === null ? '推导进度' : `${summary.scenes} 场 · 推导自 .rpy + 校验 + 戳 + 试玩`}
-        </span>
-        <span className={s.cardOps}>
-          {!hasProject ? (
-            <span className={s.cardCount}>先建一个项目</span>
-          ) : (
-            <>
-              {progress !== null ? (
-                <Chip tone={progress.lint.ok ? 'ok' : 'bad'} dot title="方言子集结构校验 + SDK lint">
-                  {progress.lint.ok ? 'lint 通过' : `lint ${progress.lint.errors} 错`}
-                </Chip>
-              ) : null}
-              {progress !== null ? (
-                <Chip
-                  tone={progress.playtest === null ? 'warn' : progress.playtest.state === 'pass' ? 'ok' : 'bad'}
-                  dot
-                  title="试玩 = 用钉版 SDK 真跑一次;技术通过是推导,不是人盖的戳"
-                >
-                  {progress.playtest === null ? '试玩未跑'
-                    : progress.playtest.state === 'pass' ? `技术通过 · ${relativeTime(progress.playtest.at)}`
-                    : progress.playtest.state === 'fail' ? `有报错 · 退出码 ${progress.playtest.exitCode}`
-                    : `已过期 · ${relativeTime(progress.playtest.at)}`}
-                </Chip>
-              ) : null}
-              <button type="button" className={s.button} disabled={playing} onClick={onPlaytest}
-                title="用钉版 SDK 启动本项目;SDK 未就绪时先下载">
-                {playing ? <><Spinner /> 运行中…</> : '启动试玩'}
-              </button>
-            </>
-          )}
-        </span>
-      </div>
-
-      <div className={s.cardBody}>
-        {progress === null ? (
-          <div className={s.empty}>
-            <div className={s.emptyTitle}>{hasProject ? '进度读不到' : '还没有可推导的项目'}</div>
-            <div className={s.emptyHint}>{hasProject ? '稍后刷新重试;若一直如此看下面的提示条。' : '新建或激活一个项目后,这里会列出每一场戏的状态。'}</div>
-          </div>
-        ) : (
-          <>
-            {summary !== null ? (
-              <div className={s.chips} style={{ marginBottom: 10 }}>
-                <Chip tone={summary.missingDialogue === 0 ? 'ok' : 'warn'} num={summary.missingDialogue} dot>缺对白</Chip>
-                <Chip tone={summary.missingSlots === 0 ? 'ok' : 'warn'} num={summary.missingSlots} dot>缺素材</Chip>
-                <Chip tone={summary.awaitingReview === 0 ? 'ok' : 'warn'} num={summary.awaitingReview} dot title="盖过戳但内容又变了 —— 需要人重新审读">待复审</Chip>
-                <Chip tone={summary.degraded === 0 ? 'ok' : 'warn'} num={summary.degraded} dot title="用了方言子集外语法的场景数">只读降级</Chip>
-              </div>
-            ) : null}
-
-            {progress.playtest?.traceback != null ? (
-              <pre className={s.traceback}>{progress.playtest.traceback}</pre>
-            ) : null}
-
-            {progress.scenes.length === 0 ? (
-              <div className={s.empty}>
-                <div className={s.emptyTitle}>脚本里还没有 label</div>
-                <div className={s.emptyHint}>舞台板按 label 分幕;让 agent 生成第一场戏,或自己写进 game/script.rpy。</div>
-              </div>
-            ) : (
-              <div>
-                {progress.scenes.map((scene) => {
-                  const expandedScene = openScene === scene.label
-                  const stampBusy = busyLabel === `scene:${scene.label}`
-                  return (
-                    <div key={`${scene.file}:${scene.label}`}>
-                      <div className={s.sceneRow}>
-                        <button
-                          type="button"
-                          className={`${s.button} ${s.ghost} ${s.tiny}`}
-                          aria-expanded={expandedScene}
-                          onClick={() => setOpenScene(expandedScene ? null : scene.label)}
-                        >
-                          {expandedScene ? '−' : '+'}
-                        </button>
-                        <span className={s.sceneLabel} title={scene.label}>{scene.label}</span>
-                        <span className={s.sceneWhere} title={`${scene.file}:${scene.line}`}>{scene.file}:{scene.line}</span>
-                        <span className={s.sceneMarks}>
-                          {sceneMarks(scene).map((mark) => (
-                            <Chip key={mark.label} tone={mark.tone} title={mark.title}>{mark.label}</Chip>
-                          ))}
-                        </span>
-                        <span className={s.sceneStamp}>
-                          {scene.stamp === 'approved' ? (
-                            <Seal state="approved" />
-                          ) : scene.readOnly ? (
-                            <Chip tone="quiet" title="只读降级:子集外语法,先改回子集内再谈定稿">不可盖戳</Chip>
-                          ) : (
-                            <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                              <Seal state={scene.stamp === 'stale' ? 'stale' : 'pending'} />
-                              <button type="button" className={`${s.button} ${s.tiny}`} disabled={stampBusy}
-                                onClick={() => onStampScene(scene.label)}
-                                title={scene.stamp === 'stale' ? '内容已变,重新认可这一场' : '以人身份认可这一场(agent 无权盖)'}>
-                                {stampBusy ? <Spinner /> : scene.stamp === 'stale' ? '重新盖戳' : '盖审读戳'}
-                              </button>
-                            </span>
-                          )}
-                        </span>
-                      </div>
-                      {expandedScene ? (
-                        <div className={s.sceneDetail}>
-                          <div className={s.chips}>
-                            {scene.slots.length === 0
-                              ? <span className={s.emptyHint}>这一场没有引用任何素材槽(没有 scene/show 语句)。</span>
-                              : scene.slots.map((slot) => {
-                                const slotBusy = busyLabel === `slot:${slot.slot}`
-                                const sealable = slot.filled && slot.stamp !== 'approved'
-                                const sealGlyph = slot.stamp === 'approved'
-                                  ? <span className={s.slotSealGlyph} title="人已认可这张素材">印</span>
-                                  : null
-                                if (!sealable) {
-                                  return (
-                                    <span
-                                      key={slot.slot}
-                                      className={[s.slotChip, slot.filled ? s.slotFilled : s.slotMissing].join(' ')}
-                                      title={`${slot.assetPath}${slot.filled ? (slot.stamp === 'approved' ? ' · 已认可' : '') : ' · 文件还没生成'}`}
-                                    >
-                                      <span className={s.slotText}>{slot.slot}</span>
-                                      {sealGlyph}
-                                    </span>
-                                  )
-                                }
-                                return (
-                                  <button
-                                    key={slot.slot}
-                                    type="button"
-                                    className={[s.slotChip, s.slotFilled].join(' ')}
-                                    disabled={slotBusy}
-                                    onClick={() => onStampSlot(slot.slot)}
-                                    title={`点一下 = 以人身份认可这张素材 · ${slot.assetPath}${slot.stamp === 'stale' ? '(内容已变,需重新认可)' : ''}`}
-                                  >
-                                    <span className={s.slotText}>{slot.slot}</span>
-                                    {slotBusy ? <Spinner /> : <span className={s.slotSealGlyph}>印</span>}
-                                  </button>
-                                )
-                              })}
-                          </div>
-                          <div className={s.chips} style={{ marginTop: 8 }}>
-                            <Chip tone="quiet" num={scene.dialogueCount}>对白行</Chip>
-                            {scene.stamp === 'stale' ? <Chip tone="warn">盖过戳,内容已变</Chip> : null}
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-
-            {progress.problems.length > 0 ? (
-              <details style={{ marginTop: 12 }}>
-                <summary style={{ cursor: 'pointer', fontSize: 12.5, color: 'var(--gf-text-2)' }}>
-                  结构问题 {progress.problems.filter((p) => p.severity === 'error').length} 错 ·{' '}
-                  {progress.problems.filter((p) => p.severity === 'warning').length} 警告
-                </summary>
-                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  {progress.problems.map((problem, i) => (
-                    <div key={i} style={{ fontSize: 12 }}>
-                      <Chip tone={problem.severity === 'error' ? 'bad' : 'warn'}>{problem.code}</Chip>{' '}
-                      <span style={{ color: 'var(--gf-text-2)' }}>
-                        {problem.file}{problem.line === undefined ? '' : `:${problem.line}`} · {problem.message}
-                      </span>
-                      {problem.snippet === undefined ? null : (
-                        <div className={s.rootPath} style={{ marginTop: 2 }}>{problem.snippet}</div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </details>
-            ) : null}
-          </>
-        )}
-      </div>
-    </section>
-  )
-}
-
-/* ─── 文件树 ─────────────────────────────────────────────────────────── */
-
-function filterTree(nodes: TreeNode[], query: string): TreeNode[] {
-  if (query === '') return nodes
-  const walk = (list: TreeNode[]): TreeNode[] => {
-    const out: TreeNode[] = []
-    for (const node of list) {
-      const self = node.name.toLowerCase().includes(query) || node.path.toLowerCase().includes(query)
-      if (node.dir) {
-        const children = walk(node.children ?? [])
-        if (self || children.length > 0) out.push({ ...node, children })
-      } else if (self) {
-        out.push(node)
-      }
-    }
-    return out
-  }
-  return walk(nodes)
-}
-
-function collectDirs(nodes: TreeNode[], into: string[] = []): string[] {
-  for (const node of nodes) {
-    if (node.dir) {
-      into.push(node.path)
-      collectDirs(node.children ?? [], into)
-    }
-  }
-  return into
-}
-
-function FileTree({ tree, filter, onFilter, selected, onSelect, expanded, onToggleDir, allExpanded, onToggleAll, hasProject }: {
-  tree: TreeNode[]
-  filter: string
-  onFilter: (value: string) => void
-  selected: string | null
-  onSelect: (path: string) => void
-  expanded: Set<string>
-  onToggleDir: (path: string) => void
-  allExpanded: boolean
-  onToggleAll: () => void
-  hasProject: boolean
-}) {
-  const filtering = filter.trim() !== ''
-  return (
-    <section className={s.card} aria-label="文件">
-      <div className={s.cardHead}>
-        <span className={s.cardTitle}>文件</span>
-        <span className={s.cardCount}>点文件名看快照历史与 diff · 点目录展开</span>
-        <span className={s.cardOps}>
-          <input
-            className={s.input}
-            style={{ width: 150, padding: '5px 10px', fontSize: 12 }}
-            placeholder="筛选…"
-            value={filter}
-            onChange={(e) => onFilter(e.target.value)}
-            aria-label="筛选文件"
-          />
-          <button type="button" className={`${s.button} ${s.ghost} ${s.tiny}`} onClick={onToggleAll} disabled={tree.length === 0}>
-            {allExpanded ? '全部收起' : '全部展开'}
-          </button>
-        </span>
-      </div>
-      <div className={s.cardBody}>
-        {!hasProject ? (
-          <div className={s.empty}>没有激活项目,或项目目录已不在磁盘上。</div>
-        ) : tree.length === 0 ? (
-          <div className={s.empty}>
-            <div className={s.emptyTitle}>{filtering ? '没有匹配的文件' : '项目目录是空的'}</div>
-            <div className={s.emptyHint}>{filtering ? '换个关键词,或清空筛选。' : '模板至少应该含有 game/script.rpy。'}</div>
-          </div>
-        ) : (
-          <div className={s.tree}>
-            <TreeNodes
-              nodes={tree}
-              depth={0}
-              selected={selected}
-              onSelect={onSelect}
-              expanded={expanded}
-              onToggleDir={onToggleDir}
-              forceOpen={filtering}
-            />
-          </div>
-        )}
-      </div>
-    </section>
-  )
-}
-
-function TreeNodes({ nodes, depth, selected, onSelect, expanded, onToggleDir, forceOpen }: {
-  nodes: TreeNode[]
-  depth: number
-  selected: string | null
-  onSelect: (path: string) => void
-  expanded: Set<string>
-  onToggleDir: (path: string) => void
-  forceOpen: boolean
-}) {
-  return (
-    <>
-      {nodes.map((node) => {
-        const open = forceOpen || expanded.has(node.path)
-        const hasChildren = (node.children?.length ?? 0) > 0
-        return (
-          <div key={node.path} className={depth === 0 ? undefined : s.treeScope}>
-            <button
-              type="button"
-              className={[s.treeRow, node.dir ? undefined : (selected === node.path ? s.treeRowSelected : undefined)].filter(Boolean).join(' ')}
-              onClick={() => (node.dir ? onToggleDir(node.path) : onSelect(node.path))}
-              aria-expanded={node.dir ? open : undefined}
-              title={node.path}
-            >
-              {node.dir
-                ? <span className={[s.treeChevron, open ? undefined : s.treeChevronClosed].filter(Boolean).join(' ')} aria-hidden="true" />
-                : <span className={s.treeIcon} aria-hidden="true">{selected === node.path ? '▸' : '·'}</span>}
-              <span className={[s.treeName, node.dir ? s.treeDirName : undefined].filter(Boolean).join(' ')}>
-                {node.name}{node.dir ? '/' : ''}
-              </span>
-            </button>
-            {node.dir && open && hasChildren ? (
-              <TreeNodes
-                nodes={node.children!}
-                depth={depth + 1}
-                selected={selected}
-                onSelect={onSelect}
-                expanded={expanded}
-                onToggleDir={onToggleDir}
-                forceOpen={forceOpen}
-              />
-            ) : null}
-          </div>
-        )
-      })}
-    </>
-  )
-}
-
-/* ─── 快照历史 ───────────────────────────────────────────────────────── */
-
-function SnapshotPanel({ path, history, diff, diffLabel, onDiff, onClose }: {
-  path: string
-  history: SnapshotEntry[]
-  diff: string | null
-  diffLabel: string
-  onDiff: (entry: SnapshotEntry, previous: SnapshotEntry) => void
-  onClose: () => void
-}) {
-  return (
-    <section className={s.card} aria-label="快照历史">
-      <div className={s.cardHead}>
-        <span className={s.cardTitle}>快照历史</span>
-        <span className={s.cardCount}>{path}</span>
-        <span className={s.cardOps}>
-          <button type="button" className={`${s.button} ${s.ghost} ${s.tiny}`} onClick={onClose}>关闭</button>
-        </span>
-      </div>
-      <div className={s.cardBody}>
-        {history.length === 0 ? (
-          <div className={s.empty}>
-            <div className={s.emptyTitle}>这个文件还没有快照</div>
-            <div className={s.emptyHint}>写批落盘后会自动产生一条 commit;没写过就没有历史。</div>
-          </div>
-        ) : (
-          history.map((entry, index) => {
-            const previous = history[index + 1]
-            return (
-              <div key={entry.commit} className={s.commitRow}>
-                <span className={s.commitHash}>{entry.commit.slice(0, 8)}</span>
-                <span className={s.commitSubject}>{entry.subject}</span>
-                <span className={s.commitWhen}>{relativeTime(entry.at)}</span>
-                {previous === undefined ? (
-                  <span className={s.commitWhen} title="最早的快照,没有可比的上一版">首版</span>
-                ) : (
-                  <button type="button" className={`${s.button} ${s.ghost} ${s.tiny}`} onClick={() => onDiff(entry, previous)}>
-                    与上一版比
-                  </button>
-                )}
-              </div>
-            )
-          })
-        )}
-        {diff !== null ? (
-          <>
-            <div className={s.cardCount} style={{ marginTop: 10 }}>diff {diffLabel}</div>
-            <DiffView text={diff} />
-          </>
-        ) : null}
-      </div>
-    </section>
-  )
-}
-
-/* ─── SDK ────────────────────────────────────────────────────────────── */
-
-function SdkCard({ sdk, busy, ensuring, onEnsure }: {
-  sdk: SdkView | null
-  busy: boolean
-  ensuring: boolean
-  onEnsure: () => void
-}) {
-  const fraction = sdk?.provision.progress.fraction ?? 0
-  return (
-    <section className={s.card} aria-label="钉版 SDK">
-      <div className={s.cardHead}>
-        <span className={s.cardTitle}>钉版 SDK</span>
-        <span className={s.cardCount}>试玩与真 lint 都用它;发版钉死版本(ADR-0006)</span>
-        <span className={s.cardOps}>
-          {sdk === null ? null : sdk.launcherReady ? (
-            <Chip tone="ok" dot>{sdk.requested === 'override' ? '就绪 · 覆盖路径' : '就绪 · 钉版目录'}</Chip>
-          ) : (
-            <Chip tone={sdk.provision.state === 'failed' ? 'bad' : 'warn'} dot>{sdk.provision.state}</Chip>
-          )}
-        </span>
-      </div>
-      <div className={s.cardBody}>
-        {sdk === null ? (
-          <div className={s.empty}>读不到供给状态。</div>
-        ) : (
-          <>
-            <div className={s.rootPath}>{sdk.dir}</div>
-            {sdk.mismatch !== undefined ? (
-              <div style={{ marginTop: 8 }}>
-                <Chip tone="warn" title="覆盖路径的版本与钉版不一致:方言差异按警告处理,不阻塞">
-                  方言差异:实际 {sdk.mismatch.actual} ≠ 钉版 {sdk.mismatch.pinned}
-                </Chip>
-              </div>
-            ) : null}
-            {sdk.version !== undefined ? <div className={s.rootPath}>版本 {sdk.version}</div> : null}
-            {!sdk.launcherReady ? (
-              <div style={{ marginTop: 10, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-                <button type="button" className={s.button} disabled={busy || ensuring} onClick={onEnsure}>
-                  {ensuring || busy ? <><Spinner /> 下载中…</> : sdk.provision.state === 'failed' ? '重试下载' : '下载 SDK'}
-                </button>
-                <span className={s.emptyHint}>
-                  {sdk.provision.progress.message ?? (busy ? '正在下载钉版 SDK…' : '首次试玩前需要下载(约 155MB)')}
-                  {fraction > 0 && fraction < 1 ? ` · ${Math.round(fraction * 100)}%` : ''}
-                </span>
-              </div>
-            ) : null}
-            {fraction > 0 && fraction < 1 ? (
-              <div className={s.meter}><div className={s.meterFill} style={{ width: `${Math.round(fraction * 100)}%` }} /></div>
-            ) : null}
-            {sdk.provision.error !== undefined ? (
-              <div style={{ marginTop: 8 }}><Notice tone="bad">{sdk.provision.error}</Notice></div>
-            ) : null}
-          </>
-        )}
-      </div>
-    </section>
   )
 }

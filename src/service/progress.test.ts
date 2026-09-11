@@ -142,4 +142,72 @@ describe('推导进度 + 审读戳(T6)', () => {
     expect(progress.degraded).toBe(true)
     expect(progress.scenes.find((s) => s.label === 'start')!.readOnly).toBe(true)
   })
+
+  it('舞台标记是推导:严重度、排序与文案都由接缝给,UI 不需要自己判断', async () => {
+    const project = await service.getActiveProject()
+    // 一场有 lint 错 + 缺素材 + 无对白;另一场只有只读降级。
+    await writeFile(join(project!.root, 'game', 'script.rpy'), [
+      'label start:',
+      '    scene bg school',
+      '    jump nowhere',
+      '',
+      'label quiet:',
+      '    if x:',
+      '        "怪"',
+      '    return',
+      '',
+    ].join('\n'), 'utf8')
+    const progress = await service.progress('prog')
+
+    const start = progress.scenes.find((s) => s.label === 'start')!
+    const codes = start.marks.map((mark) => mark.code)
+    expect(codes).toContain('missing-slots')
+    expect(codes).toContain('missing-dialogue')
+    expect(codes).toContain('lint-error')
+    // 顺序 = 优先级:error 全部排在 warn 之前,info 最后
+    const rank = { error: 0, warn: 1, info: 2 } as const
+    const severities = start.marks.map((mark) => rank[mark.severity])
+    expect(severities).toEqual([...severities].sort((a, b) => a - b))
+    // 计数走 count,文案里不带计数(否则界面上会出现"缺素材 1 1")
+    const missingSlots = start.marks.find((mark) => mark.code === 'missing-slots')!
+    expect(missingSlots.count).toBe(1)
+    expect(missingSlots.label).not.toMatch(/\d/)
+
+    // 只读降级:标记为 info,且这一场明确不可盖戳(带原因)
+    const quiet = progress.scenes.find((s) => s.label === 'quiet')!
+    expect(quiet.readOnly).toBe(true)
+    expect(quiet.stampable).toBe(false)
+    expect(quiet.stampableBlockedBy).toBeTruthy()
+    expect(quiet.marks.map((mark) => mark.code)).toContain('read-only-degraded')
+
+    expect(start.stampable).toBe(true)
+    expect(start.stampableBlockedBy).toBeUndefined()
+
+    // 幂等:同样的输入重算,marks 完全一致
+    const again = await service.progress('prog')
+    expect(JSON.stringify(again.scenes)).toBe(JSON.stringify(progress.scenes))
+  })
+
+  it('素材槽可盖性由接缝判定:未填不可盖并带原因,填了可盖,已认可仍可重盖', async () => {
+    const project = await service.getActiveProject()
+    await writeFile(join(project!.root, 'game', 'script.rpy'), 'label start:\n    scene bg school\n    "一句话。"\n    return\n', 'utf8')
+    const before = await service.progress('prog')
+    const slotBefore = before.scenes.find((s) => s.label === 'start')!.slots[0]!
+    expect(slotBefore.filled).toBe(false)
+    expect(slotBefore.approvable).toBe(false)
+    expect(slotBefore.approvableBlockedBy).toBeTruthy()
+
+    await writeFile(join(project!.root, 'game/images/bg-school.png'), 'not-a-real-png', 'utf8')
+    const filled = await service.progress('prog')
+    const slotFilled = filled.scenes.find((s) => s.label === 'start')!.slots[0]!
+    expect(slotFilled.filled).toBe(true)
+    expect(slotFilled.approvable).toBe(true)
+
+    await service.stampSlot('prog', 'bg school', { via: 'human' })
+    const approved = await service.progress('prog')
+    const slotApproved = approved.scenes.find((s) => s.label === 'start')!.slots[0]!
+    expect(slotApproved.stamp).toBe('approved')
+    // 已认可仍然可盖(重新认可)—— UI 不再自行把已认可的槽锁死
+    expect(slotApproved.approvable).toBe(true)
+  })
 })

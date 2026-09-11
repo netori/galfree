@@ -8,10 +8,13 @@
 
 - ✅ 环节零(T1–T7):项目服务接缝、写网关、git 快照、方言子集解析器、
   假/真校验回路、钉版 SDK 供给、推导进度 + 审读戳、试玩控制、工作台
-- ✅ 工作台面板:舞台板(场景 × 素材槽 × 印章)、文件树筛选、快照历史与 diff、
-  SDK 供给卡;**审读戳可以盖到素材槽**(接缝早有 stampSlot,缺的是入口)
-- ✅ 路由适配层契约测试(`src/service/routes.test.ts`):状态码映射 / 方法守卫 /
-  SSE 帧 / 工作台实际调用的每个端点
+- ✅ 工作台面板:舞台板(场景 × 素材槽 × 印章)、文件树筛选、文件内容预览、
+  快照历史 / diff / 回滚、项目切换、SDK 供给卡
+- ✅ 两处**接缝已备、入口缺失**的补齐(经发起人确认):素材槽盖审读戳(接缝早有
+  `stampSlot`)、快照回滚(接缝早有 `snapshotRollback`)
+- ✅ 路由适配层契约测试(`src/service/routes.slow.test.ts`,**慢带**):状态码映射 /
+  方法守卫 / SSE 帧 / 工作台实际调用的每个端点 —— 是接缝纪律的一处记录在案的例外,
+  理由见 [`docs/contracts/stage-zero.md`](docs/contracts/stage-zero.md) 测试纪律节
 - ⏳ 剧本环节(T8–T12)、素材环节(T13–T16)、音频/发布(T17–T18)
 
 ## 工程
@@ -20,18 +23,24 @@
 src/
   index.ts            Host 半(cordis apply:路由/设置/装配)
   client/             工作台 Client 半(sidebar.panellist + main 面板)
-    panel.tsx           面板本体(只渲染接缝状态,不自己判断进度)
-    panel.module.css    设计令牌 + 版式(配色全走宿主 --dsw-* token)
+    panel.tsx           装配层:拉接缝状态、分发、把人的动作送回去
+    stage-board.tsx     舞台板(读 scene.marks / stampable —— 不自己判断)
+    file-inspector.tsx  文件内容 / 快照历史 / diff / 回滚
+    project-switcher.tsx 注册表激活位切换
+    sdk-card.tsx        钉版 SDK 供给
     ui.tsx              Chip / 印章 / 提示条 / diff 视图
+    types.ts            视图类型(与 routes 响应形状一一对应)
+    panel.module.css    设计令牌 + 版式(配色全走宿主 --dsw-* token)
   routes.ts           /api/galfree 薄适配器
   service/            ★ 项目服务(seam)——独占逻辑全在这里
     project-service.ts   注册表 + 模板新建 + 全部环节方法
+    progress.ts          推导引擎(含 deriveSceneMarks:舞台标记的唯一出处)
     write-gateway.ts     串行 CAS 原子批 + 外部观察(唯一写通道)
     snapshot.ts          写批后 git commit(作者 GALFree,永不 push)
     rpy/                 方言子集解析器 + 分支骨架派生(纯函数)
     validation/          校验回路契约 + 假验证器 + 真 SDK 适配器 + 合成端口
     sdk-provision.ts     钉版 SDK 下载状态机(校验和钉死)
-    progress.ts stamps.ts playtest.ts registry.ts template.ts hash.ts
+    stamps.ts playtest.ts registry.ts template.ts hash.ts
 docs/contracts/       接缝契约(dialect-subset.md / stage-zero.md)
 ```
 
@@ -39,8 +48,8 @@ docs/contracts/       接缝契约(dialect-subset.md / stage-zero.md)
 
 ```bash
 npm run typecheck      # tsc --noEmit
-npm test               # 快集成带(无网络、无真 SDK;78 tests)
-npm run test:slow      # 慢集成带(真钉版 SDK lint/compile;发版前必跑)
+npm test               # 快集成带(无网络、无真 SDK;67 tests,全在 ProjectService 接缝上)
+npm run test:slow      # 慢集成带(真钉版 SDK lint/compile + 路由适配层契约;发版前必跑)
 npm run build          # lib/index.js(ESM host)+ lib/client.js(web bundle)
 ```
 

@@ -12,6 +12,29 @@ import { readStamps, sceneTarget, slotTarget } from './stamps.ts'
 
 export type StampState = 'none' | 'pending' | 'approved' | 'stale' | 'missing'
 
+/**
+ * 场景上"需要人看一眼的事"——**由推导引擎给出,不是 UI 自己判断**。
+ *
+ * 舞台板要在一行里说清每一场戏的处境;如果让 UI 拿 missingDialogue/slots/lintErrors
+ * 自己拼结论,那就是把领域判断搬进适配器(ADR-0002 明令禁止)。因此这里把每条
+ * 事实按同一优先级顺序派生成带文案与严重度的 marks:agent 工具面与工作台读同一份。
+ */
+export type SceneMarkSeverity = 'info' | 'warn' | 'error'
+
+export interface SceneMark {
+  /** 稳定机器码(供 agent/前端判别,不依赖中文文案)。 */
+  code: 'lint-error' | 'missing-dialogue' | 'missing-slots' | 'read-only-degraded' | 'content-changed' | 'settled' | 'clear'
+  severity: SceneMarkSeverity
+  /** 面向人的一句话(中文;UI 直接显示,不再自己措辞)。 */
+  label: string
+  /** 相关计数(缺几个槽、几个 lint 错);不适用则缺省。 */
+  count?: number
+  /** 悬停补充说明。 */
+  detail?: string
+}
+
+/** 严重度顺序由 `deriveSceneMarks` 的 push 次序直接保证:error → warn → info。 */
+
 export interface SlotProgress {
   slot: string
   /** 约定素材路径(相对项目根);由槽名派生。 */
@@ -20,6 +43,13 @@ export interface SlotProgress {
   /** 素材文件指纹(内容哈希),缺=absent。 */
   fingerprint: string
   stamp: StampState
+  /**
+   * 人能否给它盖戳 —— 由接缝判定(未填 → 不可;已认可 → 可重盖)。
+   * UI 只读这个布尔,不自己复述"未填不可盖"这条规则。
+   */
+  approvable: boolean
+  /** 盖戳被拒的原因(approvable=false 时有值)。 */
+  approvableBlockedBy?: string
 }
 
 export interface SceneProgress {
@@ -34,7 +64,12 @@ export interface SceneProgress {
   missingSlots: string[]
   /** 场景级审读戳状态。 */
   stamp: StampState
+  /** 人能否给这一场盖戳(只读降级 → 不可:先改回子集内再谈定稿)。 */
+  stampable: boolean
+  stampableBlockedBy?: string
   lintErrors: number
+  /** 舞台上这一行要显示的派生事实(已排序:error → warn → info)。 */
+  marks: SceneMark[]
 }
 
 export interface ProgressSummary {
@@ -92,6 +127,74 @@ async function assetFingerprint(root: string, assetPath: string): Promise<string
   return fileFingerprint(root, assetPath)
 }
 
+/**
+ * 场景事实 → 舞台上那一行要显示的标记(纯函数,已排序)。
+ *
+ * 顺序即优先级:先 error(lint 错),再 warn(缺对白/缺素材/待复审),
+ * 最后 info(只读降级 —— 它是要人动手的事,但不是这一场内容本身的缺陷)。
+ * 全都没有时给一条 info,让"这一场没毛病"在界面上有明确形态,而不是空白。
+ */
+export function deriveSceneMarks(input: {
+  lintErrors: number
+  missingDialogue: boolean
+  missingSlots: string[]
+  readOnly: boolean
+  stamp: StampState
+}): SceneMark[] {
+  const marks: SceneMark[] = []
+  if (input.lintErrors > 0) {
+    marks.push({
+      code: 'lint-error',
+      severity: 'error',
+      count: input.lintErrors,
+      // 注意:label **不带计数** —— 计数由 count 单独承载,由 UI 决定怎么摆,
+      // 否则界面上会出现"lint 1 错 1"这种重复。
+      label: 'lint 错',
+      detail: '这一场有 error 级结构问题(悬空跳转/重复 label 等),先修再谈定稿',
+    })
+  }
+  if (input.missingSlots.length > 0) {
+    marks.push({
+      code: 'missing-slots',
+      severity: 'warn',
+      count: input.missingSlots.length,
+      label: '缺素材',
+      detail: input.missingSlots.join('、'),
+    })
+  }
+  if (input.missingDialogue) {
+    marks.push({
+      code: 'missing-dialogue',
+      severity: 'warn',
+      label: '缺对白',
+      detail: '这一场没有任何对白行',
+    })
+  }
+  if (input.stamp === 'stale') {
+    marks.push({
+      code: 'content-changed',
+      severity: 'warn',
+      label: '待复审',
+      detail: '盖过审读戳,但内容之后又变了 —— 需要人重新审读',
+    })
+  }
+  if (input.readOnly) {
+    marks.push({
+      code: 'read-only-degraded',
+      severity: 'info',
+      label: '只读降级',
+      detail: '这一场用了方言子集外的语法:结构只按能解析的部分算,不能盖审读戳',
+    })
+  }
+  if (marks.length === 0) {
+    // 没有任何待办时,把"处境"本身说清楚:定稿了,还是只是暂时没毛病。
+    marks.push(input.stamp === 'approved'
+      ? { code: 'settled', severity: 'info', label: '定稿', detail: '人已盖审读戳,且内容未再变动' }
+      : { code: 'clear', severity: 'info', label: '结构齐', detail: '这一场没有缺对白、没有缺素材、没有 lint 错;还没盖审读戳' })
+  }
+  return marks
+}
+
 export interface ProgressInputs {
   /** 解析出的场景(来自 parseRpy)。 */
   scenes: SceneNode[]
@@ -141,7 +244,16 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
       let stamp: StampState
       if (record === undefined) stamp = filled ? 'pending' : 'missing'
       else stamp = record.fingerprint === assetFp ? 'approved' : 'stale'
-      slots.push({ slot: name, assetPath, filled, fingerprint: assetFp, stamp })
+      // 可盖性由接缝判定(与 stampSlot 的守卫同源):未填不能盖;已认可可重盖。
+      slots.push({
+        slot: name,
+        assetPath,
+        filled,
+        fingerprint: assetFp,
+        stamp,
+        approvable: filled,
+        ...(filled ? {} : { approvableBlockedBy: '素材文件还没生成,先出图再认可' }),
+      })
     }
     const dialogueCount = scene.statements.filter((s) => s.kind === 'dialogue').length
     const sceneRecord = byTarget.get(sceneTarget(scene.label))
@@ -153,6 +265,7 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
       if (problem.severity !== 'error' || problem.file !== scene.file || problem.line === undefined) continue
       if (problem.line >= scene.line && (!lineBounds.has(scene) || problem.line < (lineBounds.get(scene) ?? Infinity))) lintErrors += 1
     }
+    const missingSlots = slots.filter((s) => !s.filled).map((s) => s.slot)
     sceneProgress.push({
       label: scene.label,
       file: scene.file,
@@ -161,9 +274,12 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
       missingDialogue: dialogueCount === 0,
       dialogueCount,
       slots,
-      missingSlots: slots.filter((s) => !s.filled).map((s) => s.slot),
+      missingSlots,
       stamp: sceneStamp,
+      stampable: !scene.readOnly,
+      ...(scene.readOnly ? { stampableBlockedBy: '这一场用了方言子集外的语法(只读降级),先改回子集内再谈定稿' } : {}),
       lintErrors,
+      marks: deriveSceneMarks({ lintErrors, missingDialogue: dialogueCount === 0, missingSlots, readOnly: scene.readOnly, stamp: sceneStamp }),
     })
   }
 

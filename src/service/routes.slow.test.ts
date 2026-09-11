@@ -1,10 +1,19 @@
 /**
- * 路由适配层的契约测试(/api/galfree)。
+ * 路由适配层契约测试(/api/galfree)—— **慢带**(`npm run test:slow`)。
  *
- * 这不是第二个接缝:项目逻辑仍只经 ProjectService 断言(见各 *-service / * 测试)。
- * 这里只钉住**薄适配器**自己的行为 —— 状态码映射、方法守卫、鉴权墙、SSE 帧,
- * 以及"工作台实际调用的每个端点都真的存在"。存在的理由:这一层曾经长期没人
- * 走过,于是"坏 JSON → 500""项目目录消失 → 500"两个错误映射静默存活了下来。
+ * 规范定位(重要):spec Testing Decisions 与 docs/contracts/stage-zero.md 的
+ * 测试纪律都写着"不测适配器、不引入第二测试面",测试接缝只认 ProjectService。
+ * 本文件是**一处被记录在案的例外**,不是第二个接缝:
+ *
+ *  - 断言的是薄适配器自己的对外行为(状态码映射、方法守卫、回环 Host 守卫、
+ *    SSE 帧形状、"工作台实际调用的每个端点都存在"),不碰任何项目逻辑;
+ *  - 项目逻辑仍只经 ProjectService 断言(见本文件之外的各 seam 测试);
+ *  - 它是慢带成员:快集成带保持 100% 符合 spec 的接缝纪律,这一层在
+ *    `npm run test:slow` 里跑(发版前必跑,CI 默认跳过)。
+ *
+ * 存在的理由(已被现实证明):这一层曾经长期没人走过,于是
+ * "坏 JSON → 500""项目目录消失 → 500"两个错误映射静默存活到了环节零交付之后。
+ * 例外本身的记录见 docs/contracts/stage-zero.md 的测试纪律节。
  */
 import { createServer, request as httpRequest, type Server } from 'node:http'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -205,11 +214,92 @@ describe('路由适配层(/api/galfree)', () => {
     const start = before.body.scenes.find((scene: any) => scene.label === 'start')
     expect(start.missingSlots).toEqual([])
     expect(start.slots.find((slot: any) => slot.slot === 'bg school').filled).toBe(true)
+    // 可盖性也由接缝给:填了就 approvable,而且已认可的槽仍可重盖(不是 UI 自己判的)
+    expect(start.slots.find((slot: any) => slot.slot === 'bg school').approvable).toBe(true)
 
     expect((await postJson('/api/galfree/stamps/slot', { slot: 'bg school' })).status).toBe(200)
     const after = await req('/api/galfree/progress')
     expect(after.body.scenes.find((scene: any) => scene.label === 'start')
       .slots.find((slot: any) => slot.slot === 'bg school').stamp).toBe('approved')
+    // 已认可 → 仍然 approvable(可以重新认可),UI 不再自行禁止
+    expect(after.body.scenes.find((scene: any) => scene.label === 'start')
+      .slots.find((slot: any) => slot.slot === 'bg school').approvable).toBe(true)
+    // 未填的槽则不可盖,且带原因
+    const unfilledSlot = after.body.scenes.find((scene: any) => scene.label === 'rooftop_rain')?.slots
+      .find((slot: any) => slot.filled === false)
+    if (unfilledSlot !== undefined) {
+      expect(unfilledSlot.approvable).toBe(false)
+      expect(unfilledSlot.approvableBlockedBy).toBeTruthy()
+    }
+  })
+
+  it('切换激活项目走注册表激活位,不写任何项目文件', async () => {
+    const first = await freshProject()
+    const second = await freshProject()
+    expect((await req('/api/galfree/state')).body.activeId).toBe(second.id)
+
+    const activated = await postJson('/api/galfree/projects/activate', { project: first.id })
+    expect(activated.status).toBe(200)
+    expect(activated.body.project.id).toBe(first.id)
+    const state = await req('/api/galfree/state')
+    expect(state.body.activeId).toBe(first.id)
+    // 切回后进度读的是第一个项目(模板两场戏),而不是第二个的 SCRIPT
+    const progress = await req('/api/galfree/progress')
+    expect(progress.body.scenes.map((scene: { label: string }) => scene.label).sort()).toEqual(['prologue', 'start'])
+
+    // 不存在的项目 → 404(unknown-project),不是静默成功
+    const missing = await postJson('/api/galfree/projects/activate', { project: 'no-such-project' })
+    expect(missing.status).toBe(404)
+  })
+
+  it('文件内容只读预览:读得到当前内容,且不产生写', async () => {
+    await freshProject()
+    const before = await service.listProjects()
+    const active = before.find((project) => project.active)!
+    const historyBefore = await service.snapshotHistory(active.id, 'game/script.rpy')
+
+    const file = await req('/api/galfree/files/content?path=game%2Fscript.rpy')
+    expect(file.status).toBe(200)
+    expect(file.body.content).toContain('label start:')
+    expect(file.body.bytes).toBeGreaterThan(0)
+    expect(typeof file.body.version).toBe('string')
+    expect(file.body.version).not.toBe('absent')
+
+    // 只读:快照历史不增长(读不产生写批)
+    const historyAfter = await service.snapshotHistory(active.id, 'game/script.rpy')
+    expect(historyAfter.length).toBe(historyBefore.length)
+
+    // 缺 path → 400;不存在的项目路径 → 仍能如实报告 absent
+    expect((await req('/api/galfree/files/content')).status).toBe(400)
+    const absent = await req('/api/galfree/files/content?path=game%2Fnever.rpy')
+    expect(absent.status).toBe(200)
+    expect(absent.body.version).toBe('absent')
+  })
+
+  it('回滚:文件回到历史版本,且回滚本身留下一条新快照(历史不改写)', async () => {
+    const project = await freshProject()
+    const history = await service.snapshotHistory(project.id, 'game/script.rpy')
+    const oldest = history[history.length - 1]!
+    const commitsBefore = history.length
+
+    const snap = await service.readProjectFile(project.id, 'game/script.rpy')
+    await service.writeProjectFiles(project.id, [{
+      path: 'game/script.rpy', content: '# 被改坏了\n', expectVersion: snap.version,
+    }], { origin: 'workbench', reason: 'scenario' })
+    expect((await req('/api/galfree/files/content?path=game%2Fscript.rpy')).body.content).toBe('# 被改坏了\n')
+
+    const rolled = await postJson('/api/galfree/snapshots/rollback', { path: 'game/script.rpy', to: oldest.commit })
+    expect(rolled.status).toBe(200)
+    const restored = await req('/api/galfree/files/content?path=game%2Fscript.rpy')
+    expect(restored.body.content).toContain('从这里开始你的故事')
+
+    // 回滚不改写历史:历史只增(写了 1 次 + 回滚 1 次 = +2),且旧 commit 仍在
+    const after = await service.snapshotHistory(project.id, 'game/script.rpy')
+    expect(after.length).toBe(commitsBefore + 2)
+    expect(after.some((entry) => entry.commit === oldest.commit)).toBe(true)
+
+    // 缺参数 → 400
+    expect((await postJson('/api/galfree/snapshots/rollback', { path: 'game/script.rpy' })).status).toBe(400)
   })
 
   it('项目目录被挪走:状态如实标 missing,下游读进度是 404 不是 500', async () => {
