@@ -151,6 +151,31 @@ describe('项目服务 · 模板新建项目(T1)', () => {
     expect(report).toMatchObject({ ok: true, problems: [] })
   })
 
+  /**
+   * 模板不能踩的 Ren'Py 坑(每条都是实测踩过的):
+   *  1. `config.title` 不存在 —— 启动时抛 not a known configuration variable;
+   *  2. 小写 `true`/`false` 不存在 —— 编译期 NameError。
+   *
+   * 为什么放在快带:这两条会让**每个新建项目一启动就崩**,而 lint 与 compile 对它们
+   * 都返回退出码 0(实测),只有真启动或这种静态断言才抓得到。真启动的端到端断言在
+   * 慢带(`sdk.slow.test.ts` 的"模板真能启动"),这里给的是秒级护栏。
+   */
+  it('模板不踩已知的 Ren\'Py 字面量坑(没有 config.title;布尔是 True/False)', async () => {
+    const project = await service.createProject({ projectsRoot, name: 'literalcheck', title: '标题检查' })
+    const options = await readFile(join(project.root, 'game', 'options.rpy'), 'utf8')
+    // 只看**代码行** —— 模板的注释里正好写明了这两个坑,不能把自己说明当违规。
+    const code = options.split('\n').filter((line) => !line.trimStart().startsWith('#'))
+    const codeText = code.join('\n')
+    expect(codeText).not.toContain('config.title')
+    // 小写 true/false 作为独立词出现在 define 里就是坑(Python 没有这两个名字)。
+    for (const line of code) {
+      if (!line.trimStart().startsWith('define')) continue
+      expect(line).not.toMatch(/=\s*(true|false)\s*$/)
+    }
+    // 标题要真的写进 config.name(窗口标题的真相)。
+    expect(codeText).toContain('config.name = _("标题检查")')
+  })
+
   it('注册表是持久化单一真相:新 service 实例(模拟重启)看到同一列表与激活项目', async () => {
     const created = await service.createProject({ projectsRoot, name: 'persist', title: '持久' })
     const other = await service.createProject({ projectsRoot, name: 'other', title: undefined })
