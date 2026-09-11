@@ -6,7 +6,7 @@
  * 队列、快照、试玩)。agent 工具与工作台 Client 只是两个薄适配器,消费这里
  * 的状态,不另立真相源。
  */
-import { access, mkdir } from 'node:fs/promises'
+import { access, mkdir, readdir, readFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
@@ -15,7 +15,9 @@ import { runGit } from './git.ts'
 import { ProjectRegistry, type RegistryEntry } from './registry.ts'
 import { commitSnapshot, fileDiff, fileHistory, rollbackFile, type SnapshotEntry } from './snapshot.ts'
 import { PROJECT_NAME_RE, renderTemplateFiles, templateKeepFiles } from './template.ts'
-import { TemplateValidator } from './validation/template-validator.ts'
+import { FakeValidator } from './validation/template-validator.ts'
+import { deriveGraph, parseRpy, type RpyFile } from './rpy/parse.ts'
+import type { BranchGraph } from './rpy/dialect.ts'
 import { WriteGateway, type ChangeEvent, type FileSnapshot, type WriteLogEntry, type WriteOp, type WriteResult } from './write-gateway.ts'
 import type { WriteBatchReason } from './write-gateway.ts'
 import type { ValidationReport } from './validation/contract.ts'
@@ -46,17 +48,17 @@ export interface ProjectServiceOptions {
   /** 插件数据目录(注册表等宿主侧状态落这里)。 */
   dataDir: string
   /** 注入验证器(T1 假验证器;T5 真 SDK 适配器实现同一契约)。 */
-  validator?: TemplateValidator
+  validator?: FakeValidator
 }
 
 export class ProjectService {
   #registry: ProjectRegistry
-  #validator: TemplateValidator
+  #validator: FakeValidator
   #gateways = new Map<string, WriteGateway>()
 
   constructor(options: ProjectServiceOptions) {
     this.#registry = new ProjectRegistry(join(options.dataDir, 'registry.json'))
-    this.#validator = options.validator ?? new TemplateValidator()
+    this.#validator = options.validator ?? new FakeValidator()
   }
 
   // ─── 注册表与模板新建(T1)────────────────────────────────────────────
@@ -192,6 +194,19 @@ export class ProjectService {
     if (active === null) throw new GalfreeError('no-active-project', '没有激活项目可校验')
     if (active.missing) throw new GalfreeError('project-missing', `项目目录已不存在:${active.root}`)
     return this.#validator.validate(join(active.root, 'game'))
+  }
+
+  /** 分支骨架(派生视图:可缓存、全量重算;ADR-0009 `.rpy` 为尊)。 */
+  async branchGraph(projectRef: string): Promise<BranchGraph> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const files: RpyFile[] = []
+    for (const item of await readdir(join(entry.path, 'game'), { withFileTypes: true })) {
+      if (item.isFile() && item.name.endsWith('.rpy')) {
+        files.push({ name: item.name, text: await readFile(join(entry.path, 'game', item.name), 'utf8') })
+      }
+    }
+    return deriveGraph(parseRpy(files))
   }
 
   /** 停掉全部监听(宿主 dispose 与测试收尾用)。 */
