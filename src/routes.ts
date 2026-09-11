@@ -57,10 +57,35 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
     chunks.push(chunk as Buffer)
   }
   if (chunks.length === 0) return {}
-  const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+  } catch (error) {
+    // 语法错误是请求方的错(400),不是服务端故障 —— 不能落成 500。
+    throw new GalfreeError('bad-json', `请求体不是合法 JSON:${String(error)}`)
+  }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new GalfreeError('bad-json', '请求体需为 JSON 对象')
   return parsed as Record<string, unknown>
 }
+
+/**
+ * 路由 → 允许的方法。用于把"路径存在但方法不对"如实报成 405(带 Allow 头),
+ * 而不是伪装成 404 未知路由。**新增路由必须同步登记在这里。**
+ */
+const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ['/state', ['GET']],
+  ['/projects/create', ['POST']],
+  ['/validate', ['GET']],
+  ['/progress', ['GET']],
+  ['/stamps/scene', ['POST']],
+  ['/stamps/slot', ['POST']],
+  ['/snapshots', ['GET']],
+  ['/snapshots/diff', ['GET']],
+  ['/playtest', ['POST']],
+  ['/sdk', ['GET']],
+  ['/sdk/ensure', ['POST']],
+  ['/events', ['GET']],
+]
 
 /** 项目文件树(受限深度/数量;快照噪声与缓存排除在外)。 */
 const TREE_IGNORE = new Set(['.git', '.rpyc'])
@@ -99,6 +124,12 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
 
   if (!isLoopbackRequest(req)) return writeJson(res, 403, { error: '仅回环可访问' })
   if (!deps.config().enabled && path !== '/state') return writeJson(res, 503, { error: 'GALFree 已停用(见设置)' })
+
+  const allowed = ROUTE_METHODS.find(([routePath]) => routePath === path)?.[1]
+  if (allowed !== undefined && !allowed.includes(method)) {
+    res.setHeader('allow', allowed.join(', '))
+    return writeJson(res, 405, { error: `${path} 只接受 ${allowed.join('/')}`, code: 'method-not-allowed' })
+  }
 
   if (method === 'GET' && path === '/state') {
     const projects = await service.listProjects()
@@ -262,7 +293,8 @@ export function makeRoutes(deps: RouteDeps): GalfreeRoute[] {
         await dispatch(deps, req, res)
       } catch (error) {
         if (error instanceof GalfreeError) {
-          const status = error.code === 'no-active-project' || error.code === 'unknown-project' || error.code === 'unknown-scene' ? 404
+          // 404 = 目标不存在(含"项目目录已被挪走"),与 5xx 的"服务端故障"严格区分。
+          const status = error.code === 'no-active-project' || error.code === 'unknown-project' || error.code === 'unknown-scene' || error.code === 'project-missing' ? 404
             : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' ? 400
             : error.code === 'body-too-large' ? 413
             : error.code === 'version-drift' || error.code === 'expect-required' || error.code === 'path-escape' || error.code === 'stamp-forbidden' || error.code === 'slot-not-filled' || error.code === 'sdk-not-ready' ? 409
