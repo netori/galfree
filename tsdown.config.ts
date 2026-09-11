@@ -20,7 +20,8 @@ import { transform } from 'lightningcss'
 /** Plugin package name = the __ModuleLoader__ id the shell serves at /plugins/dsh-galfree/client.js. */
 const ID = 'dsh-galfree'
 
-/** Platform modules the web shell shares into the frozen module table; anything else is inlined. */
+/** Platform modules the web shell shares into the frozen module table; anything else is inlined.
+ *  (react/jsx-runtime 经在线插件 dsh-skill-hub / dsh-imagegen 实证由 shell 表提供。) */
 const CLIENT_EXTERNALS: readonly string[] = [
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client',
   '@deepseek-ai/cordis',
