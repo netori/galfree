@@ -14,6 +14,7 @@ import type { ProgressView, SdkView, StateView, StampTarget } from './types.ts'
 import { stampKey } from './types.ts'
 import { Chip, Notice, Spinner, relativeTime } from './ui.tsx'
 import { StageBoard } from './stage-board.tsx'
+import { AssetBoard } from './asset-board.tsx'
 import { FileInspector } from './file-inspector.tsx'
 import { DirectoryPicker } from './directory-picker.tsx'
 import { ProjectSwitcher } from './project-switcher.tsx'
@@ -309,6 +310,15 @@ export function WorkbenchPanel() {
           onStamp={(target) => void stamp(target)}
           onPlaytest={() => void runPlaytest()}
           hasProject={hasProject}
+        />
+
+        <AssetBoard
+          characters={progress?.characters ?? []}
+          slots={progress?.slots ?? []}
+          api={api}
+          hasProject={hasProject}
+          onChanged={() => refresh()}
+          onNotice={pushNotice}
         />
 
         {state !== null && state.gatewayErrors.length > 0 ? (

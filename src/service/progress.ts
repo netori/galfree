@@ -9,6 +9,8 @@ import { ABSENT, fileFingerprint, fingerprint } from './hash.ts'
 import type { DialectProblem, SceneNode, Statement } from './rpy/dialect.ts'
 import type { PlaytestRun } from './playtest.ts'
 import { readStamps, sceneTarget, slotTarget } from './stamps.ts'
+import type { CharacterRecord, SlotRecord } from './characters.ts'
+import type { DerivedSlot, SlotOrigin } from './slots.ts'
 
 export type StampState = 'none' | 'pending' | 'approved' | 'stale' | 'missing'
 
@@ -95,8 +97,37 @@ export interface PlaytestView {
   traceback: string | null
 }
 
+/**
+ * 素材板上的一个槽:派生出来的槽(来自 `.rpy` 引用)+ 账本制作信息 + 推导出来的状态。
+ *
+ * `filled` / `stamp` / `approvable` 仍是**推导**(文件在不在 + 指纹比对 + 戳账本);
+ * `ledger` 是挂上来的制作信息(要谁出场、提示词、画风锚),不参与状态判定。
+ */
+export interface SlotBoardEntry extends SlotProgress {
+  ledger?: SlotRecord
+  origin: SlotOrigin
+}
+
+/**
+ * 素材板上的一个角色:登记簿条目 + 推导出来的可见性。
+ * `defined` = 剧本里有对应的 `define <voice> = Character(...)`;
+ * `slots` = 账本要求这个角色出场的槽(来自 `requiresCharacters`)。
+ */
+export interface CharacterBoardEntry extends CharacterRecord {
+  defined: boolean
+  /** 剧本里那个 Character 的显示名(与登记簿 name 不一致时如实并列)。 */
+  scriptDisplayName?: string
+  definedAt?: { file: string; line: number }
+  /** 账本里要求这个角色出场的槽名(派生)。 */
+  slots: string[]
+}
+
 export interface ProgressSnapshot {
   scenes: SceneProgress[]
+  /** 素材板:`.rpy` 派生的槽清单(挂账本 + 推导状态),与 scenes[].slots 同源。 */
+  slots: SlotBoardEntry[]
+  /** 素材板:角色登记簿 + 推导出来的可见性。 */
+  characters: CharacterBoardEntry[]
   /** 顶层(非场景内)结构问题。 */
   problems: DialectProblem[]
   lint: { ok: boolean; errors: number; warnings: number }
@@ -106,16 +137,9 @@ export interface ProgressSnapshot {
   degraded: boolean
 }
 
-/** 槽名 → 约定素材路径:`tag attr1 attr2` → game/images/tag-attr1-attr2.png。 */
-export function slotAssetPath(slot: string): string {
-  const slug = slot.trim().split(/\s+/).join('-')
-  return `game/images/${slug}.png`
-}
-
-/** 槽名:tag + 属性(空格分隔),与解析器 image 语句一致。 */
-export function slotName(statement: Extract<Statement, { kind: 'image' }>): string {
-  return [statement.tag, ...statement.attributes].join(' ')
-}
+/** 槽名与约定素材路径的唯一出处在 slot-naming.ts;此处再导出以兼容既有引用。 */
+export { slotAssetPath, slotName } from './slot-naming.ts'
+import { slotAssetPath, slotName } from './slot-naming.ts'
 
 /** 场景内容指纹:**原始文本块**哈希(任何改动都算改动,包括被解析器
  *  跳过的子集外内容 —— 否则新增 if/ATL 块不会使已有戳失效)。 */
@@ -200,6 +224,17 @@ export interface ProgressInputs {
   scenes: SceneNode[]
   /** 顶层结构问题(来自 parseRpy.problems)。 */
   problems: DialectProblem[]
+  /**
+   * 派生出来的槽(来自 `deriveSlots`:`.rpy` 引用 + 账本 + 登记簿)。
+   * 给了就用来组素材板;不给则退回"只从场景引用算"的轻量形态。
+   */
+  derivedSlots?: DerivedSlot[]
+  /**
+   * 角色登记簿 + 剧本里定义了哪些 Character(素材板角色视图要显示的派生事实)。
+   * 登记簿本身是数据;`defined` 是推导出来的(剧本里有没有这个 voice)。
+   */
+  characters?: CharacterRecord[]
+  definedCharacters?: Array<{ var: string; displayName: string; file: string; line: number }>
   /** 试玩事实(账本 last + 当前内容指纹);缺省视为未跑过。 */
   playtest?: { last: PlaytestRun | null; currentFingerprint: string }
 }
@@ -287,8 +322,53 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
   const uniqueSlots = new Map<string, SlotProgress>()
   for (const scene of sceneProgress) for (const slot of scene.slots) if (!uniqueSlots.has(slot.slot)) uniqueSlots.set(slot.slot, slot)
 
+  // 素材板:派生槽(带账本与定位)+ 推导出来的状态(与 scenes[].slots 同源,不另算一遍)。
+  const sceneUsage = new Map<string, string[]>()
+  for (const scene of sceneProgress) {
+    for (const slot of scene.slots) {
+      const used = sceneUsage.get(slot.slot) ?? []
+      if (!used.includes(scene.label)) used.push(scene.label)
+      sceneUsage.set(slot.slot, used)
+    }
+  }
+  const slots: SlotBoardEntry[] = (inputs.derivedSlots ?? []).map((derived) => {
+    const status = uniqueSlots.get(derived.slot)
+    const usedIn = sceneUsage.get(derived.slot) ?? derived.origin.scenes
+    return {
+      slot: derived.slot,
+      assetPath: derived.assetPath,
+      filled: status?.filled ?? false,
+      fingerprint: status?.fingerprint ?? ABSENT,
+      stamp: status?.stamp ?? 'missing',
+      approvable: status?.approvable ?? false,
+      ...(status?.approvableBlockedBy === undefined ? {} : { approvableBlockedBy: status.approvableBlockedBy }),
+      ...(derived.ledger === undefined ? {} : { ledger: derived.ledger }),
+      origin: { ...derived.origin, scenes: usedIn },
+    }
+  })
+
   const lintErrors = inputs.problems.filter((p) => p.severity === 'error').length
   const lintWarnings = inputs.problems.filter((p) => p.severity === 'warning').length
+
+  // 素材板角色视图:登记簿条目 + 推导出来的"剧本里有没有它 / 哪些槽要它出场"。
+  const definedByVar = new Map((inputs.definedCharacters ?? []).map((defined) => [defined.var, defined]))
+  const slotsByCharacter = new Map<string, string[]>()
+  for (const record of (inputs.derivedSlots ?? []).flatMap((derived) => (derived.ledger === undefined ? [] : [derived.ledger]))) {
+    for (const id of record.requiresCharacters) {
+      const used = slotsByCharacter.get(id) ?? []
+      if (!used.includes(record.slot)) used.push(record.slot)
+      slotsByCharacter.set(id, used)
+    }
+  }
+  const characters: CharacterBoardEntry[] = (inputs.characters ?? []).map((character) => {
+    const defined = character.voice === undefined ? undefined : definedByVar.get(character.voice)
+    return {
+      ...character,
+      defined: defined !== undefined,
+      ...(defined === undefined ? {} : { scriptDisplayName: defined.displayName, definedAt: { file: defined.file, line: defined.line } }),
+      slots: slotsByCharacter.get(character.id) ?? [],
+    }
+  })
 
   const awaitingReview = sceneProgress.filter((s) => s.stamp === 'stale').length
     + [...uniqueSlots.values()].filter((s) => s.stamp === 'stale').length
@@ -319,6 +399,8 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
 
   return {
     scenes: sceneProgress,
+    slots,
+    characters,
     problems: inputs.problems,
     lint: { ok: lintErrors === 0, errors: lintErrors, warnings: lintWarnings },
     playtest,

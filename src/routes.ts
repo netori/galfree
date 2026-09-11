@@ -101,6 +101,11 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['/snapshots/diff', ['GET']],
   ['/snapshots/rollback', ['POST']],
   ['/files/content', ['GET']],
+  ['/cast', ['GET']],
+  ['/cast/characters/upsert', ['POST']],
+  ['/cast/characters/remove', ['POST']],
+  ['/cast/slots/upsert', ['POST']],
+  ['/cast/slots/remove', ['POST']],
   ['/picker', ['GET']],
   ['/picker/pick', ['POST']],
   ['/picker/list', ['GET']],
@@ -391,6 +396,68 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
+  // 素材板账本(读):角色登记簿 + 槽账本。**只读制作信息**;槽清单本身从 /progress 派生。
+  if (method === 'GET' && path === '/cast') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const [characters, slots] = await Promise.all([
+      service.characters(active.id),
+      service.slotLedger(active.id),
+    ])
+    writeJson(res, 200, { characters, slots })
+    return
+  }
+
+  if (method === 'POST' && path === '/cast/characters/upsert') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    await service.upsertCharacter(active.id, {
+      id: String(body.id ?? ''),
+      name: String(body.name ?? ''),
+      ...(typeof body.voice === 'string' && body.voice !== '' ? { voice: body.voice } : {}),
+      appearance: (typeof body.appearance === 'object' && body.appearance !== null ? body.appearance : {}) as Record<string, string>,
+      ...(typeof body.styleAnchor === 'string' && body.styleAnchor !== '' ? { styleAnchor: body.styleAnchor } : {}),
+      references: Array.isArray(body.references) ? body.references as Array<{ path: string }> : [],
+      ...(typeof body.note === 'string' && body.note !== '' ? { note: body.note } : {}),
+    })
+    writeJson(res, 200, { ok: true })
+    return
+  }
+
+  if (method === 'POST' && path === '/cast/characters/remove') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    await service.removeCharacter(active.id, String(body.id ?? ''))
+    writeJson(res, 200, { ok: true })
+    return
+  }
+
+  if (method === 'POST' && path === '/cast/slots/upsert') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    await service.upsertSlot(active.id, {
+      slot: String(body.slot ?? ''),
+      requiresCharacters: Array.isArray(body.requiresCharacters) ? body.requiresCharacters.map(String) : [],
+      ...(typeof body.prompt === 'string' && body.prompt !== '' ? { prompt: body.prompt } : {}),
+      ...(typeof body.artStyleAnchor === 'string' && body.artStyleAnchor !== '' ? { artStyleAnchor: body.artStyleAnchor } : {}),
+      ...(typeof body.note === 'string' && body.note !== '' ? { note: body.note } : {}),
+    })
+    writeJson(res, 200, { ok: true })
+    return
+  }
+
+  if (method === 'POST' && path === '/cast/slots/remove') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    await service.removeSlot(active.id, String(body.slot ?? ''))
+    writeJson(res, 200, { ok: true })
+    return
+  }
+
   // 一键试玩(T7):接缝同一控制器,无第二管线。
   if (method === 'POST' && path === '/playtest') {
     const active = await service.getActiveProject()
@@ -468,7 +535,7 @@ export function makeRoutes(deps: RouteDeps): GalfreeRoute[] {
         } else if (error instanceof GalfreeError) {
           // 404 = 目标不存在(含"项目目录已被挪走"),与 5xx 的"服务端故障"严格区分。
           const status = error.code === 'no-active-project' || error.code === 'unknown-project' || error.code === 'unknown-scene' || error.code === 'project-missing' ? 404
-            : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' ? 400
+            : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' || error.code === 'character-invalid' || error.code === 'slot-invalid' ? 400
             : error.code === 'body-too-large' ? 413
             : error.code === 'picker-unsupported' ? 501
             : error.code === 'picker-timeout' ? 504

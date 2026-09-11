@@ -52,6 +52,35 @@ export interface DirectoryListing {
   source?: 'host' | 'plugin'
 }
 
+/** 素材槽账本条目(制作信息;槽清单本身从 .rpy 派生)。 */
+export interface SlotLedgerView {
+  slot: string
+  requiresCharacters: string[]
+  prompt?: string
+  artStyleAnchor?: string
+  note?: string
+}
+
+/** 登记角色的草稿(面板表单的形状)。 */
+export interface CharacterDraft {
+  id: string
+  name: string
+  voice: string
+  styleAnchor: string
+  hair: string
+  eyes: string
+  outfit: string
+}
+
+export interface CharacterUpsertPayload {
+  id: string
+  name: string
+  voice?: string
+  appearance: Record<string, string>
+  styleAnchor?: string
+  references?: Array<{ path: string; slot?: string; note?: string }>
+}
+
 export class GalfreeApiError extends Error {
   constructor(message: string, readonly code?: string) {
     super(message)
@@ -130,11 +159,45 @@ export interface DialectProblemView {
 
 export interface ProgressView {
   scenes: SceneProgressView[]
+  /** 素材板:`.rpy` 派生的槽清单(挂账本 + 推导状态)。 */
+  slots: SlotBoardEntryView[]
+  /** 素材板:角色登记簿 + 推导出来的可见性。 */
+  characters: CharacterBoardEntryView[]
   problems: DialectProblemView[]
   lint: { ok: boolean; errors: number; warnings: number }
   playtest: { at: string; state: 'pass' | 'fail' | 'stale'; exitCode: number; technicalPass: boolean; traceback: string | null } | null
   summary: { scenes: number; missingDialogue: number; missingSlots: number; lintErrors: number; awaitingReview: number; degraded: number; playtestFail: number; playtestNotRun: number }
   degraded: boolean
+}
+
+/** 素材槽账本条目(制作信息;槽清单本身从 .rpy 派生)。 */
+export interface SlotLedgerView {
+  slot: string
+  requiresCharacters: string[]
+  prompt?: string
+  artStyleAnchor?: string
+  note?: string
+}
+
+/** 槽的完整视图 = 推导状态 + 账本 + 定位。 */
+export interface SlotBoardEntryView extends SlotProgressView {
+  ledger?: SlotLedgerView
+  origin: { file: string; line: number; snippet: string; scenes: string[] }
+}
+
+/** 角色的完整视图 = 登记簿 + 推导出来的可见性。 */
+export interface CharacterBoardEntryView {
+  id: string
+  name: string
+  voice?: string
+  appearance: Record<string, string>
+  styleAnchor?: string
+  references: Array<{ path: string; slot?: string; note?: string }>
+  note?: string
+  defined: boolean
+  scriptDisplayName?: string
+  definedAt?: { file: string; line: number }
+  slots: string[]
 }
 
 export interface SdkView {
@@ -233,6 +296,45 @@ export class GalfreeApi {
   /** 手输路径的即时校验:这个位置现在是不是一个能放项目的目录。 */
   async inspectPath(path: string): Promise<{ path: string; exists: boolean; isDirectory: boolean }> {
     return readJson(await fetch(`/api/galfree/picker/inspect?path=${encodeURIComponent(path)}`))
+  }
+
+  /** 素材板账本(读):角色登记簿 + 槽账本。 */
+  async cast(): Promise<{ characters: CharacterUpsertPayload[]; slots: SlotLedgerView[] }> {
+    return readJson(await fetch('/api/galfree/cast'))
+  }
+
+  /** 登记/更新一个角色(经网关写 → 自动快照)。 */
+  async upsertCharacter(payload: CharacterUpsertPayload): Promise<void> {
+    await readJson<unknown>(await fetch('/api/galfree/cast/characters/upsert', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    }))
+  }
+
+  async removeCharacter(id: string): Promise<void> {
+    await readJson<unknown>(await fetch('/api/galfree/cast/characters/remove', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id }),
+    }))
+  }
+
+  /** 给一个槽挂/改制作信息(经网关写 → 自动快照)。 */
+  async upsertSlot(payload: SlotLedgerView): Promise<void> {
+    await readJson<unknown>(await fetch('/api/galfree/cast/slots/upsert', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    }))
+  }
+
+  async removeSlot(slot: string): Promise<void> {
+    await readJson<unknown>(await fetch('/api/galfree/cast/slots/remove', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ slot }),
+    }))
   }
 
   /** SDK 供给状态(T5;首次下载进度可见)。 */

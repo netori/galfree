@@ -186,6 +186,42 @@ GALFree v1 的**唯一测试接缝** = Host 侧项目服务(`src/service/project
 `defaultProjectsRoot`(设置里的默认父目录)随 `/state` 与 `/picker` 一起下发,面板据此在
 表单里**显式写出"将创建到 `<父目录>\<项目名>`"** —— 不选文件夹也不会建到人不知道的地方。
 
+## 素材槽与角色登记簿(T8 之后追加)
+
+`.studio/` 的**铁律**在这里第一次真正被执行:`.studio/` 只放**引用与制作信息**,永不复制
+叙述内容。落地成两层:
+
+| 文件 | 放什么 | 不放什么 |
+|---|---|---|
+| `.studio/characters.json` | 角色登记簿:外观设定卡(结构化字段)、画风锚、参考图链、`voice`(对 `.rpy` 变量名的**引用**) | 台词、场景正文 |
+| `.studio/slots.json` | 槽的制作信息:`requiresCharacters`(引用登记簿 id)、提示词、画风锚 | 槽清单本身 —— 它**永远从 `.rpy` 的图像引用派生** |
+
+**槽清单是推导的,账本是挂上去的。** `deriveSlots()`(纯函数)从 `.rpy` 的 `show/scene`
+语句派生槽与它的定位(`origin` = 文件、行、原始语句、引用它的场景),再把账本挂上来。
+因此:
+
+- 改 `.rpy` 的图像引用 → 槽清单自动变,**没有任何"上报槽"的入口**;
+- 账本挂了制作信息但 `.rpy` 里没人引用 → `dangling-slot-ref`(**error**);
+- 账本要求 `requiresCharacters` 里的角色,但登记簿没这个 id → `dangling-character-ref`
+  (**error**),且**定位到引用该槽的那条 `.rpy` 语句**(问题会在运行剧本时咬人);
+- `.rpy` 里有 `define X = Character(...)` 但登记簿还没登记 → `unregistered-character`
+  (**warning**):剧本可以先写、设定后补,那是工作周期而不是结构缺陷。
+
+以上四类与 lint 汇总同源进板(`progress.problems` → `lint`/`summary`),因此舞台板与
+素材板读的是同一份判断。
+
+**接缝方法**:`characters(ref)` / `upsertCharacter(ref, record)` / `removeCharacter(ref, id)` /
+`slotLedger(ref)` / `upsertSlot(ref, record)` / `removeSlot(ref, slot)` —— 全部经网关写
+(自动快照)。写入前 `assertCharacterValid` / `assertSlotValid` 拦下两类错误:id/`voice`
+必须是合法标识符,所有文本字段有长度上限(挡住"把正文抄进设定卡"这条最可能的违规路径)。
+
+**路由**:`GET /cast`(账本读)、`POST /cast/characters/upsert|remove`、
+`POST /cast/slots/upsert|remove`;`GET /progress` 额外给出 `slots[]`(带 `ledger` 与
+`origin`)与 `characters[]`(带 `defined` / `definedAt` / `slots[]`,可见性是推导的)。
+
+**工作台素材板**(T8):账本形态 —— 槽视图 + 角色视图,**纯渲染派生对象,没有出图动作**
+(出图属 T14/T15)。
+
 ## 测试纪律(spec Testing Decisions 落地)
 
 - 只在 `ProjectService` 公共接口上断言外部可观察行为:磁盘终态、推导对象、

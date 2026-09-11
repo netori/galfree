@@ -17,9 +17,16 @@ import { commitSnapshot, fileDiff, fileHistory, rollbackFile, type SnapshotEntry
 import { PROJECT_NAME_RE, renderTemplateFiles, templateKeepFiles } from './template.ts'
 import { FakeValidator } from './validation/template-validator.ts'
 import { deriveGraph, parseRpy, type RpyFile } from './rpy/parse.ts'
+import type { ParsedScript } from './rpy/dialect.ts'
 import type { BranchGraph } from './rpy/dialect.ts'
 import { computeProgress, sceneFingerprint, slotAssetPath, type ProgressSnapshot } from './progress.ts'
 import { readStamps, sceneTarget, slotTarget, stampsDocument, withStamp, type StampRecord } from './stamps.ts'
+import {
+  CHARACTERS_FILE, SLOTS_FILE, charactersDocument, readCharacters, readSlots, removeCharacter,
+  removeSlot, slotsDocument, upsertCharacter, upsertSlot,
+  type CharacterRecord, type SlotRecord,
+} from './characters.ts'
+import { deriveSlots } from './slots.ts'
 import { contentFingerprint, launchPlaytest, playtestDocument, readPlaytest, PLAYTEST_FILE, type PlaytestPorts, type PlaytestRun } from './playtest.ts'
 import { ABSENT, fileFingerprint } from './hash.ts'
 import { WriteGateway, type ChangeEvent, type FileSnapshot, type GatewayError, type WriteLogEntry, type WriteOp, type WriteResult } from './write-gateway.ts'
@@ -229,16 +236,43 @@ export class ProjectService {
 
   // ─── 推导进度 + 审读戳(T6)───────────────────────────────────────────
 
-  /** 阶段板:纯推导(文件 + 解析 + 校验 + 戳 + 试玩事实),可全量重算、幂等、无手写通道。 */
+  /**
+   * 阶段板:纯推导(文件 + 解析 + 校验 + 戳 + 试玩事实),可全量重算、幂等、无手写通道。
+   *
+   * 素材槽也从这里出去:槽清单派生自 `.rpy` 的图像引用,账本(制作信息)与登记簿
+   * (一致性锚)挂上去;悬空引用并入 problems → 与 lint 同源进板(ADR-0009 铁律)。
+   */
   async progress(projectRef: string): Promise<ProgressSnapshot> {
     const graph = await this.branchGraph(projectRef)
     const entry = await this.#resolve(projectRef)
-    const ledger = await readPlaytest(entry.path)
+    const [ledger, characters, parsed, playtest] = await Promise.all([
+      readSlots(entry.path),
+      readCharacters(entry.path),
+      this.#parseScript(projectRef),
+      readPlaytest(entry.path),
+    ])
+    const derived = deriveSlots({ parsed, ledger, characters })
     return computeProgress(entry.path, {
       scenes: graph.scenes,
-      problems: graph.problems,
-      playtest: { last: ledger?.last ?? null, currentFingerprint: contentFingerprint(graph) },
+      problems: [...graph.problems, ...derived.problems],
+      derivedSlots: derived.slots,
+      characters,
+      definedCharacters: parsed.characters,
+      playtest: { last: playtest?.last ?? null, currentFingerprint: contentFingerprint(graph) },
     })
+  }
+
+  /** 解析项目的全部 `.rpy`(场景 + 顶层角色定义);`branchGraph` 与槽派生共用。 */
+  async #parseScript(projectRef: string): Promise<ParsedScript> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const files: RpyFile[] = []
+    for (const item of await readdir(join(entry.path, 'game'), { withFileTypes: true })) {
+      if (item.isFile() && item.name.endsWith('.rpy')) {
+        files.push({ name: item.name, text: await readFile(join(entry.path, 'game', item.name), 'utf8') })
+      }
+    }
+    return parseRpy(files)
   }
 
   /**
@@ -279,12 +313,83 @@ export class ProjectService {
   }
 
   /** 人盖素材槽戳;槽未填(素材文件不存在)时拒绝(slot-not-filled)。 */
+  /**
+   * 人盖素材槽戳;槽未填(素材文件不存在)时拒绝(slot-not-filled)。
+   */
   async stampSlot(projectRef: string, slot: string, actor: { via: 'human' | 'agent' }): Promise<void> {
     this.#requireHuman(actor)
     const entry = await this.#resolve(projectRef)
     const fp = await fileFingerprint(entry.path, slotAssetPath(slot))
     if (fp === ABSENT) throw new GalfreeError('slot-not-filled', `素材槽未填,不能盖审读戳:${slot}`)
     await this.#putStamp(projectRef, slotTarget(slot), fp)
+  }
+
+  // ─── 角色登记簿 + 素材槽账本(T8)─────────────────────────────────────
+
+  /**
+   * 角色登记簿(读)。落盘在 `.studio/characters.json`,**只放制作信息与对 `.rpy` 的
+   * 引用,永不复制叙述内容**(ADR-0009 铁律)。
+   */
+  async characters(projectRef: string): Promise<CharacterRecord[]> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    return readCharacters(entry.path)
+  }
+
+  /** 新增/覆盖一个角色(经网关写 → 自动快照)。agent 侧同样可用:这是设定,不是人的主观认可。 */
+  async upsertCharacter(projectRef: string, record: CharacterRecord): Promise<void> {
+    const gateway = await this.#gatewayFor(projectRef)
+    const current = await gateway.read(CHARACTERS_FILE)
+    const characters = await this.characters(projectRef)
+    await gateway.writeBatch(
+      [{ path: CHARACTERS_FILE, content: charactersDocument(upsertCharacter(characters, record)), expectVersion: current.version }],
+      { origin: 'agent', reason: 'cast' },
+    )
+  }
+
+  /** 移除一个角色(经网关写 → 自动快照)。 */
+  async removeCharacter(projectRef: string, id: string): Promise<void> {
+    const gateway = await this.#gatewayFor(projectRef)
+    const current = await gateway.read(CHARACTERS_FILE)
+    const characters = await this.characters(projectRef)
+    await gateway.writeBatch(
+      [{ path: CHARACTERS_FILE, content: charactersDocument(removeCharacter(characters, id)), expectVersion: current.version }],
+      { origin: 'workbench', reason: 'cast' },
+    )
+  }
+
+  /** 素材槽账本(读):**只存制作信息**,槽清单本身永远从 `.rpy` 派生。 */
+  async slotLedger(projectRef: string): Promise<SlotRecord[]> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    return readSlots(entry.path)
+  }
+
+  /**
+   * 给一个槽挂/改制作信息(经网关写 → 自动快照)。
+   *
+   * 这里**不校验槽是否在 `.rpy` 里存在** —— 挂账先于写剧本是正常工作顺序;
+   * 悬空由推导在板上如实报错(`dangling-slot-ref`),而不是在写入时拦住。
+   */
+  async upsertSlot(projectRef: string, record: SlotRecord): Promise<void> {
+    const gateway = await this.#gatewayFor(projectRef)
+    const current = await gateway.read(SLOTS_FILE)
+    const ledger = await this.slotLedger(projectRef)
+    await gateway.writeBatch(
+      [{ path: SLOTS_FILE, content: slotsDocument(upsertSlot(ledger, record)), expectVersion: current.version }],
+      { origin: 'agent', reason: 'slot' },
+    )
+  }
+
+  /** 移除一个槽的制作信息(经网关写 → 自动快照;幂等)。 */
+  async removeSlot(projectRef: string, slot: string): Promise<void> {
+    const gateway = await this.#gatewayFor(projectRef)
+    const current = await gateway.read(SLOTS_FILE)
+    const ledger = await this.slotLedger(projectRef)
+    await gateway.writeBatch(
+      [{ path: SLOTS_FILE, content: slotsDocument(removeSlot(ledger, slot)), expectVersion: current.version }],
+      { origin: 'workbench', reason: 'slot' },
+    )
   }
 
   #requireHuman(actor: { via: 'human' | 'agent' }): void {

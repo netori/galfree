@@ -450,6 +450,57 @@ describe('路由适配层(/api/galfree)', () => {
     expect((await req('/api/galfree/picker/inspect')).status).toBe(400)
   })
 
+  it('素材板账本路由:登记角色 / 挂槽制作信息 / 派生结果立刻反映', async () => {
+    await freshProject()
+
+    // 空账本:如实返回空,不是错误。
+    const empty = await req('/api/galfree/cast')
+    expect(empty.status).toBe(200)
+    expect(empty.body).toEqual({ characters: [], slots: [] })
+
+    // 登记一个角色(经网关写 → 有新快照)。
+    const before = await req('/api/galfree/progress')
+    const snapshotsBefore = (await service.listProjects()).find((project) => project.active)!
+    const historyBefore = await service.snapshotHistory(snapshotsBefore.id, '.studio/characters.json')
+
+    const created = await postJson('/api/galfree/cast/characters/upsert', {
+      id: 'xiao_tang', name: '小棠', voice: 'alice', appearance: { hair: '黑色长直发' }, styleAnchor: 'clean anime lineart',
+    })
+    expect(created.status).toBe(200)
+    const historyAfter = await service.snapshotHistory(snapshotsBefore.id, '.studio/characters.json')
+    expect(historyAfter.length).toBeGreaterThan(historyBefore.length)
+
+    // 派生立刻反映:角色进入素材板,且"剧本里有没有它"是推导出来的。
+    const progress = await req('/api/galfree/progress')
+    const board = progress.body.characters.find((character: { id: string }) => character.id === 'xiao_tang')
+    expect(board).toBeDefined()
+    expect(board.defined).toBe(false) // SCRIPT 里没有 alice 的 Character 定义
+    expect(progress.body.slots.map((slot: { slot: string }) => slot.slot)).toEqual(expect.arrayContaining(['bg school']))
+    // 槽带着账本与定位字段(定位能力是 AC 的一部分)。
+    const school = progress.body.slots.find((slot: { slot: string }) => slot.slot === 'bg school')
+    expect(school.origin.file).toBe('script.rpy')
+    expect(school.origin.scenes).toContain('start')
+    void before
+
+    // 挂槽制作信息 → 账本落盘;悬空(要求不存在的角色)如实进 problems。
+    expect((await postJson('/api/galfree/cast/slots/upsert', {
+      slot: 'bg school', requiresCharacters: ['ghost'], prompt: '教室,午后的光',
+    })).status).toBe(200)
+    const withDangling = await req('/api/galfree/progress')
+    expect(withDangling.body.problems.some((problem: { code: string }) => problem.code === 'dangling-character-ref')).toBe(true)
+    expect(withDangling.body.lint.ok).toBe(false)
+
+    // 移除角色 / 移除账本:幂等且如实反映。
+    expect((await postJson('/api/galfree/cast/characters/remove', { id: 'xiao_tang' })).status).toBe(200)
+    expect((await postJson('/api/galfree/cast/slots/remove', { slot: 'bg school' })).status).toBe(200)
+    const cleaned = await req('/api/galfree/progress')
+    expect(cleaned.body.problems.some((problem: { code: string }) => problem.code === 'dangling-character-ref')).toBe(false)
+
+    // 非法输入:坏 id / 空槽名 → 400(不是 500)。
+    expect((await postJson('/api/galfree/cast/characters/upsert', { id: 'Bad Id', name: 'x' })).status).toBe(400)
+    expect((await postJson('/api/galfree/cast/slots/upsert', { slot: '' })).status).toBe(400)
+  })
+
   it('停用开关:仅 /state 可读,其余 503', async () => {
     const offline = createProjectService({ dataDir: join(dataDir, 'disabled') })
     const routes = makeRoutes({ service: offline, config: () => ({ enabled: false, defaultProjectsRoot: '' }) })
