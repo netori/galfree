@@ -45,7 +45,7 @@ GALFree v1 的**唯一测试接缝** = Host 侧项目服务(`src/service/project
 | 方法 | 语义 | 错误 code |
 |---|---|---|
 | `readProjectFile(ref, relPath)` | 现读磁盘 + 版本戳(内容哈希;缺失 = `ABSENT='absent'`,唯一哨兵,可直接回填 `expectVersion`) | `path-escape` |
-| `writeProjectFiles(ref, ops[], {origin,reason,scene?,slot?})` | **串行**原子批:每个 op **必须**带 `expectVersion`(CAS;新建传 `'absent'` 断言不存在,缺省 → `expect-required` 拒绝);先全批校验(任一不符整批不落),再落盘(中途失败逐文件回滚);成功后触发快照钩子 + `internal` 事件 | `version-drift` `expect-required` `write-failed` |
+| `writeProjectFiles(ref, ops[], {origin,reason,scene?,slot?})` | **串行**原子批:每个 op **必须**带 `expectVersion`(CAS;新建传 `'absent'` 断言不存在,缺省 → `expect-required` 拒绝)。先全批校验(快速失败,通常无需回滚),再逐文件落盘;**落盘写前用刚读的旧内容做权威 CAS 复校**,关闭校验→写入之间的外部写 TOCTOU 缝隙;中途失败逐文件回滚 | `version-drift` `expect-required` `write-failed` |
 | `observeChanges(ref, listener)` | 订阅 `{path,version,kind:'internal'｜'external'}` | — |
 | `writeLog(ref)` | 插桩:每条形如 `{path,batchId,version,reason,origin,at}`;"无旁路写"断言源 | — |
 | `gatewayErrors(ref)` | 非致命故障如实呈现:`snapshot-failed`(批已落盘但 git commit 失败)/ `rollback-failed` / `watch-failed` | — |
@@ -133,7 +133,9 @@ GALFree v1 的**唯一测试接缝** = Host 侧项目服务(`src/service/project
   - `GET /validate` → `ValidationReport`
   - 错误响应 `{error, code}` + 状态码:漂移/越权/缺版本戳/未就绪 = 409
 - `GET /events`(**SSE**):仅推 `{type:'external-change'}`(外部写观察,100ms 合并;
-  网关自写不推)。客户端收到即重拉 `/state`+`/progress`;轮询 8s 兜底。
+  网关自写不推 —— 写窗口(1.5s TTL)内该路径的监听事件按自身写噪声抑制,
+  Windows 截断写的中间态不可信,窗口内的真实外部改动由 8s 轮询兜底)。
+  客户端收到即重拉 `/state`+`/progress`;轮询 8s 兜底。
   后续环节扩展帧型(`batch-committed`、`queue-progress`)保持"事件轻、状态拉"原则。
 
 ## 测试纪律(spec Testing Decisions 落地)

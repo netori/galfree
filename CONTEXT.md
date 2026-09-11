@@ -29,4 +29,8 @@
 
 ## 进行中(未收口)
 
-- 无——待发起人确认共识纪要,随后 `to-spec`。
+- 环节零(T1–T7)已交付:接缝契约成文(`docs/contracts/stage-zero.md` +
+  `dialect-subset.md`),快带测试全绿;GitHub issues #9–#15 待推送后自动关闭。
+- 遗留人工验收:标准插件流程安装后侧边栏入口/面板渲染(AC 明确为人验收);
+  慢集成带(`npm run test:slow`,真钉版 SDK lint/compile)首次发版前必跑。
+- 剧本环节(T8–T12)、素材环节(T13–T16)、音频/发布(T17–T18)未开工。

@@ -80,8 +80,12 @@ export interface GatewayError {
 export class WriteGateway {
   #queue: Promise<unknown> = Promise.resolve()
   #batch = 0
-  /** 网关自身写盘时登记的期望哈希,watch 见到即判为 internal(抑制"外部"事件)。 */
-  #internalWrites = new Map<string, string>()
+  /** 当前批正在落盘的路径(绝对):窗口内事件为写噪声(截断中间态),直接跳过。 */
+  #inFlight = new Set<string>()
+  /** 写完成→settle 复查之间的路径:事件延迟到 settle 时刻统一判定。 */
+  #settling = new Map<string, { marker: string; timer: ReturnType<typeof setTimeout> }>()
+  /** 每路径最近一次自身写的最终内容哈希:watcher 迟到地看到自己写的终态时据此抑制。 */
+  #lastInternal = new Map<string, string>()
   #listeners = new Set<(change: ChangeEvent) => void>()
   #watcher: ReturnType<typeof watch> | undefined
   #watchStop: AbortController | undefined
@@ -134,22 +138,28 @@ export class WriteGateway {
         })
       }
     }
-    // 2) 准备:计算新版本并登记 internal 标记(watcher 抑制用)。
+    // 2) 准备:计算新版本。
     const batchId = ++this.#batch
     const versions: Record<string, string> = {}
-    const prepared: Array<{ abs: string; op: WriteOp; prev: string | null }> = []
+    const prepared: Array<{ abs: string; op: WriteOp }> = []
     for (const op of ops) {
       const abs = this.#abs(op.path)
       versions[op.path] = op.content === null ? ABSENT : fingerprint(op.content)
-      this.#internalWrites.set(abs, versions[op.path]!)
-      prepared.push({ abs, op, prev: null })
+      prepared.push({ abs, op })
     }
-    // 3) 原子性:先确保目录,再写;失败回滚已写内容到旧值。
-    //    回滚快照在写前捕获(仅本批已写过的文件)。
+    // 3) 原子性:写窗口内(#inFlight)的路径事件按写噪声跳过;
+    //    写前用刚读的旧内容做**权威 CAS 复校**,关闭校验→写入之间的 TOCTOU 缝隙。
+    for (const item of prepared) this.#inFlight.add(item.abs)
     const written: Array<{ abs: string; prev: string | null }> = []
     try {
       for (const item of prepared) {
         const prev = await this.#safeReadRaw(item.abs)
+        const prevVersion = prev === null ? ABSENT : fingerprint(prev)
+        if (prevVersion !== item.op.expectVersion) {
+          throw new GalfreeError('version-drift', `落盘前版本漂移:${item.op.path} 期望 ${item.op.expectVersion},实际 ${prevVersion}`, {
+            path: item.op.path, expected: item.op.expectVersion, actual: prevVersion, origin: reason.origin,
+          })
+        }
         if (item.op.content === null) {
           await rm(item.abs, { force: true })
         } else {
@@ -159,6 +169,7 @@ export class WriteGateway {
         written.push({ abs: item.abs, prev })
       }
     } catch (error) {
+      for (const item of prepared) this.#inFlight.delete(item.abs)
       // 回滚(尽力而为);每步失败如实记录,不吞。
       for (const done of written.reverse()) {
         try {
@@ -168,18 +179,35 @@ export class WriteGateway {
           this.#recordError(batchId, 'rollback-failed', `回滚 ${relative(this.#root, done.abs)} 失败:${String(rollbackError)}`)
         }
       }
+      if (error instanceof GalfreeError && error.code === 'version-drift') throw error
       throw new GalfreeError('write-failed', `写批落盘失败,已尝试回滚:${String(error)}`)
     }
-    // 4) 记写日志、广播 internal 事件、触发批提交钩子(快照 T3 挂这里)。
+    // 4) 记写日志、广播 internal 事件、启动 settle 复查(判定写窗口内是否又混入外部改动)。
     const at = new Date().toISOString()
     for (const op of ops) {
       const version = versions[op.path] ?? ABSENT
       this.#writeLog.push({ path: op.path, batchId, version, reason: reason.reason, origin: reason.origin, at })
       this.#emit({ path: op.path, version, kind: 'internal' })
     }
-    // 让 watcher 有机会消费 internal 标记后再清理(一次写可能触发多个 watch 事件)。
-    const timer = setTimeout(() => { for (const op of ops) this.#internalWrites.delete(this.#abs(op.path)) }, 1500)
-    timer.unref?.()
+    for (const item of prepared) {
+      this.#inFlight.delete(item.abs)
+      const marker = versions[item.op.path] ?? ABSENT
+      this.#rememberInternal(item.abs, marker)
+      const timer = setTimeout(() => {
+        this.#settling.delete(item.abs)
+        void (async () => {
+          try {
+            const now = await this.read(item.op.path)
+            if (now.version !== marker) {
+              // 写窗口内确有外部改动(或回滚发生):如实补一条 external。
+              this.#emit({ path: item.op.path, version: now.version, kind: 'external' })
+            }
+          } catch { /* 读失败不打断;轮询兜底 */ }
+        })()
+      }, 350)
+      timer.unref?.()
+      this.#settling.set(item.abs, { marker, timer })
+    }
     for (const hook of this.#batchHooks) {
       try {
         await hook({ batchId, reason, versions })
@@ -215,6 +243,15 @@ export class WriteGateway {
   #recordError(batchId: number, kind: GatewayError['kind'], message: string): void {
     this.#errors.push({ batchId, kind, message, at: new Date().toISOString() })
     if (this.#errors.length > 100) this.#errors.shift()
+  }
+
+  /** 记住本路径最近一次自身写的终态(有界);watcher 迟到事件据此抑制。 */
+  #rememberInternal(abs: string, marker: string): void {
+    this.#lastInternal.set(abs, marker)
+    if (this.#lastInternal.size > 500) {
+      const oldest = this.#lastInternal.keys().next().value
+      if (oldest !== undefined) this.#lastInternal.delete(oldest)
+    }
   }
 
   async #safeReadRaw(abs: string): Promise<string | null> {
@@ -259,12 +296,10 @@ export class WriteGateway {
             raw = null // 目录事件或已删除
           }
           const version = raw === null ? ABSENT : fingerprint(raw)
-          const expectedInternal = this.#internalWrites.get(abs)
-          if (expectedInternal !== undefined && version === expectedInternal) {
-            // 这是网关自己的写:已在 writeBatch 广播过,抑制"外部"事件。
-            // 标记由批后的 TTL 清理(一次写可能触发多个 watch 事件,不能在此消费)。
-            continue
-          }
+          // 写窗口(#inFlight)与 settle 复查(#settling)覆盖的路径:事件交给
+          // settle 时刻统一判定;窗口外迟到的"自己写的终态"按 #lastInternal 抑制。
+          if (this.#inFlight.has(abs) || this.#settling.has(abs)) continue
+          if (this.#lastInternal.get(abs) === version) continue
           this.#emit({ path: rel, version, kind: 'external' })
         }
       } catch (error) {
@@ -279,6 +314,9 @@ export class WriteGateway {
     this.#watchStop?.abort()
     this.#watchStop = undefined
     this.#watcher = undefined
+    for (const { timer } of this.#settling.values()) clearTimeout(timer)
+    this.#settling.clear()
+    this.#inFlight.clear()
     this.#listeners.clear()
   }
 }
