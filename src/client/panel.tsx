@@ -43,9 +43,20 @@ export function WorkbenchPanel() {
 
   useEffect(() => {
     void refresh()
-    const timer = window.setInterval(() => void refresh(), 4000)
-    return () => window.clearInterval(timer)
-  }, [refresh])
+    // 推送优先:SSE(网关观察到外部修改即推);轮询 8s 仅做兜底。
+    let source: EventSource | undefined
+    try {
+      source = new EventSource('/api/galfree/events')
+      source.onmessage = () => void refresh()
+    } catch {
+      source = undefined
+    }
+    const timer = window.setInterval(() => void refresh(), 8000)
+    return () => {
+      window.clearInterval(timer)
+      source?.close()
+    }
+  }, [refresh, state?.activeId])
 
   const create = async (): Promise<void> => {
     setBusy(true)

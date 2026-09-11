@@ -124,6 +124,42 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
+  // 变更推送(SSE):外部修改 → 网关观察 → 工作台无刷新即更新(T2;协议在 T7 定稿)。
+  if (method === 'GET' && path === '/events') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    })
+    res.write(': galfree events\n\n')
+    let debounce: ReturnType<typeof setTimeout> | undefined
+    const stop = service.observeChanges(active.id, (change) => {
+      if (change.kind !== 'external') return
+      // 合并抖动:100ms 内的多次外部改动推一帧(客户端收到即重拉状态)。
+      if (debounce !== undefined) return
+      debounce = setTimeout(() => {
+        debounce = undefined
+        try {
+          res.write(`data: ${JSON.stringify({ type: 'external-change' })}\n\n`)
+        } catch { /* 客户端已断开 */ }
+      }, 100)
+      debounce.unref?.()
+    })
+    const heartbeat = setInterval(() => {
+      try { res.write(': ping\n\n') } catch { /* closed */ }
+    }, 25_000)
+    heartbeat.unref?.()
+    req.on('close', () => {
+      clearInterval(heartbeat)
+      if (debounce !== undefined) clearTimeout(debounce)
+      stop()
+    })
+    return
+  }
+
   writeJson(res, 404, { error: `未知路由 ${method} ${path}` })
 }
 

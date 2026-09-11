@@ -1,18 +1,21 @@
 /**
  * 项目服务(Seam —— 唯一测试接缝,spec "Seam" 节)。
  *
- * Host 侧深接口:T1 起承载 注册表 + 模板新建;后续环节在**同一对象**上生长
- * (写网关、结构解析、推导进度、校验回路、图像队列、快照、试玩)。
- * agent 工具与工作台 Client 只是两个薄适配器,消费这里的状态,不另立真相源。
+ * Host 侧深接口:T1 注册表 + 模板新建;T2 写网关(项目内容的唯一写通道)与
+ * 外部观察。后续环节在同一对象上生长(结构解析、推导进度、校验回路、图像
+ * 队列、快照、试玩)。agent 工具与工作台 Client 只是两个薄适配器,消费这里
+ * 的状态,不另立真相源。
  */
-import { access, mkdir, writeFile } from 'node:fs/promises'
+import { access, mkdir } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { GalfreeError } from './error.ts'
 import { runGit } from './git.ts'
-import { ProjectRegistry } from './registry.ts'
+import { ProjectRegistry, type RegistryEntry } from './registry.ts'
 import { PROJECT_NAME_RE, renderTemplateFiles, templateKeepFiles } from './template.ts'
 import { TemplateValidator } from './validation/template-validator.ts'
+import { WriteGateway, type ChangeEvent, type FileSnapshot, type WriteLogEntry, type WriteOp, type WriteResult } from './write-gateway.ts'
+import type { WriteBatchReason } from './write-gateway.ts'
 import type { ValidationReport } from './validation/contract.ts'
 
 export interface ProjectInfo {
@@ -47,11 +50,14 @@ export interface ProjectServiceOptions {
 export class ProjectService {
   #registry: ProjectRegistry
   #validator: TemplateValidator
+  #gateways = new Map<string, WriteGateway>()
 
   constructor(options: ProjectServiceOptions) {
     this.#registry = new ProjectRegistry(join(options.dataDir, 'registry.json'))
     this.#validator = options.validator ?? new TemplateValidator()
   }
+
+  // ─── 注册表与模板新建(T1)────────────────────────────────────────────
 
   async createProject(input: CreateProjectInput): Promise<ProjectInfo> {
     if (!PROJECT_NAME_RE.test(input.name)) {
@@ -72,41 +78,25 @@ export class ProjectService {
 
     const id = randomUUID()
     const createdAt = new Date().toISOString()
-    const files = [
-      ...renderTemplateFiles({ name: input.name, title, id }),
-      ...templateKeepFiles(),
-    ]
-    const dirs = new Set<string>()
-    for (const file of files) {
-      dirs.add(join(root, file.path, '..'))
-    }
-    for (const dir of [...dirs].sort()) await mkdir(dir, { recursive: true })
-    for (const file of files) await writeFile(join(root, file.path), file.content, 'utf8')
+    await mkdir(root, { recursive: true })
+
+    // 模板内容一律经网关落盘(网关是唯一写通道)。
+    const files = [...renderTemplateFiles({ name: input.name, title, id }), ...templateKeepFiles()]
+    const gateway = new WriteGateway(root)
+    await gateway.writeBatch(
+      files.map((file): WriteOp => ({ path: file.path, content: file.content, expectVersion: 'absent' })),
+      { origin: 'workbench', reason: 'scaffold' },
+    )
+    this.#gateways.set(id, gateway)
 
     try {
       await this.#initGit(root, input.name)
     } catch (error) {
-      // 初始化失败不留半成品注册:目录已写但 git 失败 → 报 git-init-failed(目录不注册)。
       throw new GalfreeError('git-init-failed', `模板 git 初始化失败:${String(error)}`)
     }
 
     await this.#registry.add({ id, name: input.name, title, path: root, createdAt })
     return this.#toInfo(id)
-  }
-
-  /** 模板 git 化:init + 初始提交(作者 GALFree,ADR-0011)。 */
-  async #initGit(root: string, name: string): Promise<void> {
-    await runGit(root, ['init', '--initial-branch', 'main'])
-    await runGit(root, ['add', '--all'])
-    await runGit(root, ['commit', '--no-gpg-sign', '--author', 'GALFree <galfree@dsh.local>', '-m', `chore(galfree): scaffold template project "${name}"`])
-  }
-
-  async #commit(root: string, message: string): Promise<void> {
-    await runGit(root, ['add', '--all'])
-    // 无变化(未暂存内容)时跳过:commit 失败=模板瑕疵,直接冒泡。
-    const staged = await runGit(root, ['diff', '--cached', '--name-only'])
-    if (staged.length === 0) return
-    await runGit(root, ['commit', '--no-gpg-sign', '--author', 'GALFree <galfree@dsh.local>', '-m', message])
   }
 
   async listProjects(): Promise<ProjectInfo[]> {
@@ -133,6 +123,37 @@ export class ProjectService {
     await this.#registry.setActive(id)
   }
 
+  // ─── 写网关(T2)─────────────────────────────────────────────────────
+
+  /** 读项目文件 + 当前版本戳(网关口径:磁盘为真)。 */
+  async readProjectFile(projectRef: string, relPath: string): Promise<FileSnapshot> {
+    return (await this.#gatewayFor(projectRef)).read(relPath)
+  }
+
+  /** 经网关提交一个原子写批(串行 + CAS)。 */
+  async writeProjectFiles(projectRef: string, ops: WriteOp[], reason: WriteBatchReason): Promise<WriteResult> {
+    return (await this.#gatewayFor(projectRef)).writeBatch(ops, reason)
+  }
+
+  /** 订阅变更(网关写 = internal;外部编辑器/git 改动 = external → 工作台刷新)。 */
+  observeChanges(projectRef: string, listener: (change: ChangeEvent) => void): () => void {
+    let disposed = false
+    let unsubscribe: (() => void) | undefined
+    void this.#gatewayFor(projectRef).then((gw) => {
+      if (!disposed) unsubscribe = gw.observe(listener)
+    })
+    return () => {
+      disposed = true
+      unsubscribe?.()
+    }
+  }
+
+  /** 写日志插桩(断言无旁路写)。 */
+  async writeLog(projectRef: string): Promise<WriteLogEntry[]> {
+    const gateway = await this.#gatewayFor(projectRef)
+    return [...gateway.log]
+  }
+
   /** 校验回路:对当前激活项目跑验证器(T1 假验证器;T4 接方言解析契约)。 */
   async validateActiveProject(): Promise<ValidationReport> {
     const active = await this.getActiveProject()
@@ -141,12 +162,42 @@ export class ProjectService {
     return this.#validator.validate(join(active.root, 'game'))
   }
 
-  /** 供后续环节复用:把一次文件集变更并入新快照(T3 起走写网关的提交钩子)。 */
-  async snapshotActive(message: string): Promise<void> {
-    const active = await this.getActiveProject()
-    if (active === null) throw new GalfreeError('no-active-project', '没有激活项目')
-    if (active.missing) throw new GalfreeError('project-missing', `项目目录已不存在:${active.root}`)
-    await this.#commit(active.root, message)
+  /** 停掉全部监听(宿主 dispose 与测试收尾用)。 */
+  async dispose(): Promise<void> {
+    for (const gateway of this.#gateways.values()) await gateway.dispose()
+    this.#gateways.clear()
+  }
+
+  // ─── 内部 ────────────────────────────────────────────────────────────
+
+  /** 按 id 或 name 解析项目,返回其网关(懒建)。 */
+  async #gatewayFor(projectRef: string): Promise<WriteGateway> {
+    const entry = await this.#resolve(projectRef)
+    let gateway = this.#gateways.get(entry.id)
+    if (gateway === undefined) {
+      await this.#assertPresent(entry)
+      gateway = new WriteGateway(entry.path)
+      this.#gateways.set(entry.id, gateway)
+    }
+    return gateway
+  }
+
+  async #resolve(projectRef: string): Promise<RegistryEntry> {
+    const byId = await this.#registry.get(projectRef)
+    if (byId !== undefined) return byId
+    const all = await this.#registry.list()
+    const matches = all.filter((entry) => entry.name === projectRef)
+    if (matches.length === 1) return matches[0]!
+    if (matches.length > 1) throw new GalfreeError('ambiguous-project', `项目名 ${projectRef} 有多个匹配,请用 id 引用`)
+    throw new GalfreeError('unknown-project', `注册表中不存在项目 ${projectRef}`)
+  }
+
+  async #assertPresent(entry: RegistryEntry): Promise<void> {
+    try {
+      await access(join(entry.path, 'game'))
+    } catch {
+      throw new GalfreeError('project-missing', `项目目录已不存在:${entry.path}`)
+    }
   }
 
   async #toInfo(id: string): Promise<ProjectInfo> {
@@ -160,6 +211,13 @@ export class ProjectService {
     }
     const activeId = await this.#registry.activeId()
     return { ...entry, root: entry.path, active: activeId === entry.id, missing }
+  }
+
+  /** 模板 git 化:init + 初始提交(作者 GALFree,ADR-0011)。 */
+  async #initGit(root: string, name: string): Promise<void> {
+    await runGit(root, ['init', '--initial-branch', 'main'])
+    await runGit(root, ['add', '--all'])
+    await runGit(root, ['commit', '--no-gpg-sign', '--author', 'GALFree <galfree@dsh.local>', '-m', `chore(galfree): scaffold template project "${name}"`])
   }
 }
 

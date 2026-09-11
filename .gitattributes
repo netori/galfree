@@ -1,0 +1,8 @@
+# 行尾归一:项目模板/账本文件按 LF 提交(快照 diff 断言依赖稳定字节)。
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.webp binary
+*.zip binary
+*.rpy text eol=lf
+*.py text eol=lf

@@ -42,6 +42,7 @@ describe('项目服务 · 模板新建项目(T1)', () => {
   })
 
   afterEach(async () => {
+    await service.dispose()
     await cleanupTempDirs()
   })
 
