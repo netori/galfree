@@ -7,7 +7,11 @@
 ## 状态
 
 - ✅ 环节零(T1–T7):项目服务接缝、写网关、git 快照、方言子集解析器、
-  假/真校验回路、钉版 SDK 供给、推导进度 + 审读戳、试玩控制、工作台最小壳
+  假/真校验回路、钉版 SDK 供给、推导进度 + 审读戳、试玩控制、工作台
+- ✅ 工作台面板:舞台板(场景 × 素材槽 × 印章)、文件树筛选、快照历史与 diff、
+  SDK 供给卡;**审读戳可以盖到素材槽**(接缝早有 stampSlot,缺的是入口)
+- ✅ 路由适配层契约测试(`src/service/routes.test.ts`):状态码映射 / 方法守卫 /
+  SSE 帧 / 工作台实际调用的每个端点
 - ⏳ 剧本环节(T8–T12)、素材环节(T13–T16)、音频/发布(T17–T18)
 
 ## 工程
@@ -16,6 +20,9 @@
 src/
   index.ts            Host 半(cordis apply:路由/设置/装配)
   client/             工作台 Client 半(sidebar.panellist + main 面板)
+    panel.tsx           面板本体(只渲染接缝状态,不自己判断进度)
+    panel.module.css    设计令牌 + 版式(配色全走宿主 --dsw-* token)
+    ui.tsx              Chip / 印章 / 提示条 / diff 视图
   routes.ts           /api/galfree 薄适配器
   service/            ★ 项目服务(seam)——独占逻辑全在这里
     project-service.ts   注册表 + 模板新建 + 全部环节方法
@@ -32,7 +39,7 @@ docs/contracts/       接缝契约(dialect-subset.md / stage-zero.md)
 
 ```bash
 npm run typecheck      # tsc --noEmit
-npm test               # 快集成带(无网络、无真 SDK;65 tests)
+npm test               # 快集成带(无网络、无真 SDK;78 tests)
 npm run test:slow      # 慢集成带(真钉版 SDK lint/compile;发版前必跑)
 npm run build          # lib/index.js(ESM host)+ lib/client.js(web bundle)
 ```

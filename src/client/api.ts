@@ -62,6 +62,7 @@ export interface SlotProgressView {
   slot: string
   assetPath: string
   filled: boolean
+  fingerprint: string
   stamp: string
 }
 
@@ -71,18 +72,39 @@ export interface SceneProgressView {
   line: number
   readOnly: boolean
   missingDialogue: boolean
+  dialogueCount: number
   slots: SlotProgressView[]
   missingSlots: string[]
   stamp: string
   lintErrors: number
 }
 
+/** 方言子集外的结构问题(如实上板,不吞)。 */
+export interface DialectProblemView {
+  severity: 'error' | 'warning'
+  file: string
+  line?: number
+  code: string
+  message: string
+  snippet?: string
+}
+
 export interface ProgressView {
   scenes: SceneProgressView[]
+  problems: DialectProblemView[]
   lint: { ok: boolean; errors: number; warnings: number }
   playtest: { at: string; state: 'pass' | 'fail' | 'stale'; exitCode: number; technicalPass: boolean; traceback: string | null } | null
   summary: { scenes: number; missingDialogue: number; missingSlots: number; lintErrors: number; awaitingReview: number; degraded: number; playtestFail: number; playtestNotRun: number }
   degraded: boolean
+}
+
+export interface SdkView {
+  requested: 'override' | 'pinned' | string
+  dir: string
+  launcherReady: boolean
+  version?: string
+  mismatch?: { pinned: string; actual: string }
+  provision: { state: string; progress: { fraction: number; message?: string }; error?: string }
 }
 
 export class GalfreeApi {
@@ -116,8 +138,17 @@ export class GalfreeApi {
   }
 
   /** SDK 供给状态(T5;首次下载进度可见)。 */
-  async sdk(): Promise<{ requested: string; dir: string; launcherReady: boolean; mismatch?: { pinned: string; actual: string }; provision: { state: string; progress: { fraction: number; message?: string }; error?: string } }> {
+  async sdk(): Promise<SdkView> {
     return readJson(await fetch('/api/galfree/sdk'))
+  }
+
+  /** 素材槽级审读戳(T15 前补:接缝早就有 stampSlot,缺的是入口)。 */
+  async stampSlot(slot: string): Promise<void> {
+    await readJson<unknown>(await fetch('/api/galfree/stamps/slot', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ slot }),
+    }))
   }
 
   async sdkEnsure(): Promise<{ state: string; error: string | null; progress: { fraction: number; message?: string } }> {
