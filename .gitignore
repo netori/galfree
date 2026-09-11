@@ -1,1 +1,5 @@
-﻿.scratch/
+.scratch/
+node_modules/
+lib/
+package-lock.json.bak
+*.vsix

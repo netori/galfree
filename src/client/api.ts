@@ -1,0 +1,72 @@
+/**
+ * /api/galfree 路由族的浏览器端客户端 —— 唯一数据通道(同源 fetch)。
+ * 视图类型与 src/routes.ts 的响应形状对齐(接缝状态的呈现层)。
+ */
+export interface ProjectView {
+  id: string
+  name: string
+  title: string
+  root: string
+  createdAt: string
+  active: boolean
+  missing: boolean
+}
+
+export interface TreeNode {
+  name: string
+  path: string
+  dir: boolean
+  children?: TreeNode[]
+}
+
+export interface StateView {
+  projects: ProjectView[]
+  activeId: string | null
+  tree: TreeNode[]
+  activeRoot: string | null
+  activeMissing: boolean
+}
+
+export class GalfreeApiError extends Error {
+  constructor(message: string, readonly code?: string) {
+    super(message)
+    this.name = 'GalfreeApiError'
+  }
+}
+
+async function readJson<T>(response: Response): Promise<T> {
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    throw new GalfreeApiError(`HTTP ${response.status}: 非 JSON 响应`)
+  }
+  if (!response.ok) {
+    const message = typeof (body as { error?: unknown })?.error === 'string' ? (body as { error: string }).error : `HTTP ${response.status}`
+    const code = typeof (body as { code?: unknown })?.code === 'string' ? (body as { code: string }).code : undefined
+    throw new GalfreeApiError(message, code)
+  }
+  return body as T
+}
+
+export class GalfreeApi {
+  async state(): Promise<StateView> {
+    return readJson<StateView>(await fetch('/api/galfree/state'))
+  }
+
+  async createProject(name: string, title?: string, projectsRoot?: string): Promise<void> {
+    await readJson<unknown>(await fetch('/api/galfree/projects/create', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name, title, projectsRoot }),
+    }))
+  }
+
+  async activate(id: string): Promise<void> {
+    await readJson<unknown>(await fetch('/api/galfree/projects/activate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id }),
+    }))
+  }
+}

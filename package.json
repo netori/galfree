@@ -1,0 +1,77 @@
+{
+  "name": "dsh-galfree",
+  "version": "0.1.0",
+  "description": "GALFree — Ren'Py galgame full-pipeline workbench plugin for DeepSeek Harness. Host-side project service (write gateway, git snapshots, dialect-subset parser, derived progress, review stamps, pinned SDK validation, playtest) behind one deep seam; the workbench is an embedded web panel consuming the same state.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "renpy",
+    "galgame",
+    "workbench"
+  ],
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "templates",
+    "cordis.patch.yml",
+    "docs/contracts",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "react",
+        "@deepseek-ai/cordis",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "watch": "tsdown --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:slow": "vitest run --config vitest.slow.config.ts",
+    "clean": "node -e \"require('fs').rmSync('lib',{recursive:true,force:true})\""
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "react": "^18.3.1"
+  },
+  "dependencies": {
+    "schemastery": "^3.18.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.5-alpha.2",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.5-alpha.2",
+    "@deepseek-ai/dsh-settings": "^0.1.5-alpha.2",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.5-alpha.2",
+    "@deepseek-ai/dsh-tools": "^0.1.5-alpha.2",
+    "@types/node": "^22.20.0",
+    "@types/react": "~18.3.1",
+    "lightningcss": "^1.32.0",
+    "react": "^18.3.1",
+    "tsdown": "0.22.2",
+    "typescript": "~5.7.2",
+    "vitest": "^3.0.0"
+  },
+  "license": "MIT"
+}
