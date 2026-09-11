@@ -1,14 +1,15 @@
 /**
- * 目录选择:把宿主的目录选择接缝呈现成两种入口。
+ * 目录选择:两个入口,主次分明。
  *
- * 接缝是**能力式**的(`ctx.directoryPicker.capability().kind`):
- *   · `native` —— 宿主屏幕上的 OS 选择器(本机 DSH Desktop 的常态):点按钮直接开
- *     文件管理器,人取消就什么都不改。
- *   · `browse` —— 应用内目录浏览器(远程/无显示会话):面板里的抽屉,列举一层目录、
- *     可进入子目录、可新建文件夹。
- *   · `none`   —— 没有 backend:隐藏入口,退回手输路径 + 默认父目录(不假装能选)。
+ * **面板内目录浏览器恒可用** —— 数据来自 /picker/list,宿主 browse 后端在就用宿主的,
+ * 不在就由插件自带底座兜底(理由见 src/service/directory-listing.ts 顶部:宿主后端是
+ * 运行时动态装配的,那条链不该成为"能不能选文件夹"的单点)。
  *
- * 失败一律说人话:宿主的封闭业务码 1:1 映射成具体建议,而不是笼统"操作失败"。
+ * **宿主屏幕上的 OS 选择器是增强** —— `native` 能力在时多给一个「开系统对话框」按钮,
+ * 因为系统文件夹框对人更顺手;它不在也不影响主路径。它若报错(后端挂了/超时),
+ * 面板直接把浏览器打开,不让人卡在一个点了没反应的按钮上。
+ *
+ * 手输路径随时可用,并会即时校验(不存在 / 不是文件夹都当场说清)。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { DirectoryListing, GalfreeApi, PickerCapability } from './api.ts'
@@ -29,7 +30,7 @@ function describePickerFailure(error: unknown): string {
     case 'picker-timeout':
       return message
     case 'picker-unsupported':
-      return `宿主没有可用的目录选择器:${message}。直接手输路径,或在设置里配 defaultProjectsRoot。`
+      return `这个宿主的系统对话框不可用(${message});用上面的「浏览…」在面板里选。`
     default:
       return message
   }
@@ -37,7 +38,7 @@ function describePickerFailure(error: unknown): string {
 
 export function DirectoryPicker({ api, value, onPick, disabled }: {
   api: GalfreeApi
-  /** 当前父目录输入框的值(用来给浏览器一个起始位置)。 */
+  /** 当前父目录输入框的值(给浏览器一个起始位置)。 */
   value: string
   onPick: (path: string) => void
   disabled: boolean
@@ -46,6 +47,7 @@ export function DirectoryPicker({ api, value, onPick, disabled }: {
   const [picking, setPicking] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [browsing, setBrowsing] = useState(false)
+  const [probe, setProbe] = useState<{ exists: boolean; isDirectory: boolean } | null>(null)
 
   useEffect(() => {
     let live = true
@@ -55,7 +57,20 @@ export function DirectoryPicker({ api, value, onPick, disabled }: {
     return () => { live = false }
   }, [api])
 
-  const pick = async (): Promise<void> => {
+  // 手输或选完之后校验一次:这个位置现在能不能放项目(不猜,问 host)。
+  useEffect(() => {
+    const trimmed = value.trim()
+    if (trimmed === '') { setProbe(null); return }
+    let live = true
+    const timer = window.setTimeout(() => {
+      void api.inspectPath(trimmed)
+        .then((result) => { if (live) setProbe({ exists: result.exists, isDirectory: result.isDirectory }) })
+        .catch(() => { if (live) setProbe(null) })
+    }, 350)
+    return () => { live = false; window.clearTimeout(timer) }
+  }, [api, value])
+
+  const pickNative = async (): Promise<void> => {
     setPicking(true)
     setError(null)
     try {
@@ -63,19 +78,13 @@ export function DirectoryPicker({ api, value, onPick, disabled }: {
       // 取消是正常结果:什么都不改,也不弹提示。
       if (!result.cancelled && result.path !== null) onPick(result.path)
     } catch (pickError) {
-      setError(describePickerFailure(pickError))
+      const message = describePickerFailure(pickError)
+      setError(message)
+      // 系统对话框用不了 → 别让人卡住,直接把面板里的浏览器打开。
+      setBrowsing(true)
     } finally {
       setPicking(false)
     }
-  }
-
-  const kind = capability?.kind ?? 'none'
-  if (kind === 'none' && capability !== null) {
-    return (
-      <span className={s.emptyHint} title={capability.note}>
-        宿主没有目录选择器,手输路径或用默认父目录
-      </span>
-    )
   }
 
   return (
@@ -83,17 +92,27 @@ export function DirectoryPicker({ api, value, onPick, disabled }: {
       <button
         type="button"
         className={s.button}
-        disabled={disabled || picking || capability === null}
-        onClick={() => { if (kind === 'native') void pick(); else setBrowsing(true) }}
-        title={kind === 'native' ? '打开系统的文件夹选择框' : '在面板里逐层选文件夹'}
+        disabled={disabled}
+        onClick={() => setBrowsing(true)}
+        title="在面板里逐层选文件夹,可新建文件夹"
       >
-        {picking ? <><Spinner /> 等你在对话框里选…</> : '选择文件夹…'}
+        浏览…
       </button>
-      {kind === 'browse' ? (
-        <button type="button" className={`${s.button} ${s.ghost} ${s.tiny}`} disabled={disabled} onClick={() => void pick()}
-          title="如果这个宿主的原生选择器可用,也可以直接开系统对话框">
-          用系统对话框
+      {capability?.native === true ? (
+        <button
+          type="button"
+          className={s.button}
+          disabled={disabled || picking}
+          onClick={() => void pickNative()}
+          title="打开系统的文件夹选择框"
+        >
+          {picking ? <><Spinner /> 等你在对话框里选…</> : '开系统对话框'}
         </button>
+      ) : null}
+      {probe !== null && value.trim() !== '' ? (
+        <Chip tone={probe.isDirectory ? 'ok' : probe.exists ? 'warn' : 'quiet'} title={value.trim()}>
+          {probe.isDirectory ? '目录存在' : probe.exists ? '这不是文件夹' : '路径还不存在(创建时会建)'}
+        </Chip>
       ) : null}
       {error !== null ? (
         <div style={{ flexBasis: '100%' }}>

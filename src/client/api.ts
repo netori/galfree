@@ -34,16 +34,22 @@ export interface StateView {
 export interface PickerCapability {
   kind: 'native' | 'browse' | 'none' | string
   note?: string
+  /** 面板内目录浏览器恒可用(宿主后端缺席时由插件自带底座兜底)。 */
+  browse: boolean
+  /** 宿主屏幕上的 OS 选择器是否可用(有则更好,不是前置条件)。 */
+  native: boolean
   defaultProjectsRoot: string
 }
 
-/** 浏览后端的一层目录(只含子目录;宿主保证按名排序)。 */
+/** 一层目录(只含子目录;按名排序)。 */
 export interface DirectoryListing {
   path: string
   home: string
   crumbs: Array<{ name: string; path: string }>
   entries: Array<{ name: string; path: string; hidden: boolean }>
   truncated: boolean
+  /** host = 宿主 browse 后端;plugin = 插件自带底座。 */
+  source?: 'host' | 'plugin'
 }
 
 export class GalfreeApiError extends Error {
@@ -222,6 +228,11 @@ export class GalfreeApi {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ path: parent, name }),
     }))
+  }
+
+  /** 手输路径的即时校验:这个位置现在是不是一个能放项目的目录。 */
+  async inspectPath(path: string): Promise<{ path: string; exists: boolean; isDirectory: boolean }> {
+    return readJson(await fetch(`/api/galfree/picker/inspect?path=${encodeURIComponent(path)}`))
   }
 
   /** SDK 供给状态(T5;首次下载进度可见)。 */

@@ -6,6 +6,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { GalfreeError } from './service/error.ts'
+import { createSubdirectory, describePath, listDirectories } from './service/directory-listing.ts'
 import type { ProjectService } from './service/project-service.ts'
 import type { ProvisionStatus } from './service/sdk-provision.ts'
 
@@ -17,8 +18,11 @@ export interface RouteDeps {
    * 目录选择端口(宿主 `ctx.directoryPicker` 的转接)。
    *
    * 能力式接缝:后端可能是 `native`(宿主屏幕上的 OS 选择器)或 `browse`(应用内
-   * 目录浏览),也可能是 `none`(没装 backend)。**没有选择入口时如实报告、让 UI
-   * 隐藏入口**,而不是让插件加载失败。
+   * 目录浏览),也可能**根本没有** —— `dsh-host-directory-picker-auto` 是用运行时
+   * Loader 动态装配后端的,那一步失败是静默的。
+   *
+   * 所以本插件自带 `directory-listing.ts` 作**降级底座**:端口缺席时,/picker/list 与
+   * /picker/create-directory 照样工作,面板里的目录浏览器不受宿主启动时序影响。
    */
   picker?: {
     capability: () => Promise<{ kind: string; note?: string }>
@@ -101,6 +105,7 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['/picker/pick', ['POST']],
   ['/picker/list', ['GET']],
   ['/picker/create-directory', ['POST']],
+  ['/picker/inspect', ['GET']],
   ['/playtest', ['POST']],
   ['/sdk', ['GET']],
   ['/sdk/ensure', ['POST']],
@@ -308,13 +313,17 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
-  // 目录选择:把宿主的 `ctx.directoryPicker` 能力如实交给面板。
-  // 面板按 kind 决定入口形态:native = 按钮开 OS 选择器;browse = 面板内目录浏览器;
-  // none = 隐藏入口(退回手输路径 + 默认父目录)。
+  // 目录选择:把**可用**的选择方式如实交给面板。
+  //
+  // 关键取舍:"能不能选文件夹"不押在宿主 Loader 有没有把后端挂上 —— 宿主选择器
+  // 在就用它(OS 对话框 / 宿主列举),不在就用插件自带的目录列举兜底,因此
+  // `browse` 恒为可用,`native` 才是那个"有则更好"的增强。
   if (method === 'GET' && path === '/picker') {
     const capability = deps.picker === undefined ? { kind: 'none' } : await deps.picker.capability()
     writeJson(res, 200, {
       ...capability,
+      browse: true,
+      native: capability.kind === 'native',
       defaultProjectsRoot: deps.config().defaultProjectsRoot,
     })
     return
@@ -338,22 +347,47 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
+  // 列举/新建目录:宿主 browse 后端优先;缺席或报错则回落到插件自带底座。
   if (method === 'GET' && path === '/picker/list') {
-    if (deps.picker === undefined) throw new GalfreeError('picker-unsupported', '宿主未提供目录选择接缝')
     const target = url.searchParams.get('path')
-    const listing = await deps.picker.list(target === null || target === '' ? undefined : target)
-    writeJson(res, 200, listing)
+    const wanted = target === null || target === '' ? undefined : target
+    if (deps.picker !== undefined) {
+      try {
+        const listing = await deps.picker.list(wanted)
+        return writeJson(res, 200, { ...(listing as Record<string, unknown>), source: 'host' })
+      } catch (error) {
+        const failure = pickerFailure(error)
+        // 宿主的类型化失败说明"这个目录本身读不了" → 如实报,不要假装兜底成功。
+        if (failure !== null && failure.code === 'directory-unreadable') throw error
+        // 其他情况(没挂上后端、未知错)才回落到自带底座。
+      }
+    }
+    writeJson(res, 200, { ...(await listDirectories(wanted)), source: 'plugin' })
     return
   }
 
   if (method === 'POST' && path === '/picker/create-directory') {
-    if (deps.picker === undefined) throw new GalfreeError('picker-unsupported', '宿主未提供目录选择接缝')
     const body = await readJsonBody(req)
     const parent = String(body.path ?? '')
     const name = String(body.name ?? '')
     if (parent === '' || name === '') throw new GalfreeError('bad-json', '需要 path(父目录)与 name(单段目录名)')
-    const created = await deps.picker.createDirectory(parent, name)
-    writeJson(res, 201, created)
+    if (deps.picker !== undefined) {
+      try {
+        const created = await deps.picker.createDirectory(parent, name)
+        return writeJson(res, 201, created)
+      } catch (error) {
+        if (pickerFailure(error) !== null) throw error
+      }
+    }
+    writeJson(res, 201, await createSubdirectory(parent, name))
+    return
+  }
+
+  // 手输路径的即时校验:这个位置现在能不能放项目(面板据此提醒,不假装成功)。
+  if (method === 'GET' && path === '/picker/inspect') {
+    const target = url.searchParams.get('path')
+    if (target === null || target === '') return writeJson(res, 400, { error: '需要 path 查询参数' })
+    writeJson(res, 200, { path: target, ...(await describePath(target)) })
     return
   }
 

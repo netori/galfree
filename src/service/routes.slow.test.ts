@@ -16,7 +16,7 @@
  * 例外本身的记录见 docs/contracts/stage-zero.md 的测试纪律节。
  */
 import { createServer, request as httpRequest, type Server } from 'node:http'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -396,19 +396,58 @@ describe('路由适配层(/api/galfree)', () => {
     expect((await postJson('/api/galfree/picker/create-directory', { path: '/home/tester' })).status).toBe(400)
   })
 
-  it('目录选择:没有 backend 时如实报 none,面板据此隐藏入口', async () => {
+  it('宿主没有选择器后端时:浏览器仍可用(插件自带底座兜底),系统对话框如实报不可用', async () => {
+    // 真实故障形态:dsh-host-directory-picker-auto 用运行时 Loader 动态装后端,
+    // 那一步失败是静默的 → ctx.directoryPicker 根本不存在。
     const bare = createProjectService({ dataDir: join(dataDir, 'nopicker') })
     const routes = makeRoutes({ service: bare, config: () => ({ enabled: true, defaultProjectsRoot: '' }) })
     const s = createServer((request, response) => { void routes[0]!.handler(request, response) })
     await new Promise<void>((resolve) => s.listen(0, '127.0.0.1', resolve))
     const port = (s.address() as { port: number }).port
-    const capability = await (await fetch(`http://127.0.0.1:${port}/api/galfree/picker`)).json() as { kind: string }
+    const origin = `http://127.0.0.1:${port}/api/galfree`
+
+    const capability = await (await fetch(`${origin}/picker`)).json() as { kind: string; browse: boolean; native: boolean }
     expect(capability.kind).toBe('none')
-    const pick = await fetch(`http://127.0.0.1:${port}/api/galfree/picker/pick`, { method: 'POST' })
-    expect(pick.status).toBe(501)
+    // 关键:浏览入口恒可用 —— 不再挂在宿主启动时序上
+    expect(capability.browse).toBe(true)
+    expect(capability.native).toBe(false)
+
+    // 系统对话框如实报不可用(不假装成功)
+    expect((await fetch(`${origin}/picker/pick`, { method: 'POST' })).status).toBe(501)
+
+    // 自带底座真的能列目录(数据源是磁盘,不是假的)
+    const listing = await (await fetch(`${origin}/picker/list?path=${encodeURIComponent(projectsRoot)}`)).json() as {
+      path: string; entries: Array<{ name: string }>; source?: string
+    }
+    expect(listing.source).toBe('plugin')
+    expect(listing.path).toBe(projectsRoot)
+    expect(listing.entries.length).toBeGreaterThan(0)
+
+    // 也能真的建目录(磁盘终态断言)
+    const created = await fetch(`${origin}/picker/create-directory`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: projectsRoot, name: 'from-fallback' }),
+    })
+    expect(created.status).toBe(201)
+    expect(await readdir(projectsRoot)).toContain('from-fallback')
+
     await bare.dispose()
     await new Promise<void>((resolve) => s.close(() => resolve()))
     pickerKind = 'native'
+  })
+
+  it('手输路径即时校验:存在与否、是不是目录,都如实回答', async () => {
+    const exists = await req(`/api/galfree/picker/inspect?path=${encodeURIComponent(projectsRoot)}`)
+    expect(exists.status).toBe(200)
+    expect(exists.body).toMatchObject({ exists: true, isDirectory: true })
+
+    const missing = await req('/api/galfree/picker/inspect?path=D%3A%5Cnope-nope-nope')
+    expect(missing.status).toBe(200)
+    expect(missing.body.exists).toBe(false)
+
+    const relative = await req('/api/galfree/picker/inspect?path=relative')
+    expect(relative.body.exists).toBe(false)
+    expect((await req('/api/galfree/picker/inspect')).status).toBe(400)
   })
 
   it('停用开关:仅 /state 可读,其余 503', async () => {
