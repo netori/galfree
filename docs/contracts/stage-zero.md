@@ -148,14 +148,34 @@ GALFree v1 的**唯一测试接缝** = Host 侧项目服务(`src/service/project
     `snapshotRollback` 走网关落盘,并自动产生一条回滚快照(历史不改写)
   - `GET /files/content?path=` → `{path,content,version,bytes}` —— 只读预览;读走网关口径
     (磁盘为真 + 当前版本戳),不产生写
+  - `GET /picker` → `{kind, defaultProjectsRoot}` —— 目录选择**能力**(不做假设,如实上报)
+  - `POST /picker/pick` → `{path, cancelled}` —— 开宿主屏幕上的 OS 选择器;取消是正常结果
+    (`cancelled:true`,面板什么都不改),超时则中止并报 `picker-timeout`
+  - `GET /picker/list?path=` / `POST /picker/create-directory` → 应用内浏览后端的列举与建目录
   - `GET /validate` → `ValidationReport`
   - 错误响应 `{error, code}` + 状态码:漂移/越权/缺版本戳/未就绪 = 409;
-    目标不存在(含项目目录被挪走)= 404;请求体不合法 = 400;路径存在但方法不对 = 405 + `Allow`
+    目标不存在(含项目目录被挪走)= 404;请求体不合法 = 400;路径存在但方法不对 = 405 + `Allow`;
+    选择器不可用 = 501、超时 = 504;浏览后端的类型化失败(目录不可读/已存在/建不出)= 409 并透出业务码
 - `GET /events`(**SSE**):仅推 `{type:'external-change'}`(外部写观察,100ms 合并;
   网关自写不推 —— 写窗口(1.5s TTL)内该路径的监听事件按自身写噪声抑制,
   Windows 截断写的中间态不可信,窗口内的真实外部改动由 8s 轮询兜底)。
   客户端收到即重拉 `/state`+`/progress`;轮询 8s 兜底。
   后续环节扩展帧型(`batch-committed`、`queue-progress`)保持"事件轻、状态拉"原则。
+
+### 目录选择(接缝在宿主,插件只转接)
+
+新建项目的父目录由**宿主的目录选择接缝** `ctx.directoryPicker` 提供(GUI 宿主装配
+`dsh-host-directory-picker-auto`,按启动时的宿主处境挑一个后端)。它是**能力式**约定,
+所以插件不假设存在哪种交互,只把能力如实交给面板:
+
+| kind | 交互 | 面板表现 |
+|---|---|---|
+| `native` | 宿主屏幕上的 OS 文件夹选择框 | 「选择文件夹…」按钮直接开框 |
+| `browse` | 应用内目录浏览(`list` / `createDirectory`) | 面板内抽屉:逐层进入、可建新文件夹 |
+| `none` | 宿主没装后端 | 隐藏入口,退回手输路径 + 默认父目录(不假装能选) |
+
+`defaultProjectsRoot`(设置里的默认父目录)随 `/state` 与 `/picker` 一起下发,面板据此在
+表单里**显式写出"将创建到 `<父目录>\<项目名>`"** —— 不选文件夹也不会建到人不知道的地方。
 
 ## 测试纪律(spec Testing Decisions 落地)
 

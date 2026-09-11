@@ -15,6 +15,7 @@ import { stampKey } from './types.ts'
 import { Chip, Notice, Spinner, relativeTime } from './ui.tsx'
 import { StageBoard } from './stage-board.tsx'
 import { FileInspector } from './file-inspector.tsx'
+import { DirectoryPicker } from './directory-picker.tsx'
 import { ProjectSwitcher } from './project-switcher.tsx'
 import { SdkCard } from './sdk-card.tsx'
 import s from './panel.module.css'
@@ -114,11 +115,20 @@ export function WorkbenchPanel() {
     return () => window.clearInterval(timer)
   }, [playing, refresh])
 
+  // 默认父目录首帧带出一次(之后不再覆盖人的输入 —— 人改过就以人的为准)。
+  const prefilledRoot = useRef(false)
+  useEffect(() => {
+    const fallback = state?.defaultProjectsRoot ?? ''
+    if (prefilledRoot.current || fallback === '') return
+    prefilledRoot.current = true
+    setDraft((current) => (current.projectsRoot === '' ? { ...current, projectsRoot: fallback } : current))
+  }, [state?.defaultProjectsRoot])
+
   const create = async (): Promise<void> => {
     setCreating(true)
     try {
       await api.createProject(draft.name.trim(), draft.title.trim() || undefined, draft.projectsRoot.trim() || undefined)
-      setDraft({ name: '', title: '', projectsRoot: '' })
+      setDraft((current) => ({ ...current, name: '', title: '' }))
       setShowCreate(false)
       await refresh()
     } catch (error) {
@@ -127,6 +137,11 @@ export function WorkbenchPanel() {
       setCreating(false)
     }
   }
+
+  /** 父目录回落到默认值后,面板要能说清"到底会建到哪"。 */
+  const defaultRoot = state?.defaultProjectsRoot ?? ''
+  const resolvedRoot = draft.projectsRoot.trim() !== '' ? draft.projectsRoot.trim() : defaultRoot
+  const separator = resolvedRoot.includes('\\') ? '\\' : '/'
 
   const activate = async (id: string): Promise<void> => {
     setSwitching(true)
@@ -252,23 +267,36 @@ export function WorkbenchPanel() {
                   />
                 </label>
                 <label className={`${s.field} ${s.fieldRoot}`}>
-                  <span className={s.fieldLabel}>父目录 · 留空用默认设置</span>
+                  <span className={s.fieldLabel}>
+                    父目录{defaultRoot === '' ? ' · 还没配默认位置,先选一个' : ' · 已带出默认位置'}
+                  </span>
                   <input
                     className={s.input}
-                    placeholder="D:\galgame"
+                    placeholder="点右边「选择文件夹…」,或直接粘路径"
                     value={draft.projectsRoot}
                     onChange={(e) => setDraft({ ...draft, projectsRoot: e.target.value })}
                   />
                 </label>
+                <DirectoryPicker
+                  api={api}
+                  value={draft.projectsRoot}
+                  disabled={creating}
+                  onPick={(path) => setDraft((current) => ({ ...current, projectsRoot: path }))}
+                />
                 <button
                   type="button"
                   className={`${s.button} ${s.primary}`}
-                  disabled={creating || draft.name.trim() === ''}
+                  disabled={creating || draft.name.trim() === '' || resolvedRoot === ''}
                   onClick={() => void create()}
                 >
                   {creating ? <><Spinner /> 创建中…</> : '创建并激活'}
                 </button>
-                <span className={s.formHint}>项目名只允许小写字母、数字、- 与 _,创建后即成为当前项目。</span>
+                <span className={s.formHint}>
+                  项目名只允许小写字母、数字、- 与 _,创建后即成为当前项目。
+                  {resolvedRoot === ''
+                    ? ' 先选一个父目录,或在设置 → 插件 → GALFree 里配默认父目录。'
+                    : ` 将创建到 ${resolvedRoot}${draft.name.trim() === '' ? `${separator}<项目名>` : `${separator}${draft.name.trim()}`}`}
+                </span>
               </div>
             </div>
           </section>

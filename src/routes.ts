@@ -13,6 +13,19 @@ export interface RouteDeps {
   service: ProjectService
   /** 解析后的插件设置(enabled/defaultProjectsRoot/sdkPath…)。 */
   config: () => { enabled: boolean; defaultProjectsRoot: string }
+  /**
+   * 目录选择端口(宿主 `ctx.directoryPicker` 的转接)。
+   *
+   * 能力式接缝:后端可能是 `native`(宿主屏幕上的 OS 选择器)或 `browse`(应用内
+   * 目录浏览),也可能是 `none`(没装 backend)。**没有选择入口时如实报告、让 UI
+   * 隐藏入口**,而不是让插件加载失败。
+   */
+  picker?: {
+    capability: () => Promise<{ kind: string; note?: string }>
+    pick: (signal?: AbortSignal) => Promise<string | null>
+    list: (path?: string, signal?: AbortSignal) => Promise<unknown>
+    createDirectory: (path: string, name: string) => Promise<unknown>
+  }
   /** SDK 供给(T5;未装配时路由如实报告不可用)。 */
   sdk?: {
     status: () => Promise<{
@@ -84,11 +97,38 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['/snapshots/diff', ['GET']],
   ['/snapshots/rollback', ['POST']],
   ['/files/content', ['GET']],
+  ['/picker', ['GET']],
+  ['/picker/pick', ['POST']],
+  ['/picker/list', ['GET']],
+  ['/picker/create-directory', ['POST']],
   ['/playtest', ['POST']],
   ['/sdk', ['GET']],
   ['/sdk/ensure', ['POST']],
   ['/events', ['GET']],
 ]
+
+/** 原生选择器给人的时间:开窗、翻目录、确认。超时即中止(宿主会关掉对话框)。 */
+const PICK_TIMEOUT_MS = 120_000
+
+/**
+ * 宿主目录选择接缝的**类型化失败**(`DirectoryPickerError`)。
+ *
+ * 它在宿主包里被声明,我们不 import 它(插件不该依赖宿主内部包),改用文档承诺的
+ * 结构约定识别:带封闭业务码 + 出错路径的 Error。识别到了就 1:1 映射成协议错误码,
+ * 而不是笼统的 500。
+ */
+const PICKER_ERROR_CODES = new Set(['directory-unreadable', 'directory-exists', 'directory-create-failed'])
+
+function pickerFailure(error: unknown): { code: string; path?: string; message: string } | null {
+  if (!(error instanceof Error)) return null
+  const candidate = error as Error & { code?: unknown; path?: unknown }
+  if (typeof candidate.code !== 'string' || !PICKER_ERROR_CODES.has(candidate.code)) return null
+  return {
+    code: candidate.code,
+    message: error.message,
+    ...(typeof candidate.path === 'string' ? { path: candidate.path } : {}),
+  }
+}
 
 /** 项目文件树(受限深度/数量;快照噪声与缓存排除在外)。 */
 const TREE_IGNORE = new Set(['.git', '.rpyc'])
@@ -150,6 +190,8 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
       activeRoot: active?.root ?? null,
       activeMissing: active?.missing ?? false,
       gatewayErrors: errors,
+      // 新建项目的默认父目录(空 = 尚未配置,面板要显式提醒人先选一个)
+      defaultProjectsRoot: deps.config().defaultProjectsRoot,
     })
     return
   }
@@ -266,6 +308,55 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
+  // 目录选择:把宿主的 `ctx.directoryPicker` 能力如实交给面板。
+  // 面板按 kind 决定入口形态:native = 按钮开 OS 选择器;browse = 面板内目录浏览器;
+  // none = 隐藏入口(退回手输路径 + 默认父目录)。
+  if (method === 'GET' && path === '/picker') {
+    const capability = deps.picker === undefined ? { kind: 'none' } : await deps.picker.capability()
+    writeJson(res, 200, {
+      ...capability,
+      defaultProjectsRoot: deps.config().defaultProjectsRoot,
+    })
+    return
+  }
+
+  if (method === 'POST' && path === '/picker/pick') {
+    if (deps.picker === undefined) throw new GalfreeError('picker-unsupported', '宿主未提供目录选择接缝')
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), PICK_TIMEOUT_MS)
+    timer.unref?.()
+    try {
+      const picked = await deps.picker.pick(controller.signal)
+      // 取消是正常结果(人改了主意),不是错误:如实回报 cancelled,面板什么都不改。
+      writeJson(res, 200, { path: picked, cancelled: picked === null })
+    } catch (error) {
+      if (controller.signal.aborted) throw new GalfreeError('picker-timeout', `目录选择超时(${PICK_TIMEOUT_MS / 1000} 秒),已中止`)
+      throw error
+    } finally {
+      clearTimeout(timer)
+    }
+    return
+  }
+
+  if (method === 'GET' && path === '/picker/list') {
+    if (deps.picker === undefined) throw new GalfreeError('picker-unsupported', '宿主未提供目录选择接缝')
+    const target = url.searchParams.get('path')
+    const listing = await deps.picker.list(target === null || target === '' ? undefined : target)
+    writeJson(res, 200, listing)
+    return
+  }
+
+  if (method === 'POST' && path === '/picker/create-directory') {
+    if (deps.picker === undefined) throw new GalfreeError('picker-unsupported', '宿主未提供目录选择接缝')
+    const body = await readJsonBody(req)
+    const parent = String(body.path ?? '')
+    const name = String(body.name ?? '')
+    if (parent === '' || name === '') throw new GalfreeError('bad-json', '需要 path(父目录)与 name(单段目录名)')
+    const created = await deps.picker.createDirectory(parent, name)
+    writeJson(res, 201, created)
+    return
+  }
+
   // 一键试玩(T7):接缝同一控制器,无第二管线。
   if (method === 'POST' && path === '/playtest') {
     const active = await service.getActiveProject()
@@ -335,11 +426,18 @@ export function makeRoutes(deps: RouteDeps): GalfreeRoute[] {
       try {
         await dispatch(deps, req, res)
       } catch (error) {
-        if (error instanceof GalfreeError) {
+        const failure = pickerFailure(error)
+        if (failure !== null) {
+          // 浏览后端的类型化失败:业务码原样透出,409 表示"你的操作与磁盘现状冲突"
+          // (目录不可读 / 已存在 / 建不出来),面板按 code 说人话。
+          writeJson(res, 409, { error: failure.message, code: failure.code, path: failure.path })
+        } else if (error instanceof GalfreeError) {
           // 404 = 目标不存在(含"项目目录已被挪走"),与 5xx 的"服务端故障"严格区分。
           const status = error.code === 'no-active-project' || error.code === 'unknown-project' || error.code === 'unknown-scene' || error.code === 'project-missing' ? 404
             : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' ? 400
             : error.code === 'body-too-large' ? 413
+            : error.code === 'picker-unsupported' ? 501
+            : error.code === 'picker-timeout' ? 504
             : error.code === 'version-drift' || error.code === 'expect-required' || error.code === 'path-escape' || error.code === 'stamp-forbidden' || error.code === 'slot-not-filled' || error.code === 'sdk-not-ready' ? 409
             : 500
           writeJson(res, status, { error: error.message, code: error.code })

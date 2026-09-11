@@ -26,6 +26,24 @@ export interface StateView {
   activeRoot: string | null
   activeMissing: boolean
   gatewayErrors: Array<{ batchId: number; kind: string; message: string; at: string }>
+  /** 新建项目的默认父目录(空 = 未配置,面板要显式提醒先选一个)。 */
+  defaultProjectsRoot: string
+}
+
+/** 目录选择能力(宿主 `ctx.directoryPicker` 的形态)。 */
+export interface PickerCapability {
+  kind: 'native' | 'browse' | 'none' | string
+  note?: string
+  defaultProjectsRoot: string
+}
+
+/** 浏览后端的一层目录(只含子目录;宿主保证按名排序)。 */
+export interface DirectoryListing {
+  path: string
+  home: string
+  crumbs: Array<{ name: string; path: string }>
+  entries: Array<{ name: string; path: string; hidden: boolean }>
+  truncated: boolean
 }
 
 export class GalfreeApiError extends Error {
@@ -175,6 +193,34 @@ export class GalfreeApi {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ path, to }),
+    }))
+  }
+
+  /** 目录选择能力:面板据此决定入口形态(OS 选择器 / 应用内浏览 / 隐藏)。 */
+  async picker(): Promise<PickerCapability> {
+    return readJson(await fetch('/api/galfree/picker'))
+  }
+
+  /**
+   * 打开宿主屏幕上的 OS 目录选择器。取消 → `{ path: null, cancelled: true }`。
+   * 原生对话框会一直等到人操作,所以这条请求的等待时间由人的操作决定。
+   */
+  async pickDirectory(): Promise<{ path: string | null; cancelled: boolean }> {
+    return readJson(await fetch('/api/galfree/picker/pick', { method: 'POST' }))
+  }
+
+  /** 应用内浏览:列举一层目录(不给 path 则列举宿主账户家目录)。 */
+  async listDirectory(path?: string): Promise<DirectoryListing> {
+    const qs = path === undefined || path === '' ? '' : `?path=${encodeURIComponent(path)}`
+    return readJson(await fetch(`/api/galfree/picker/list${qs}`))
+  }
+
+  /** 应用内浏览:在父目录下建一个子目录(单段名),返回新目录。 */
+  async createDirectory(parent: string, name: string): Promise<{ path: string; name: string }> {
+    return readJson(await fetch('/api/galfree/picker/create-directory', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: parent, name }),
     }))
   }
 

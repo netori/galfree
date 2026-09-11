@@ -10,6 +10,9 @@
   假/真校验回路、钉版 SDK 供给、推导进度 + 审读戳、试玩控制、工作台
 - ✅ 工作台面板:舞台板(场景 × 素材槽 × 印章)、文件树筛选、文件内容预览、
   快照历史 / diff / 回滚、项目切换、SDK 供给卡
+- ✅ 新建项目的父目录走**宿主目录选择接缝**(`ctx.directoryPicker`):本机直接开系统
+  文件夹选择框,远程/无显示会话用面板内目录浏览器,没装后端就隐藏入口;不选则回落到
+  设置里的默认父目录,表单里写明"将创建到哪"
 - ✅ 两处**接缝已备、入口缺失**的补齐(经发起人确认):素材槽盖审读戳(接缝早有
   `stampSlot`)、快照回滚(接缝早有 `snapshotRollback`)
 - ✅ 路由适配层契约测试(`src/service/routes.slow.test.ts`,**慢带**):状态码映射 /
@@ -26,6 +29,7 @@ src/
     panel.tsx           装配层:拉接缝状态、分发、把人的动作送回去
     stage-board.tsx     舞台板(读 scene.marks / stampable —— 不自己判断)
     file-inspector.tsx  文件内容 / 快照历史 / diff / 回滚
+    directory-picker.tsx 目录选择(OS 选择框 / 面板内浏览器,按宿主能力)
     project-switcher.tsx 注册表激活位切换
     sdk-card.tsx        钉版 SDK 供给
     ui.tsx              Chip / 印章 / 提示条 / diff 视图

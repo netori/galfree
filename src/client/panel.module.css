@@ -362,6 +362,64 @@ button.slotChip:disabled { opacity: 0.5; cursor: default; }
   margin-top: 6px;
 }
 
+/* ─── 目录选择抽屉 ─────────────────────────────────────────────────── */
+
+.dialogBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.dialog {
+  width: min(560px, 100%);
+  max-height: min(70vh, 560px);
+  display: flex;
+  flex-direction: column;
+  background: var(--dsw-alias-bg-layer-1, #fff);
+  color: var(--gf-text);
+  border: 0.5px solid var(--gf-border-2);
+  border-radius: 14px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+}
+.dialogHead { display: flex; align-items: center; gap: 8px; padding: 13px 14px 10px; }
+.dialogPath { display: flex; align-items: center; gap: 10px; padding: 0 14px 10px; border-bottom: 0.5px solid var(--gf-border); }
+.crumbs { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 2px; font-family: var(--gf-mono); font-size: 11.5px; }
+.crumb { background: none; border: 0; padding: 1px 4px; border-radius: 5px; color: var(--gf-accent); font: inherit; cursor: pointer; }
+.crumb:hover { background: var(--gf-hover); }
+.crumbSep { color: var(--gf-text-4); }
+.dialogBody { flex: 1; overflow: auto; padding: 6px; }
+.dirRow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.dirRow:hover { background: var(--gf-hover); }
+.dirRow:focus-visible { outline: 2px solid var(--gf-accent); outline-offset: -1px; }
+.dialogFoot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border-top: 0.5px solid var(--gf-border);
+  flex-wrap: wrap;
+}
+.checkLabel { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--gf-text-2); cursor: pointer; }
+
 /* ─── 提示与空态 ───────────────────────────────────────────────────── */
 
 .notice {

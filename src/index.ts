@@ -13,6 +13,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createProjectService } from './service/project-service.ts'
 import { makeRoutes } from './routes.ts'
+import { GalfreeError } from './service/error.ts'
 import { SdkProvisioner, probeOverrideSdk } from './service/sdk-provision.ts'
 import { extractZip, httpsDownloader } from './service/sdk-real.ts'
 import { findLauncher, platformLauncherName } from './service/hash.ts'
@@ -24,6 +25,29 @@ export const name = 'galfree'
 
 /** 挂载工作台路由与设置所需的服务。 */
 export const inject = ['webServer', 'settings']
+
+/**
+ * 目录选择接缝(`ctx.directoryPicker`,由 dsh-web-app 的 adapter 装配 backend)。
+ *
+ * 它刻意**不进 `inject`**:接缝是能力式的(原生 OS 选择器 `native` / 应用内
+ * 浏览器 `browse`),缺 backend 时正确行为是"隐藏选择入口"而不是插件加载失败,
+ * 所以这里按名取用、容忍缺席。结构按宿主文档的能力约定声明,不引入对宿主包的依赖。
+ */
+interface DirectoryPickerSeam {
+  capability: () => {
+    kind: string
+    /** `native`:打开宿主屏幕上的 OS 选择器,取消返回 null。 */
+    pick?: (signal?: AbortSignal) => Promise<string | null>
+    /** `browse`:列举一层目录。 */
+    list?: (path?: string, signal?: AbortSignal) => Promise<unknown>
+    /** `browse`:在指定父目录下建一个子目录(单段名)。 */
+    createDirectory?: (path: string, name: string) => Promise<unknown>
+  }
+}
+
+function directoryPickerSeam(ctx: Context): DirectoryPickerSeam | undefined {
+  return (ctx as unknown as { directoryPicker?: DirectoryPickerSeam }).directoryPicker
+}
 
 export interface Config {
   /** 主开关(路由;关闭后仅 /state 可读)。 */
@@ -108,6 +132,36 @@ export function apply(ctx: Context, config?: Config): void {
       const disposers = makeRoutes({
         service,
         config: current,
+        // 目录选择:每次请求现取接缝(backend 可能晚些激活,能力对象在服务生命周期内稳定)。
+        picker: {
+          capability: async () => {
+            const seam = directoryPickerSeam(ctx)
+            if (seam === undefined) return { kind: 'none' as const }
+            try {
+              return { kind: seam.capability().kind }
+            } catch (error) {
+              return { kind: 'none' as const, note: String(error) }
+            }
+          },
+          pick: async (signal) => {
+            const seam = directoryPickerSeam(ctx)
+            const capability = seam?.capability()
+            if (capability?.pick === undefined) throw new GalfreeError('picker-unsupported', '宿主没有原生目录选择器(当前后端为应用内浏览)')
+            return await capability.pick(signal)
+          },
+          list: async (path, signal) => {
+            const seam = directoryPickerSeam(ctx)
+            const capability = seam?.capability()
+            if (capability?.list === undefined) throw new GalfreeError('picker-unsupported', '宿主没有应用内目录浏览后端')
+            return await capability.list(path, signal)
+          },
+          createDirectory: async (path, name) => {
+            const seam = directoryPickerSeam(ctx)
+            const capability = seam?.capability()
+            if (capability?.createDirectory === undefined) throw new GalfreeError('picker-unsupported', '宿主没有应用内目录浏览后端')
+            return await capability.createDirectory(path, name)
+          },
+        },
         sdk: {
           status: async () => {
             const override = current().sdkPath

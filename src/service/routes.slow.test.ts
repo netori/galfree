@@ -42,6 +42,9 @@ let service: ProjectService
 let dataDir: string
 let projectsRoot: string
 let seq = 0
+/** 目录选择后端形态与"人在对话框里选了什么",按用例改写。 */
+let pickerKind = 'native'
+let pickedPath: string | null = null
 
 async function req(path: string, init?: RequestInit): Promise<{ status: number; body: any }> {
   const res = await fetch(`${base}${path}`, init)
@@ -86,7 +89,20 @@ beforeAll(async () => {
   service = createProjectService({ dataDir })
   const routes = makeRoutes({
     service,
-    config: () => ({ enabled: true, defaultProjectsRoot: '' }),
+    config: () => ({ enabled: true, defaultProjectsRoot: projectsRoot }),
+    // 目录选择端口用假后端:原生选择器会开真对话框,自动化面不能碰。
+    picker: {
+      capability: async () => ({ kind: pickerKind }),
+      pick: async () => (pickerKind === 'native' ? pickedPath : null),
+      list: async (path?: string) => ({
+        path: path ?? '/home/tester',
+        home: '/home/tester',
+        crumbs: [{ name: '/', path: '/' }, { name: 'home', path: '/home' }],
+        entries: [{ name: 'projects', path: '/home/projects', hidden: false }, { name: '.config', path: '/home/.config', hidden: true }],
+        truncated: false,
+      }),
+      createDirectory: async (path: string, name: string) => ({ path: `${path}/${name}`, name }),
+    },
     sdk: {
       status: async () => ({
         requested: 'pinned' as const,
@@ -336,6 +352,63 @@ describe('路由适配层(/api/galfree)', () => {
     }
     controller.abort()
     expect(sawEvent).toBe(true)
+  })
+
+  it('目录选择:native 后端回报能力、选中路径与取消;不选就什么都不改', async () => {
+    pickerKind = 'native'
+    pickedPath = null
+
+    const capability = await req('/api/galfree/picker')
+    expect(capability.status).toBe(200)
+    expect(capability.body.kind).toBe('native')
+    // 默认父目录随能力一起给面板,好让它说清"不选会建到哪"
+    expect(capability.body.defaultProjectsRoot).toBe(projectsRoot)
+
+    const cancelled = await postJson('/api/galfree/picker/pick', {})
+    expect(cancelled.status).toBe(200)
+    expect(cancelled.body).toEqual({ path: null, cancelled: true })
+
+    pickedPath = projectsRoot
+    const picked = await postJson('/api/galfree/picker/pick', {})
+    expect(picked.status).toBe(200)
+    expect(picked.body).toEqual({ path: projectsRoot, cancelled: false })
+
+    // 选完之后真的能拿它建项目(端到端:选目录 → 建项目)
+    const created = await postJson('/api/galfree/projects/create', { name: `picked${(seq += 1)}`, projectsRoot: picked.body.path })
+    expect(created.status).toBe(201)
+  })
+
+  it('目录选择:browse 后端给一层列举;原生入口如实报"不可用"而不是假装成功', async () => {
+    pickerKind = 'browse'
+
+    const capability = await req('/api/galfree/picker')
+    expect(capability.body.kind).toBe('browse')
+
+    const listing = await req('/api/galfree/picker/list?path=%2Fhome%2Ftester')
+    expect(listing.status).toBe(200)
+    expect(listing.body.entries.map((entry: { name: string }) => entry.name)).toEqual(['projects', '.config'])
+    expect(listing.body.entries.find((entry: { name: string }) => entry.name === '.config').hidden).toBe(true)
+    expect(listing.body.crumbs.length).toBeGreaterThan(0)
+
+    const created = await postJson('/api/galfree/picker/create-directory', { path: '/home/tester', name: 'new-folder' })
+    expect(created.status).toBe(201)
+    expect(created.body.path).toBe('/home/tester/new-folder')
+    expect((await postJson('/api/galfree/picker/create-directory', { path: '/home/tester' })).status).toBe(400)
+  })
+
+  it('目录选择:没有 backend 时如实报 none,面板据此隐藏入口', async () => {
+    const bare = createProjectService({ dataDir: join(dataDir, 'nopicker') })
+    const routes = makeRoutes({ service: bare, config: () => ({ enabled: true, defaultProjectsRoot: '' }) })
+    const s = createServer((request, response) => { void routes[0]!.handler(request, response) })
+    await new Promise<void>((resolve) => s.listen(0, '127.0.0.1', resolve))
+    const port = (s.address() as { port: number }).port
+    const capability = await (await fetch(`http://127.0.0.1:${port}/api/galfree/picker`)).json() as { kind: string }
+    expect(capability.kind).toBe('none')
+    const pick = await fetch(`http://127.0.0.1:${port}/api/galfree/picker/pick`, { method: 'POST' })
+    expect(pick.status).toBe(501)
+    await bare.dispose()
+    await new Promise<void>((resolve) => s.close(() => resolve()))
+    pickerKind = 'native'
   })
 
   it('停用开关:仅 /state 可读,其余 503', async () => {
