@@ -124,6 +124,33 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
+  // 推导进度(阶段板数据源,T6)。
+  if (method === 'GET' && path === '/progress') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const progress = await service.progress(active.id)
+    writeJson(res, 200, progress)
+    return
+  }
+
+  if (method === 'POST' && path === '/stamps/scene') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    await service.stampScene(typeof body.project === 'string' && body.project !== '' ? body.project : active.id, String(body.label ?? ''), { via: 'human' })
+    writeJson(res, 200, { ok: true })
+    return
+  }
+
+  if (method === 'POST' && path === '/stamps/slot') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    await service.stampSlot(typeof body.project === 'string' && body.project !== '' ? body.project : active.id, String(body.slot ?? ''), { via: 'human' })
+    writeJson(res, 200, { ok: true })
+    return
+  }
+
   // 快照历史(最小历史浏览器的数据源,T3)。
   if (method === 'GET' && path === '/snapshots') {
     const rel = url.searchParams.get('path')

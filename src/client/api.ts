@@ -57,9 +57,47 @@ export interface SnapshotEntry {
   at: string
 }
 
+export interface SlotProgressView {
+  slot: string
+  assetPath: string
+  filled: boolean
+  stamp: string
+}
+
+export interface SceneProgressView {
+  label: string
+  file: string
+  line: number
+  readOnly: boolean
+  missingDialogue: boolean
+  slots: SlotProgressView[]
+  missingSlots: string[]
+  stamp: string
+  lintErrors: number
+}
+
+export interface ProgressView {
+  scenes: SceneProgressView[]
+  lint: { ok: boolean; errors: number; warnings: number }
+  summary: { scenes: number; missingDialogue: number; missingSlots: number; lintErrors: number; awaitingReview: number; degraded: number }
+  degraded: boolean
+}
+
 export class GalfreeApi {
   async state(): Promise<StateView> {
     return readJson<StateView>(await fetch('/api/galfree/state'))
+  }
+
+  async progress(): Promise<ProgressView> {
+    return readJson<ProgressView>(await fetch('/api/galfree/progress'))
+  }
+
+  async stampScene(label: string): Promise<void> {
+    await readJson<unknown>(await fetch('/api/galfree/stamps/scene', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ label }),
+    }))
   }
 
   async createProject(name: string, title?: string, projectsRoot?: string): Promise<void> {

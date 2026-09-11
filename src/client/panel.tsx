@@ -4,7 +4,12 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import { GalfreeApi } from './api.ts'
-import type { SnapshotEntry, StateView, TreeNode } from './api.ts'
+import type { ProgressView, SnapshotEntry, StateView, TreeNode } from './api.ts'
+
+function Chip({ label, tone }: { label: string; tone: 'ok' | 'warn' | 'bad' }) {
+  const bg = tone === 'ok' ? 'rgba(60,160,90,0.15)' : tone === 'warn' ? 'rgba(220,160,40,0.18)' : 'rgba(200,60,60,0.18)'
+  return <span style={{ background: bg, borderRadius: 10, padding: '2px 8px', fontSize: 12 }}>{label}</span>
+}
 
 function TreeView({ nodes, onSelect, selected }: { nodes: TreeNode[]; onSelect?: (path: string) => void; selected?: string }) {
   return (
@@ -42,6 +47,7 @@ export function WorkbenchPanel() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [history, setHistory] = useState<SnapshotEntry[]>([])
   const [diff, setDiff] = useState<string | null>(null)
+  const [progress, setProgress] = useState<ProgressView | null>(null)
 
   const selectFile = useCallback(async (path: string) => {
     setSelectedFile(path)
@@ -57,6 +63,11 @@ export function WorkbenchPanel() {
   const refresh = useCallback(async () => {
     try {
       setState(await api.state())
+      try {
+        setProgress(await api.progress())
+      } catch {
+        setProgress(null)
+      }
       setError(null)
     } catch (e) {
       setError(String(e))
@@ -145,6 +156,35 @@ export function WorkbenchPanel() {
           </ul>
         </section>
       ) : null}
+
+      <section aria-label="阶段板(推导)">
+        <div style={{ fontWeight: 600, marginBlockEnd: 4 }}>阶段板 · 推导进度</div>
+        {progress === null ? <div style={{ opacity: 0.6 }}>(无项目)</div> : (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBlockEnd: 8 }}>
+            <Chip label={`lint ${progress.lint.ok ? '通过' : `${progress.lint.errors} 错`}`} tone={progress.lint.ok ? 'ok' : 'bad'} />
+            <Chip label={`缺对白 ${progress.summary.missingDialogue}`} tone={progress.summary.missingDialogue ? 'warn' : 'ok'} />
+            <Chip label={`缺素材 ${progress.summary.missingSlots}`} tone={progress.summary.missingSlots ? 'warn' : 'ok'} />
+            <Chip label={`待复审 ${progress.summary.awaitingReview}`} tone={progress.summary.awaitingReview ? 'warn' : 'ok'} />
+            {progress.degraded ? <Chip label="含只读降级" tone="warn" /> : null}
+          </div>
+        )}
+        {progress !== null && progress.scenes.length > 0 ? (
+          <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+            {progress.scenes.map((scene) => (
+              <li key={scene.label} style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                <code>{scene.label}</code>
+                <span style={{ opacity: 0.7 }}>
+                  {scene.readOnly ? '只读·' : ''}{scene.missingDialogue ? '缺对白·' : ''}{scene.missingSlots.length ? `缺素材${scene.missingSlots.length}·` : ''}
+                  {scene.stamp === 'approved' ? '已审读' : scene.stamp === 'stale' ? '待复审' : scene.stamp === 'pending' ? '待审读' : '—'}
+                </span>
+                {scene.stamp !== 'approved' && !scene.readOnly ? (
+                  <button type="button" onClick={() => { void api.stampScene(scene.label).then(refresh).catch((e) => setError(String(e))) }}>盖审读戳</button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </section>
 
       <section aria-label="文件树">
         <div style={{ fontWeight: 600, marginBlockEnd: 4 }}>文件(点击看快照历史)</div>

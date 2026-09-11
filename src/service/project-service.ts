@@ -18,6 +18,10 @@ import { PROJECT_NAME_RE, renderTemplateFiles, templateKeepFiles } from './templ
 import { FakeValidator } from './validation/template-validator.ts'
 import { deriveGraph, parseRpy, type RpyFile } from './rpy/parse.ts'
 import type { BranchGraph } from './rpy/dialect.ts'
+import { computeProgress, sceneFingerprint, slotAssetPath, type ProgressSnapshot } from './progress.ts'
+import { readStamps, sceneTarget, slotTarget, stampsDocument, withStamp, type StampRecord } from './stamps.ts'
+import { createHash } from 'node:crypto'
+import { readFile as readFileNode } from 'node:fs/promises'
 import { WriteGateway, type ChangeEvent, type FileSnapshot, type WriteLogEntry, type WriteOp, type WriteResult } from './write-gateway.ts'
 import type { WriteBatchReason } from './write-gateway.ts'
 import type { ValidationReport } from './validation/contract.ts'
@@ -207,6 +211,68 @@ export class ProjectService {
       }
     }
     return deriveGraph(parseRpy(files))
+  }
+
+  // ─── 推导进度 + 审读戳(T6)───────────────────────────────────────────
+
+  /** 阶段板:纯推导(文件 + 解析 + 校验 + 戳),可全量重算、幂等、无手写通道。 */
+  async progress(projectRef: string): Promise<ProgressSnapshot> {
+    const graph = await this.branchGraph(projectRef)
+    const entry = await this.#resolve(projectRef)
+    return computeProgress(entry.path, { scenes: graph.scenes, problems: graph.problems })
+  }
+
+  /** 审读戳账本(历史记录,含失效者)。 */
+  async stampRecords(projectRef: string): Promise<StampRecord[]> {
+    const entry = await this.#resolve(projectRef)
+    return readStamps(entry.path)
+  }
+
+  /**
+   * 人盖场景戳。**agent 一律拒绝**(stamp-forbidden,ADR-0008):seam 的这个
+   * 操作对应真实的人为动作(工作台点击),没有任何 agent 侧入口。
+   */
+  async stampScene(projectRef: string, label: string, actor: { via: 'human' | 'agent' }): Promise<void> {
+    this.#requireHuman(actor)
+    const graph = await this.branchGraph(projectRef)
+    const scene = graph.scenes.find((s) => s.label === label)
+    if (scene === undefined) throw new GalfreeError('unknown-scene', `场景 ${label} 不存在`)
+    await this.#putStamp(projectRef, sceneTarget(label), sceneFingerprint(scene))
+  }
+
+  /** 人盖素材槽戳;槽未填(素材文件不存在)时拒绝(slot-not-filled)。 */
+  async stampSlot(projectRef: string, slot: string, actor: { via: 'human' | 'agent' }): Promise<void> {
+    this.#requireHuman(actor)
+    const entry = await this.#resolve(projectRef)
+    const fingerprint = await this.#assetFingerprint(entry.path, slotAssetPath(slot))
+    if (fingerprint === 'absent') throw new GalfreeError('slot-not-filled', `素材槽未填,不能盖审读戳:${slot}`)
+    await this.#putStamp(projectRef, slotTarget(slot), fingerprint)
+  }
+
+  #requireHuman(actor: { via: 'human' | 'agent' }): void {
+    if (actor.via !== 'human') {
+      throw new GalfreeError('stamp-forbidden', '审读戳只能由人盖(工作台真实动作),agent 无权设置')
+    }
+  }
+
+  async #assetFingerprint(root: string, assetPath: string): Promise<string> {
+    try {
+      const bytes = await readFileNode(join(root, ...assetPath.split('/')))
+      return createHash('sha256').update(bytes).digest('hex').slice(0, 16)
+    } catch {
+      return 'absent'
+    }
+  }
+
+  async #putStamp(projectRef: string, target: string, fingerprint: string): Promise<void> {
+    const gateway = await this.#gatewayFor(projectRef)
+    const current = await gateway.read('.studio/stamps.json')
+    const stamps = await this.stampRecords(projectRef)
+    const next = withStamp(stamps, target, fingerprint)
+    await gateway.writeBatch(
+      [{ path: '.studio/stamps.json', content: stampsDocument(next), expectVersion: current.version }],
+      { origin: 'workbench', reason: 'stamp' },
+    )
   }
 
   /** 停掉全部监听(宿主 dispose 与测试收尾用)。 */
