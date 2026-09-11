@@ -27,8 +27,14 @@ import {
   type CharacterRecord, type SlotRecord,
 } from './characters.ts'
 import { deriveSlots } from './slots.ts'
+import {
+  BIBLE_FILE, OUTLINE_FILE, applyBiblePatch, bibleDocument, bibleFingerprint, buildGenerationContext,
+  outlineRef, readBible, readOutline,
+  type BibleDocument, type BiblePatch, type GenerationContext,
+} from './bible.ts'
+import { BIBLE_STAMP_TARGET } from './stamps.ts'
 import { contentFingerprint, launchPlaytest, playtestDocument, readPlaytest, PLAYTEST_FILE, type PlaytestPorts, type PlaytestRun } from './playtest.ts'
-import { ABSENT, fileFingerprint } from './hash.ts'
+import { ABSENT, fileFingerprint, fingerprint } from './hash.ts'
 import { WriteGateway, type ChangeEvent, type FileSnapshot, type GatewayError, type WriteLogEntry, type WriteOp, type WriteResult } from './write-gateway.ts'
 import type { WriteBatchReason } from './write-gateway.ts'
 import type { ValidationReport } from './validation/contract.ts'
@@ -245,11 +251,13 @@ export class ProjectService {
   async progress(projectRef: string): Promise<ProgressSnapshot> {
     const graph = await this.branchGraph(projectRef)
     const entry = await this.#resolve(projectRef)
-    const [ledger, characters, parsed, playtest] = await Promise.all([
+    const [ledger, characters, parsed, playtest, bible, outlineText] = await Promise.all([
       readSlots(entry.path),
       readCharacters(entry.path),
       this.#parseScript(projectRef),
       readPlaytest(entry.path),
+      readBible(entry.path),
+      readOutline(entry.path),
     ])
     const derived = deriveSlots({ parsed, ledger, characters })
     return computeProgress(entry.path, {
@@ -258,6 +266,14 @@ export class ProjectService {
       derivedSlots: derived.slots,
       characters,
       definedCharacters: parsed.characters,
+      bible: {
+        fingerprint: bibleFingerprint(bible),
+        chapters: bible.chapters.length,
+        characters: bible.characters.length,
+        hasOutline: bible.outline !== null,
+        outlineFingerprint: outlineText === null ? null : fingerprint(outlineText),
+        outlineRef: bible.outline === null ? null : { fingerprint: bible.outline.fingerprint },
+      },
       playtest: { last: playtest?.last ?? null, currentFingerprint: contentFingerprint(graph) },
     })
   }
@@ -390,6 +406,110 @@ export class ProjectService {
       [{ path: SLOTS_FILE, content: slotsDocument(removeSlot(ledger, slot)), expectVersion: current.version }],
       { origin: 'workbench', reason: 'slot' },
     )
+  }
+
+  // ─── 设定集工作周期(T9)──────────────────────────────────────────────
+
+  /** 设定集(读):主题 / 世界观 / 章节 / 对登记簿的引用 / 大纲引用。 */
+  async bible(projectRef: string): Promise<BibleDocument> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    return readBible(entry.path)
+  }
+
+  /** 人写原文(读);没导入过则为 null。 */
+  async bibleOutline(projectRef: string): Promise<string | null> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    return readOutline(entry.path)
+  }
+
+  /**
+   * 部分更新设定集(经网关写 → 自动快照)。
+   *
+   * `characters` 给的是**对登记簿的引用与设定内容**:服务会顺手把角色写进登记簿
+   * (T9:"同步写登记簿"),设定集里只留 id —— 同一张脸只有一处说明。
+   * agent 可以调(它是设定,不是人的主观认可);改动会让定稿戳自动待复审。
+   */
+  async writeBible(projectRef: string, patch: BiblePatch & { characters?: CharacterRecord[] }, actor: { via: 'human' | 'agent' }): Promise<void> {
+    const gateway = await this.#gatewayFor(projectRef)
+    const entry = await this.#resolve(projectRef)
+
+    // 1) 角色设定先落到登记簿(它是家),设定集只记引用。
+    const records = patch.characters ?? []
+    for (const record of records) {
+      const current = await gateway.read(CHARACTERS_FILE)
+      const characters = await readCharacters(entry.path)
+      await gateway.writeBatch(
+        [{ path: CHARACTERS_FILE, content: charactersDocument(upsertCharacter(characters, record)), expectVersion: current.version }],
+        { origin: actor.via === 'human' ? 'workbench' : 'agent', reason: 'cast' },
+      )
+    }
+
+    // 2) 设定集本体(引用 + 意图)。
+    const before = await gateway.read(BIBLE_FILE)
+    const current = await readBible(entry.path)
+    const next = applyBiblePatch(current, {
+      ...(patch.theme === undefined ? {} : { theme: patch.theme }),
+      ...(patch.world === undefined ? {} : { world: patch.world }),
+      ...(patch.chapters === undefined ? {} : { chapters: patch.chapters }),
+      ...(records.length === 0 ? {} : { characters: [...new Set([...current.characters.map((ref) => ref.id), ...records.map((record) => record.id)])].map((id) => ({ id })) }),
+    })
+    await gateway.writeBatch(
+      [{ path: BIBLE_FILE, content: bibleDocument(next), expectVersion: before.version }],
+      { origin: actor.via === 'human' ? 'workbench' : 'agent', reason: 'bible' },
+    )
+  }
+
+  /**
+   * 大纲模式:导入人写的原文。
+   *
+   * **原文即权威**:这里只做一件事 —— 逐字落盘,并记下它的指纹与长度。
+   * 任何"顺手改写/整理"都是违规;agent 之后的动作只允许补登记簿与派生骨架。
+   */
+  async importOutline(projectRef: string, text: string): Promise<void> {
+    const gateway = await this.#gatewayFor(projectRef)
+    const entry = await this.#resolve(projectRef)
+    const outlineBefore = await gateway.read(OUTLINE_FILE)
+    await gateway.writeBatch(
+      [{ path: OUTLINE_FILE, content: text, expectVersion: outlineBefore.version }],
+      { origin: 'workbench', reason: 'outline' },
+    )
+    const bibleBefore = await gateway.read(BIBLE_FILE)
+    const current = await readBible(entry.path)
+    const next: BibleDocument = { ...current, outline: outlineRef(text), updatedAt: new Date().toISOString() }
+    await gateway.writeBatch(
+      [{ path: BIBLE_FILE, content: bibleDocument(next), expectVersion: bibleBefore.version }],
+      { origin: 'workbench', reason: 'outline' },
+    )
+  }
+
+  /** 人盖/复审"设定定稿"戳;agent 一律拒绝(与场景戳同一条守卫)。 */
+  async stampBible(projectRef: string, actor: { via: 'human' | 'agent' }): Promise<void> {
+    this.#requireHuman(actor)
+    const doc = await this.bible(projectRef)
+    await this.#putStamp(projectRef, BIBLE_STAMP_TARGET, bibleFingerprint(doc))
+  }
+
+  /**
+   * 下游生成用的上下文:只给**定稿版**。没盖定稿戳(或盖过但内容又变了)就抛错,
+   * 不偷偷用草稿 —— 这样"设定集是第一记忆源"才是可断言的,而不是口头约定。
+   */
+  async generationContext(projectRef: string): Promise<GenerationContext> {
+    const entry = await this.#resolve(projectRef)
+    const [doc, characters, outlineText, stamps] = await Promise.all([
+      this.bible(projectRef),
+      this.characters(projectRef),
+      this.bibleOutline(projectRef),
+      this.stampRecords(projectRef),
+    ])
+    const record = stamps.find((stamp) => stamp.target === BIBLE_STAMP_TARGET)
+    if (record === undefined) throw new GalfreeError('bible-not-final', '设定集还没有盖"设定定稿"戳:下游生成只用定稿版')
+    if (record.fingerprint !== bibleFingerprint(doc)) {
+      throw new GalfreeError('bible-not-final', '设定集盖过定稿戳,但之后又改过(待复审):请人重新审读后再生成')
+    }
+    void entry
+    return buildGenerationContext({ bible: doc, characters, outlineText })
   }
 
   #requireHuman(actor: { via: 'human' | 'agent' }): void {

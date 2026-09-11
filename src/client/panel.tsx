@@ -15,6 +15,7 @@ import { stampKey } from './types.ts'
 import { Chip, Notice, Spinner, relativeTime } from './ui.tsx'
 import { StageBoard } from './stage-board.tsx'
 import { AssetBoard } from './asset-board.tsx'
+import { BibleCard } from './bible-card.tsx'
 import { FileInspector } from './file-inspector.tsx'
 import { DirectoryPicker } from './directory-picker.tsx'
 import { ProjectSwitcher } from './project-switcher.tsx'
@@ -310,6 +311,15 @@ export function WorkbenchPanel() {
           onStamp={(target) => void stamp(target)}
           onPlaytest={() => void runPlaytest()}
           hasProject={hasProject}
+        />
+
+        <BibleCard
+          bibleStamp={progress?.bible ?? { stamp: 'none', chapters: 0, characters: 0, hasOutline: false, outlineFingerprintOk: true }}
+          api={api}
+          hasProject={hasProject}
+          sceneLabels={(progress?.scenes ?? []).map((scene) => scene.label)}
+          onChanged={() => refresh()}
+          onNotice={pushNotice}
         />
 
         <AssetBoard

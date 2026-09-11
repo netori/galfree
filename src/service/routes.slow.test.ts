@@ -501,6 +501,56 @@ describe('路由适配层(/api/galfree)', () => {
     expect((await postJson('/api/galfree/cast/slots/upsert', { slot: '' })).status).toBe(400)
   })
 
+  it('设定集路由:导入大纲逐字保留 / 定稿戳只人可盖 / 下游上下文只给定稿版', async () => {
+    await freshProject()
+
+    // 空设定集:如实返回空壳,不是错误。
+    const empty = await req('/api/galfree/bible')
+    expect(empty.status).toBe(200)
+    expect(empty.body.bible.chapters).toEqual([])
+    expect(empty.body.outline).toBeNull()
+
+    // 人写的原文(带口语与括注,专门看会不会被"整理")。
+    const outline = '第一章 天台\n她说"你也是来看雨的哦",语气很冲。\n\n（备注:先别写结局。）'
+    const imported = await postJson('/api/galfree/bible/import-outline', { text: outline })
+    expect(imported.status).toBe(200)
+    expect(imported.body.chars).toBe(outline.length)
+    const after = await req('/api/galfree/bible')
+    expect(after.body.outline).toBe(outline) // 逐字
+    expect(after.body.bible.outline.path).toBe('.studio/bible/outline.md')
+
+    // 面板改主题/世界观 → 派生物变化,戳自动待复审。
+    expect((await postJson('/api/galfree/bible/patch', { theme: '雨天的重逢', world: '现代都市,梅雨季。' })).status).toBe(200)
+    let progress = await req('/api/galfree/progress')
+    expect(progress.body.bible.stamp).toBe('none')
+    expect(progress.body.bible.hasOutline).toBe(true)
+    expect(progress.body.bible.outlineFingerprintOk).toBe(true)
+
+    // 没定稿 → 下游上下文拒绝(409),不偷偷给草稿。
+    const refused = await req('/api/galfree/bible/context')
+    expect(refused.status).toBe(409)
+    expect(refused.body.code).toBe('bible-not-final')
+
+    // 人盖定稿戳 → 上下文可读,且带指纹。
+    expect((await postJson('/api/galfree/bible/stamp', {})).status).toBe(200)
+    progress = await req('/api/galfree/progress')
+    expect(progress.body.bible.stamp).toBe('approved')
+    const context = await req('/api/galfree/bible/context')
+    expect(context.status).toBe(200)
+    expect(context.body.theme).toBe('雨天的重逢')
+    expect(context.body.outline.text).toBe(outline)
+    expect(context.body.fingerprint).toBeTruthy()
+
+    // 再改设定集 → 戳待复审 → 上下文又拒绝。
+    await postJson('/api/galfree/bible/patch', { theme: '改过的主题' })
+    progress = await req('/api/galfree/progress')
+    expect(progress.body.bible.stamp).toBe('stale')
+    expect((await req('/api/galfree/bible/context')).status).toBe(409)
+
+    // 空原文 → 400;不是 500。
+    expect((await postJson('/api/galfree/bible/import-outline', { text: '   ' })).status).toBe(400)
+  })
+
   it('停用开关:仅 /state 可读,其余 503', async () => {
     const offline = createProjectService({ dataDir: join(dataDir, 'disabled') })
     const routes = makeRoutes({ service: offline, config: () => ({ enabled: false, defaultProjectsRoot: '' }) })

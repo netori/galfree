@@ -47,3 +47,5 @@ export function withStamp(stamps: StampRecord[], target: string, fingerprint: st
 /** 戳目标 id 拼装(唯一命名,推导与盖戳共用)。 */
 export const sceneTarget = (label: string): string => `scene:${label}`
 export const slotTarget = (slot: string): string => `slot:${slot}`
+/** 设定定稿戳(T9):粒度为"整个设定集的派生物"。 */
+export const BIBLE_STAMP_TARGET = 'bible'

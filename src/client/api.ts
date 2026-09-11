@@ -157,12 +157,53 @@ export interface DialectProblemView {
   snippet?: string
 }
 
+/** 章节:标题 + 梗概 + 覆盖的 label(引用,不是正文)。 */
+export interface BibleChapterView {
+  id: string
+  title: string
+  outline?: string
+  scenes: string[]
+}
+
+/** 设定集(T9):第一记忆源 —— 主题 / 世界观 / 章节 / 对登记簿与原文的引用。 */
+export interface BibleView {
+  schemaVersion: 1
+  theme?: string
+  world?: string
+  chapters: BibleChapterView[]
+  outline: { path: string; fingerprint: string; chars: number; importedAt: string } | null
+  characters: Array<{ id: string }>
+  updatedAt: string
+}
+
+/** 设定集在板上的处境:戳与原文指纹都是推导的。 */
+export interface BibleProgressView {
+  stamp: string
+  chapters: number
+  characters: number
+  hasOutline: boolean
+  outlineFingerprintOk: boolean
+}
+
+/** 角色登记簿条目(素材板角色视图的数据源)。 */
+export interface CharacterRecordView {
+  id: string
+  name: string
+  voice?: string
+  appearance: Record<string, string>
+  styleAnchor?: string
+  references: Array<{ path: string; slot?: string; note?: string }>
+  note?: string
+}
+
 export interface ProgressView {
   scenes: SceneProgressView[]
   /** 素材板:`.rpy` 派生的槽清单(挂账本 + 推导状态)。 */
   slots: SlotBoardEntryView[]
   /** 素材板:角色登记簿 + 推导出来的可见性。 */
   characters: CharacterBoardEntryView[]
+  /** 设定集处境(戳 + 原文指纹比对)。 */
+  bible: BibleProgressView
   problems: DialectProblemView[]
   lint: { ok: boolean; errors: number; warnings: number }
   playtest: { at: string; state: 'pass' | 'fail' | 'stale'; exitCode: number; technicalPass: boolean; traceback: string | null } | null
@@ -335,6 +376,35 @@ export class GalfreeApi {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ slot }),
     }))
+  }
+
+  // ─── 设定集(T9)───────────────────────────────────────────────────────
+
+  async bible(): Promise<{ bible: BibleView; outline: string | null }> {
+    return readJson(await fetch('/api/galfree/bible'))
+  }
+
+  /** 局部更新设定集(主题/世界观/章节)。改动会让定稿戳待复审。 */
+  async patchBible(patch: { theme?: string; world?: string; chapters?: BibleChapterView[] }): Promise<void> {
+    await readJson<unknown>(await fetch('/api/galfree/bible/patch', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(patch),
+    }))
+  }
+
+  /** 导入人写大纲:**逐字保留**,只记指纹。 */
+  async importOutline(text: string): Promise<{ chars: number }> {
+    return readJson(await fetch('/api/galfree/bible/import-outline', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text }),
+    }))
+  }
+
+  /** 盖「设定定稿」戳(只有人能盖)。 */
+  async stampBible(): Promise<void> {
+    await readJson<unknown>(await fetch('/api/galfree/bible/stamp', { method: 'POST' }))
   }
 
   /** SDK 供给状态(T5;首次下载进度可见)。 */

@@ -8,8 +8,9 @@
 import { ABSENT, fileFingerprint, fingerprint } from './hash.ts'
 import type { DialectProblem, SceneNode, Statement } from './rpy/dialect.ts'
 import type { PlaytestRun } from './playtest.ts'
-import { readStamps, sceneTarget, slotTarget } from './stamps.ts'
+import { readStamps, sceneTarget, slotTarget, BIBLE_STAMP_TARGET } from './stamps.ts'
 import type { CharacterRecord, SlotRecord } from './characters.ts'
+import { OUTLINE_FILE } from './bible.ts'
 import type { DerivedSlot, SlotOrigin } from './slots.ts'
 
 export type StampState = 'none' | 'pending' | 'approved' | 'stale' | 'missing'
@@ -122,12 +123,28 @@ export interface CharacterBoardEntry extends CharacterRecord {
   slots: string[]
 }
 
+/** 设定集在板上的处境(T9):戳状态 + 大纲原文状态都是推导的。 */
+export interface BibleProgress {
+  stamp: StampState
+  chapters: number
+  characters: number
+  /** 有没有导入过人的原文。 */
+  hasOutline: boolean
+  /**
+   * 原文与记录在设定集里的指纹是否一致。
+   * 不一致 → 原文被外部改过,板上如实报(不假装它还是那份权威原文)。
+   */
+  outlineFingerprintOk: boolean
+}
+
 export interface ProgressSnapshot {
   scenes: SceneProgress[]
   /** 素材板:`.rpy` 派生的槽清单(挂账本 + 推导状态),与 scenes[].slots 同源。 */
   slots: SlotBoardEntry[]
   /** 素材板:角色登记簿 + 推导出来的可见性。 */
   characters: CharacterBoardEntry[]
+  /** 设定集处境(推导:戳指纹比对 + 原文指纹比对)。 */
+  bible: BibleProgress
   /** 顶层(非场景内)结构问题。 */
   problems: DialectProblem[]
   lint: { ok: boolean; errors: number; warnings: number }
@@ -235,6 +252,18 @@ export interface ProgressInputs {
    */
   characters?: CharacterRecord[]
   definedCharacters?: Array<{ var: string; displayName: string; file: string; line: number }>
+  /** 设定集处境输入(T9):戳与原文的指纹比对都在这里做。 */
+  bible?: {
+    /** 设定集派生物的当前指纹(与戳里记的比 → approved/stale)。 */
+    fingerprint: string
+    chapters: number
+    characters: number
+    hasOutline: boolean
+    /** 原文当前指纹(读不到 = null)。 */
+    outlineFingerprint: string | null
+    /** 设定集里记的原文引用(没导入过 = null)。 */
+    outlineRef: { fingerprint: string } | null
+  }
   /** 试玩事实(账本 last + 当前内容指纹);缺省视为未跑过。 */
   playtest?: { last: PlaytestRun | null; currentFingerprint: string }
 }
@@ -347,8 +376,31 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
     }
   })
 
-  const lintErrors = inputs.problems.filter((p) => p.severity === 'error').length
-  const lintWarnings = inputs.problems.filter((p) => p.severity === 'warning').length
+  // 设定集处境 + 原文指纹比对:两个"被改过"是两件事,分别判(戳管派生物,原文管原文)。
+  const bibleRecord = byTarget.get(BIBLE_STAMP_TARGET)
+  const bibleInput = inputs.bible
+  const outlineFingerprintOk = bibleInput === undefined || bibleInput.outlineRef === null
+    ? true
+    : bibleInput.outlineRef.fingerprint === bibleInput.outlineFingerprint
+  const bible: BibleProgress = {
+    stamp: bibleRecord === undefined
+      ? 'none'
+      : bibleInput !== undefined && bibleRecord.fingerprint === bibleInput.fingerprint ? 'approved' : 'stale',
+    chapters: bibleInput?.chapters ?? 0,
+    characters: bibleInput?.characters ?? 0,
+    hasOutline: bibleInput?.hasOutline ?? false,
+    outlineFingerprintOk,
+  }
+  const bibleProblems: DialectProblem[] = outlineFingerprintOk ? [] : [{
+    severity: 'error',
+    file: OUTLINE_FILE,
+    code: 'outline-fingerprint-mismatch',
+    message: '人写的设定集原文与导入时记录不一致(被外部改过):请人确认后再据它生成',
+    snippet: OUTLINE_FILE,
+  }]
+  const problems = [...inputs.problems, ...bibleProblems]
+  const lintErrors = problems.filter((p) => p.severity === 'error').length
+  const lintWarnings = problems.filter((p) => p.severity === 'warning').length
 
   // 素材板角色视图:登记簿条目 + 推导出来的"剧本里有没有它 / 哪些槽要它出场"。
   const definedByVar = new Map((inputs.definedCharacters ?? []).map((defined) => [defined.var, defined]))
@@ -401,10 +453,11 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
     scenes: sceneProgress,
     slots,
     characters,
-    problems: inputs.problems,
+    bible,
+    problems,
     lint: { ok: lintErrors === 0, errors: lintErrors, warnings: lintWarnings },
     playtest,
     summary,
-    degraded: summary.degraded > 0 || inputs.problems.length > 0,
+    degraded: summary.degraded > 0 || problems.length > 0,
   }
 }

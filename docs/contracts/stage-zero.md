@@ -222,6 +222,44 @@ GALFree v1 的**唯一测试接缝** = Host 侧项目服务(`src/service/project
 **工作台素材板**(T8):账本形态 —— 槽视图 + 角色视图,**纯渲染派生对象,没有出图动作**
 (出图属 T14/T15)。
 
+## 设定集(T9 之后追加)
+
+设定集是项目的**第一记忆源**:世界观、章节大纲、分支骨架。两条边界由 T9 钉死,写成契约:
+
+1. **角色设定以登记簿为家**。设定集只放 `{id}` 引用(T8 的登记簿是单一真相),不复制
+   外观卡 —— 否则同一张脸会有两处说法,迟早漂移。`writeBible` 收到角色内容时顺手把它
+   写进登记簿(T9:"同步写登记簿"),设定集里只留 id。
+2. **大纲模式的原文即权威**。人导入的原文**逐字**躺在 `.studio/bible/outline.md`,
+   设定集里只存**引用**(`{path,fingerprint,chars,importedAt}`)。`importOutline` 只做
+   一件事:原样落盘 + 记指纹,任何"顺手整理"都是违规。原文被外部改过 → 板上如实报
+   `outline-fingerprint-mismatch`(**error**),而不是拿旧指纹假装它还是那份权威原文。
+
+**两个"被改过"是两件事,分别判**:
+
+| 指纹 | 管什么 | 变了会怎样 |
+|---|---|---|
+| `bibleFingerprint`(主题/世界观/章节/角色引用) | 派生物 | 定稿戳 → 待复审(`stale`) |
+| `outline.fingerprint` | 人的原文 | `outline-fingerprint-mismatch` 进板 |
+
+**「设定定稿」戳**:target = `bible`,只由人盖(与场景/槽戳同一条 `#requireHuman` 守卫,
+agent 侧无入口)。
+
+**下游只读定稿版**:`generationContext(ref)` 在"没盖戳"或"盖过但内容又变了"时**抛
+`bible-not-final`(路由 409)**,不偷偷给草稿 —— 这样"设定集是第一记忆源"才是可断言的,
+而不是口头约定。上下文里带 `fingerprint`(下游据此知道要不要重取)、章节(引用 label)、
+**来自登记簿的**角色、人的原文(逐字)、以及 `missingCharacters`(设定集引用但登记簿
+还没登记的缺口,如实列出)。
+
+**骨架是派生的**,不落盘:落盘的只有人的意图、人的原文、以及对登记簿的引用。
+
+**路由**:`GET /bible`(账本 + 原文)、`POST /bible/patch`(人编辑)、
+`POST /bible/import-outline`(逐字导入)、`POST /bible/stamp`(人盖定稿戳)、
+`GET /bible/context`(定稿版上下文;未定稿 = 409)。`GET /progress` 额外给出
+`bible{stamp,chapters,characters,hasOutline,outlineFingerprintOk}`。
+
+**工作台设定集卡**(T9):人编辑主题/世界观、逐字导入大纲、盖定稿戳;**面板不生成内容**
+(生成属 T10)。
+
 ## 测试纪律(spec Testing Decisions 落地)
 
 - 只在 `ProjectService` 公共接口上断言外部可观察行为:磁盘终态、推导对象、

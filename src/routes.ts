@@ -106,6 +106,11 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['/cast/characters/remove', ['POST']],
   ['/cast/slots/upsert', ['POST']],
   ['/cast/slots/remove', ['POST']],
+  ['/bible', ['GET']],
+  ['/bible/patch', ['POST']],
+  ['/bible/import-outline', ['POST']],
+  ['/bible/stamp', ['POST']],
+  ['/bible/context', ['GET']],
   ['/picker', ['GET']],
   ['/picker/pick', ['POST']],
   ['/picker/list', ['GET']],
@@ -458,6 +463,56 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
+  // 设定集(T9):读账本 / 局部更新 / 导入人写原文 / 盖定稿戳 / 取下游上下文。
+  if (method === 'GET' && path === '/bible') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const [doc, outline] = await Promise.all([service.bible(active.id), service.bibleOutline(active.id)])
+    writeJson(res, 200, { bible: doc, outline })
+    return
+  }
+
+  if (method === 'POST' && path === '/bible/patch') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    await service.writeBible(active.id, {
+      ...(typeof body.theme === 'string' ? { theme: body.theme } : {}),
+      ...(typeof body.world === 'string' ? { world: body.world } : {}),
+      ...(Array.isArray(body.chapters) ? { chapters: body.chapters as never } : {}),
+    }, { via: 'human' })
+    writeJson(res, 200, { ok: true })
+    return
+  }
+
+  if (method === 'POST' && path === '/bible/import-outline') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const text = String(body.text ?? '')
+    if (text.trim() === '') throw new GalfreeError('bible-invalid', '大纲原文不能为空')
+    await service.importOutline(active.id, text)
+    writeJson(res, 200, { ok: true, chars: text.length })
+    return
+  }
+
+  // 「设定定稿」戳:只能由人盖(与场景/槽戳同一条守卫)。
+  if (method === 'POST' && path === '/bible/stamp') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    await service.stampBible(active.id, { via: 'human' })
+    writeJson(res, 200, { ok: true })
+    return
+  }
+
+  // 下游上下文(只给定稿版):没定稿 → 409,面板/agent 据此提示去定稿。
+  if (method === 'GET' && path === '/bible/context') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    writeJson(res, 200, await service.generationContext(active.id))
+    return
+  }
+
   // 一键试玩(T7):接缝同一控制器,无第二管线。
   if (method === 'POST' && path === '/playtest') {
     const active = await service.getActiveProject()
@@ -535,10 +590,11 @@ export function makeRoutes(deps: RouteDeps): GalfreeRoute[] {
         } else if (error instanceof GalfreeError) {
           // 404 = 目标不存在(含"项目目录已被挪走"),与 5xx 的"服务端故障"严格区分。
           const status = error.code === 'no-active-project' || error.code === 'unknown-project' || error.code === 'unknown-scene' || error.code === 'project-missing' ? 404
-            : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' || error.code === 'character-invalid' || error.code === 'slot-invalid' ? 400
+            : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' || error.code === 'character-invalid' || error.code === 'slot-invalid' || error.code === 'bible-invalid' ? 400
             : error.code === 'body-too-large' ? 413
             : error.code === 'picker-unsupported' ? 501
             : error.code === 'picker-timeout' ? 504
+            : error.code === 'bible-not-final' ? 409
             : error.code === 'version-drift' || error.code === 'expect-required' || error.code === 'path-escape' || error.code === 'stamp-forbidden' || error.code === 'slot-not-filled' || error.code === 'sdk-not-ready' ? 409
             : 500
           writeJson(res, status, { error: error.message, code: error.code })
