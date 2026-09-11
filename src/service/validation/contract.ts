@@ -18,4 +18,6 @@ export interface ValidationReport {
   validator: 'fake' | 'sdk'
   /** ISO 时间戳。 */
   at: string
+  /** 真 SDK 适配器附加信息(钉版号 / 覆盖路径版本差异警告);假验证器省略。 */
+  sdkNote?: string
 }
