@@ -38,7 +38,8 @@ describe('钉版 SDK 供给(T5,假端口)', () => {
       await writeFile(join(dest, 'renpy-8.5.3-sdk'), 'x'.repeat(zip.byteLength))
       await writeFile(join(dest, 'renpy.exe'), '@echo off')
     }
-    return { download, extract, launcherName: 'renpy.exe' }
+    // 默认端口注入空 sha(跳过校验);校验行为由专用测试覆盖(见下)。
+    return { download, extract, launcherName: 'renpy.exe', sha256: '' }
   }
 
   it('下载状态机完整:进度回调 + 到 ready', async () => {
@@ -78,6 +79,13 @@ describe('钉版 SDK 供给(T5,假端口)', () => {
     await expect(provisioner.ensure()).rejects.toThrow(/校验和不匹配/)
     expect(provisioner.status.state).toBe('failed')
     expect(await sdkIsReady(sdkDir, 'renpy.exe')).toBe(false)
+  })
+
+  it('默认端口(不注入 sha)→ 校验钉版常量,不匹配即拒绝(钉版校验不可缺席)', async () => {
+    const ports = makePorts()
+    const provisioner = new SdkProvisioner(sdkDir, { download: ports.download, extract: ports.extract, launcherName: 'renpy.exe' })
+    // 'ZIPBYTES' 的哈希必然 != 官方钉版 sha256。
+    await expect(provisioner.ensure()).rejects.toThrow(/校验和不匹配/)
   })
 
   it('校验和正确 → 放行到 ready', async () => {

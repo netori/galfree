@@ -15,7 +15,14 @@ export interface RouteDeps {
   config: () => { enabled: boolean; defaultProjectsRoot: string }
   /** SDK 供给(T5;未装配时路由如实报告不可用)。 */
   sdk?: {
-    status: () => { requested: 'override' | 'pinned'; dir: string; provision: ProvisionStatus }
+    status: () => Promise<{
+      requested: 'override' | 'pinned'
+      dir: string
+      launcherReady: boolean
+      version?: string
+      mismatch?: { pinned: string; actual: string }
+      provision: ProvisionStatus
+    }>
     ensure: () => Promise<ProvisionStatus>
   }
 }
@@ -100,7 +107,16 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     if (active !== null && !active.missing) {
       tree = await buildTree(active.root, '', 0, { left: TREE_MAX_ENTRIES })
     }
-    writeJson(res, 200, { projects, activeId: active?.id ?? null, tree, activeRoot: active?.root ?? null, activeMissing: active?.missing ?? false })
+    // 网关非致命故障(快照/回滚/监听)如实上板 —— "不静默"是硬规矩。
+    const errors = active !== null && !active.missing ? await service.gatewayErrors(active.id) : []
+    writeJson(res, 200, {
+      projects,
+      activeId: active?.id ?? null,
+      tree,
+      activeRoot: active?.root ?? null,
+      activeMissing: active?.missing ?? false,
+      gatewayErrors: errors,
+    })
     return
   }
 
@@ -117,12 +133,8 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
-  if (method === 'POST' && path === '/projects/activate') {
-    const body = await readJsonBody(req)
-    await service.setActive(String(body.id ?? ''))
-    writeJson(res, 200, { ok: true })
-    return
-  }
+  // 注册表数据模型 v1(单激活位);切换 UI 明确"后补"(spec R7/User Story 29),
+  // 因此不提供 activate 路由 —— 激活位随"新建即激活"移动。
 
   if (method === 'GET' && path === '/validate') {
     const report = await service.validateActiveProject()
@@ -192,7 +204,7 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
   // SDK 供给状态 / 触发下载(T5:首次使用自动下载、进度可见)。
   if (method === 'GET' && path === '/sdk') {
     if (deps.sdk === undefined) return writeJson(res, 503, { error: 'SDK 供给未装配' })
-    writeJson(res, 200, deps.sdk.status())
+    writeJson(res, 200, await deps.sdk.status())
     return
   }
   if (method === 'POST' && path === '/sdk/ensure') {
@@ -253,7 +265,7 @@ export function makeRoutes(deps: RouteDeps): GalfreeRoute[] {
           const status = error.code === 'no-active-project' || error.code === 'unknown-project' || error.code === 'unknown-scene' ? 404
             : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' ? 400
             : error.code === 'body-too-large' ? 413
-            : error.code === 'version-drift' || error.code === 'stamp-forbidden' || error.code === 'slot-not-filled' || error.code === 'sdk-not-ready' ? 409
+            : error.code === 'version-drift' || error.code === 'expect-required' || error.code === 'path-escape' || error.code === 'stamp-forbidden' || error.code === 'slot-not-filled' || error.code === 'sdk-not-ready' ? 409
             : 500
           writeJson(res, status, { error: error.message, code: error.code })
         } else {

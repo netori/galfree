@@ -6,16 +6,17 @@
  * 快测注入假实现,真实现走 https + extract-zip。真 SDK lint 冒烟在慢集成带。
  */
 import { createHash } from 'node:crypto'
-import { mkdir, readdir, rm, readFile, access } from 'node:fs/promises'
+import { mkdir, rm, access } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { GalfreeError } from './error.ts'
+import { detectSdkVersion } from './hash.ts'
 
 /** 发版钉死的 SDK 版本(spec:改钉版走插件发版,非用户操作)。 */
 export const PINNED_SDK = {
   version: '8.5.3',
   url: 'https://www.renpy.org/dl/8.5.3/renpy-8.5.3-sdk.zip',
-  /** sha256(checksums.txt),下载后校验;留空 = 跳过校验(仅开发期)。 */
-  sha256: '',
+  /** sha256,官方 PGP 签名 checksums.txt(2026-05-15 release),下载后强制校验。 */
+  sha256: 'ff57648f9c04f27e381c48af6d8e3ee3cdec296bed4d3831f47f09b0a71b505e',
 } as const
 
 export interface Progress {
@@ -135,17 +136,7 @@ export class SdkProvisioner {
   }
 
   async #detectVersion(): Promise<string | undefined> {
-    // Ren'Py SDK 顶层目录形如 renpy-8.5.3-sdk/… 或含 version 文件;尽力探测。
-    try {
-      const entries = await readdir(this.#status.sdkDir)
-      const hint = entries.find((name) => /renpy-\d+\.\d+\.\d+/.test(name))
-      const fromDir = hint === undefined ? undefined : /\d+\.\d+\.\d+/.exec(hint)?.[0]
-      if (fromDir !== undefined) return fromDir
-      const vf = join(this.#status.sdkDir, 'renpy', 'test', 'stage', 'version')
-      try { return (await readFile(vf, 'utf8')).trim() } catch { return undefined }
-    } catch {
-      return undefined
-    }
+    return detectSdkVersion(this.#status.sdkDir)
   }
 
   #applyMismatch(version?: string): void {
@@ -161,12 +152,7 @@ export class SdkProvisioner {
 export async function probeOverrideSdk(sdkDir: string, launcherName: string): Promise<{ ready: boolean; version?: string; mismatch?: { pinned: string; actual: string } }> {
   const ready = await sdkIsReady(sdkDir, launcherName)
   if (!ready) return { ready: false }
-  let version: string | undefined
-  try {
-    const entries = await readdir(sdkDir)
-    const hint = entries.find((name) => /renpy-\d+\.\d+\.\d+/.test(name))
-    version = hint === undefined ? undefined : /\d+\.\d+\.\d+/.exec(hint)?.[0]
-  } catch { /* ignore */ }
+  const version = await detectSdkVersion(sdkDir)
   const mismatch = version !== undefined && version !== PINNED_SDK.version ? { pinned: PINNED_SDK.version, actual: version } : undefined
   return { ready: true, ...(version === undefined ? {} : { version }), ...(mismatch === undefined ? {} : { mismatch }) }
 }

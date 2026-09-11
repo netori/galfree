@@ -74,6 +74,18 @@ describe('推导进度 + 审读戳(T6)', () => {
     expect(stamps.some((s) => s.target === 'scene:start')).toBe(true)
   })
 
+  it('已盖戳场景新增子集外块 → 戳仍失效(指纹基于原始文本,不只看可解析语句)', async () => {
+    const project = await service.getActiveProject()
+    await writeFile(join(project!.root, 'game', 'script.rpy'), SCENE_WITH_IMAGE, 'utf8')
+    await service.stampScene('prog', 'start', { via: 'human' })
+    expect((await service.progress('prog')).scenes.find((s) => s.label === 'start')!.stamp).toBe('approved')
+    // 追加一段"解析器会跳过"的子集外块 —— 内容确实变了,戳必须失效。
+    await writeFile(join(project!.root, 'game', 'script.rpy'), SCENE_WITH_IMAGE + '    if secret:\n        "藏进来的怪东西"\n', 'utf8')
+    const progress = await service.progress('prog')
+    expect(progress.scenes.find((s) => s.label === 'start')!.stamp).toBe('stale')
+    expect(progress.scenes.find((s) => s.label === 'start')!.readOnly).toBe(true)
+  })
+
   it('agent 工具尝试盖戳被接缝拒绝(负例)', async () => {
     await expect(service.stampScene('prog', 'start', { via: 'agent' })).rejects.toMatchObject({ code: 'stamp-forbidden' })
     await expect(service.stampSlot('prog', 'xiao_tang angry', { via: 'agent' })).rejects.toMatchObject({ code: 'stamp-forbidden' })

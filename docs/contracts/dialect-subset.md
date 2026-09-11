@@ -29,6 +29,9 @@
 | `"文本"` | dialogue(旁白,speaker=null) |
 | `<var> "文本"` | dialogue(speaker=var) |
 | 上述 + ` with <trans>` | 同上(转场修饰) |
+
+每条 dialogue 附带 `showing`:该句发生时刻画面的图像引用快照(背景 + 在场立绘),
+由解析器维护舞台状态得出 —— 兑现"对白行(说话人/文本/图像引用)"三要素。
 | `scene <名…>` / `show <tag> [属性…] [at …] [with …]` / `hide <tag>` | image 引用(**素材槽派生输入**) |
 | `menu:` 块 | 选项菜单;选项 = `"文案":` + 块体;菜单提示 = 纯字符串行 |
 | `jump <LABEL>` | 跳转边 |

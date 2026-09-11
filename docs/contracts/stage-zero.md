@@ -34,9 +34,9 @@ GALFree v1 的**唯一测试接缝** = Host 侧项目服务(`src/service/project
 
 | 方法 | 语义 | 错误 code |
 |---|---|---|
-| `createProject({projectsRoot,name,title?})` | 模板 → `projectsRoot/<name>/`,经网关落盘 + git init + 初始快照;入注册表并激活 | `invalid-name` `project-exists` `git-init-failed` |
+| `createProject({projectsRoot,name,title?})` | 模板 → `projectsRoot/<name>/`,经网关落盘 + git init + 初始快照;入注册表并**立即激活** | `invalid-name` `project-exists` `git-init-failed` |
 | `listProjects()` | `ProjectInfo[]`(含 `active/missing` 派生标志) | — |
-| `getProject(id)` / `getActiveProject()` / `setActive(id)` | 注册表 = 指针表(列表 + 单激活 id);内容不落注册表 | `unknown-project` |
+| `getProject(id)` / `getActiveProject()` / `setActive(id)` | 注册表 = 指针表(列表 + 单激活 id);内容不落注册表;`setActive` 为数据模型端口(切换 UI 后补,v1 不在路由/面板暴露) | `unknown-project` |
 
 `ProjectInfo = { id, name, title, root, createdAt, active, missing }`。
 
@@ -44,10 +44,14 @@ GALFree v1 的**唯一测试接缝** = Host 侧项目服务(`src/service/project
 
 | 方法 | 语义 | 错误 code |
 |---|---|---|
-| `readProjectFile(ref, relPath)` | 现读磁盘 + 版本戳(内容哈希;缺失=`absent`) | `path-escape` |
-| `writeProjectFiles(ref, ops[], {origin,reason,scene?,slot?})` | **串行**原子批:先全批 CAS 校验(任一 `expectVersion` 不符 → 整批不落),再落盘(失败回滚),成功后触发快照钩子 + `internal` 事件 | `version-drift` `write-failed` |
+| `readProjectFile(ref, relPath)` | 现读磁盘 + 版本戳(内容哈希;缺失 = `ABSENT='absent'`,唯一哨兵,可直接回填 `expectVersion`) | `path-escape` |
+| `writeProjectFiles(ref, ops[], {origin,reason,scene?,slot?})` | **串行**原子批:每个 op **必须**带 `expectVersion`(CAS;新建传 `'absent'` 断言不存在,缺省 → `expect-required` 拒绝);先全批校验(任一不符整批不落),再落盘(中途失败逐文件回滚);成功后触发快照钩子 + `internal` 事件 | `version-drift` `expect-required` `write-failed` |
 | `observeChanges(ref, listener)` | 订阅 `{path,version,kind:'internal'｜'external'}` | — |
 | `writeLog(ref)` | 插桩:每条形如 `{path,batchId,version,reason,origin,at}`;"无旁路写"断言源 | — |
+| `gatewayErrors(ref)` | 非致命故障如实呈现:`snapshot-failed`(批已落盘但 git commit 失败)/ `rollback-failed` / `watch-failed` | — |
+
+网关单例:每项目**恰好一个** `WriteGateway`(懒建竞态安全:promise 在 await 前同步
+入表),保证"一项目一队列"的串行与单一写日志。
 
 ### 快照(T3)
 
@@ -61,10 +65,10 @@ GALFree v1 的**唯一测试接缝** = Host 侧项目服务(`src/service/project
 
 | 方法 | 语义 |
 |---|---|
-| `branchGraph(ref)` | 方言子集派生骨架 `{dialect,scenes,edges,problems,degraded}`;纯函数、幂等、可全量重算 |
-| `validateActiveProject()` | `ValidationReport = {ok, problems[], validator:'fake'｜'sdk', at, sdkNote?}`;假验证器 = 子集解析 + 结构规则(悬空跳转/重复 label/缺 start = error) |
-| (T5)`SdkProvisioner.ensure()` | 钉版 SDK 下载状态机 `idle→downloading(进度)→verifying(sha256)→extracting→ready`;幂等、可 retry;`probeOverrideSdk` 版本差异 = 警告入状态、不阻塞 |
-| (T5)`SdkValidator.validate` | 真 `renpy lint` 映射进同一 `ValidationReport` 形状 |
+| `branchGraph(ref)` | 方言子集派生骨架 `{dialect,scenes,edges,problems,degraded}`;纯函数、幂等、可全量重算;场景含 `text`(原始文本块)与 `showing`(对白行画面的图像引用) |
+| `validateActiveProject()` | `ValidationReport = {ok, problems[], validator:'fake'｜'sdk', at, sdkNote?}`。端口 `ValidatorPort = (ProjectInfo) => Promise<ValidationReport>`:缺省 = 假验证器(子集解析 + 结构规则:悬空跳转/重复 label/缺 start = error);生产装配注入**合成验证器** —— 假 lint 恒跑,钉版/覆盖 SDK 就绪时叠加真 `renpy lint` 并升级 `validator:'sdk'`,未就绪在 `sdkNote` 如实标注 |
+| (T5)`SdkProvisioner.ensure()` | 钉版 SDK 下载状态机 `idle→downloading(进度)→verifying(sha256,官方 checksums 钉死)→extracting→ready`;幂等、可 retry |
+| (T5)`probeOverrideSdk` | 覆盖路径探测:启动器存在 = 可用;版本 ≠ 钉版 → `mismatch` 警告进状态、**不阻塞**试玩/校验 |
 
 ### 推导进度与审读戳(T6)
 
@@ -75,9 +79,11 @@ GALFree v1 的**唯一测试接缝** = Host 侧项目服务(`src/service/project
 | `stampScene(ref,label,{via})` | 人盖场景戳(记场景内容指纹);`via!=='human'` → `stamp-forbidden` |
 | `stampSlot(ref,slot,{via})` | 人盖槽戳;未填 → `slot-not-filled` |
 
-戳失效**判定是推导**:盖戳时存内容指纹(场景 = 语句结构哈希;槽 = 素材文件哈希),
-推导时对比当前指纹 → `approved/stale`。任何覆盖写(含外部编辑器)自动"清戳 → 待复审",
-无需显式清除动作。
+戳失效**判定是推导**:盖戳时存内容指纹(场景 = **原始文本块**哈希 —— 含被解析器
+跳过的子集外内容,防止"加一段怪代码但戳还绿"的旁路;槽 = 素材文件哈希),推导时对比
+当前指纹 → `approved/stale`。任何覆盖写(含外部编辑器)自动"清戳 → 待复审",
+无需显式清除动作。指纹统一 `sha256 前 16 hex`(`hash.ts`,与网关版本戳、试玩
+`contentFingerprint` 同口径)。
 
 素材槽推导:`show/scene <tag> <attrs…>` 引用即槽;id = `tag attrs…`(空格分隔);
 约定路径 `game/images/<tag-attrs…>.png`(`slotAssetPath`)。素材定义(`image x = …`)
@@ -119,12 +125,13 @@ GALFree v1 的**唯一测试接缝** = Host 侧项目服务(`src/service/project
 ## 事件 / 推送协议(工作台刷新)
 
 - HTTP 路由族前缀 `/api/galfree`(仅回环;精确路径匹配):
-  - `GET /state` → `{projects, activeId, tree, activeRoot, activeMissing}`
-  - `POST /projects/create|activate` → 201/200;错误 `{error,code}` + 状态码(漂移/越权=409)
-  - `GET /progress` → 推导快照;`POST /stamps/scene|slot`(**仅人**经由工作台触发)
-  - `POST /playtest` → `{run}`;`GET /sdk`、`POST /sdk/ensure` → 供给状态机
+  - `GET /state` → `{projects, activeId, tree, activeRoot, activeMissing, gatewayErrors[]}`
+  - `POST /projects/create` → 201(**新建即激活**;无 activate 路由 —— 切换 UI 明确"后补",见 spec User Story 29)
+  - `GET /progress` → 推导快照;`POST /stamps/scene|slot`(**仅人**经由工作台触发;agent 工具面永远不接此端口)
+  - `POST /playtest` → `{run}`;`GET /sdk` → `{requested,dir,launcherReady,version,mismatch,provision}`、`POST /sdk/ensure` → 触发下载(首次使用进度可见)
   - `GET /snapshots?path=` / `GET /snapshots/diff?path=&from=&to=`
   - `GET /validate` → `ValidationReport`
+  - 错误响应 `{error, code}` + 状态码:漂移/越权/缺版本戳/未就绪 = 409
 - `GET /events`(**SSE**):仅推 `{type:'external-change'}`(外部写观察,100ms 合并;
   网关自写不推)。客户端收到即重拉 `/state`+`/progress`;轮询 8s 兜底。
   后续环节扩展帧型(`batch-committed`、`queue-progress`)保持"事件轻、状态拉"原则。

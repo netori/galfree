@@ -59,7 +59,7 @@ export async function rollbackFile(
   root: string,
   relPath: string,
   toCommit: string,
-  write: (ops: Array<{ path: string; content: string | null; expectVersion?: string }>, reason: WriteBatchReason) => Promise<WriteResultLike>,
+  write: (ops: Array<{ path: string; content: string | null; expectVersion: string }>, reason: WriteBatchReason) => Promise<WriteResultLike>,
   currentVersion: string,
 ): Promise<WriteResultLike> {
   let content: string

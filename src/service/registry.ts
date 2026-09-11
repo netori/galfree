@@ -87,12 +87,4 @@ export class ProjectRegistry {
     this.#doc.activeId = id
     await this.#save()
   }
-
-  /** 项目被删除/挪走后的登记移除(注册表是指针表,允许显式除名)。 */
-  async remove(id: string): Promise<void> {
-    await this.#load()
-    this.#doc.projects = this.#doc.projects.filter((project) => project.id !== id)
-    if (this.#doc.activeId === id) this.#doc.activeId = this.#doc.projects[0]?.id ?? null
-    await this.#save()
-  }
 }

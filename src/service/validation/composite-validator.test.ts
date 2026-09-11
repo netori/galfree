@@ -1,0 +1,56 @@
+/**
+ * T5 生产接线测试:合成验证器端口(假恒跑;SDK 就绪升级;缺失如实标注;
+ * 覆盖路径版本差异 → 警告进结果不静默)。
+ */
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { createCompositeValidator } from './composite-validator.ts'
+import { createProjectService, type ProjectInfo, type ProjectService } from '../project-service.ts'
+import { cleanupTempDirs, makeTempDir } from '../../testing/tmp.ts'
+
+describe('合成验证器(T5 接线)', () => {
+  let base: string
+  let service: ProjectService
+  let project: ProjectInfo
+
+  beforeEach(async () => {
+    base = await makeTempDir('galfree-composite-')
+    const validator = createCompositeValidator({
+      pinnedSdkDir: join(base, 'no-sdk-here'),
+      overrideSdkPath: () => '',
+    })
+    service = createProjectService({ dataDir: join(base, 'data'), validator })
+    project = await service.createProject({ projectsRoot: join(base, 'projects'), name: 'comp', title: undefined })
+  })
+  afterEach(async () => {
+    await service.dispose()
+    await cleanupTempDirs()
+  })
+
+  it('SDK 未就绪 → 假验证器结果 + sdkNote 如实标注(不谎称真校验)', async () => {
+    const report = await service.validateActiveProject()
+    expect(report.validator).toBe('fake')
+    expect(report.ok).toBe(true)
+    expect(report.sdkNote).toContain('未就绪')
+  })
+
+  it('覆盖目录版本 ≠ 钉版 → 方言差异警告进结果且 ok 不被阻塞为假阳性', async () => {
+    // 造一个假"覆盖 SDK"目录:启动器存在但版本是 9.9.9。
+    const override = join(base, 'user-sdk')
+    await mkdir(join(override, 'renpy-9.9.9-sdk'), { recursive: true })
+    await writeFile(join(override, 'renpy-9.9.9-sdk', 'renpy.exe'), '@echo off')
+    const service2 = createProjectService({
+      dataDir: join(base, 'data'),
+      validator: createCompositeValidator({ pinnedSdkDir: override, overrideSdkPath: () => override }),
+    })
+    try {
+      const report = await service2.validateActiveProject()
+      // 真 spawn 会失败(假 exe),但差异警告必须在结果里;validator 已升级为 sdk。
+      expect(report.validator).toBe('sdk')
+      expect(report.problems.some((p) => p.code === 'sdk-version-drift' && p.message.includes('9.9.9'))).toBe(true)
+    } finally {
+      await service2.dispose()
+    }
+  })
+})

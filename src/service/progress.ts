@@ -5,9 +5,7 @@
  * 客观可算的一律推导:缺对白、素材槽缺没缺(文件在不在)、lint 过没过、
  * 戳过没盖过 / 盖了但内容又变了(待复审)。算不出的(主观认可)才是戳。
  */
-import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { ABSENT, fileFingerprint, fingerprint } from './hash.ts'
 import type { DialectProblem, SceneNode, Statement } from './rpy/dialect.ts'
 import type { PlaytestRun } from './playtest.ts'
 import { readStamps, sceneTarget, slotTarget } from './stamps.ts'
@@ -84,27 +82,14 @@ export function slotName(statement: Extract<Statement, { kind: 'image' }>): stri
   return [statement.tag, ...statement.attributes].join(' ')
 }
 
-/** 场景内容指纹:语句结构(去行号)+ label,稳定可重算。 */
-export function sceneFingerprint(scene: { label: string; statements: Statement[] }): string {
-  const canonical = JSON.stringify({
-    label: scene.label,
-    statements: scene.statements.map(stripLine),
-  })
-  return createHash('sha256').update(canonical, 'utf8').digest('hex').slice(0, 16)
-}
-
-function stripLine<T extends { line: number }>(statement: T): Omit<T, 'line'> {
-  const { line: _line, ...rest } = statement
-  return rest as Omit<T, 'line'>
+/** 场景内容指纹:**原始文本块**哈希(任何改动都算改动,包括被解析器
+ *  跳过的子集外内容 —— 否则新增 if/ATL 块不会使已有戳失效)。 */
+export function sceneFingerprint(scene: Pick<SceneNode, 'text'>): string {
+  return fingerprint(scene.text)
 }
 
 async function assetFingerprint(root: string, assetPath: string): Promise<string> {
-  try {
-    const bytes = await readFile(join(root, ...assetPath.split('/')))
-    return createHash('sha256').update(bytes).digest('hex').slice(0, 16)
-  } catch {
-    return 'absent'
-  }
+  return fileFingerprint(root, assetPath)
 }
 
 export interface ProgressInputs {
@@ -123,6 +108,21 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
 
   const seenSlots = new Set<string>()
   const sceneProgress: SceneProgress[] = []
+  // 场景行区间:同文件内按起始行排序,下一场景起始行 = 本场景上界。
+  const lineBounds = new Map<SceneNode, number>()
+  const byFile = new Map<string, SceneNode[]>()
+  for (const scene of inputs.scenes) {
+    const list = byFile.get(scene.file) ?? []
+    list.push(scene)
+    byFile.set(scene.file, list)
+  }
+  for (const list of byFile.values()) {
+    const sorted = [...list].sort((a, b) => a.line - b.line)
+    for (let i = 0; i < sorted.length; i += 1) {
+      const next = sorted[i + 1]
+      if (next !== undefined) lineBounds.set(sorted[i]!, next.line)
+    }
+  }
   for (const scene of inputs.scenes) {
     const slotNames: string[] = []
     for (const statement of scene.statements) {
@@ -135,19 +135,24 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
     for (const name of slotNames) {
       seenSlots.add(name)
       const assetPath = slotAssetPath(name)
-      const fingerprint = await assetFingerprint(root, assetPath)
-      const filled = fingerprint !== 'absent'
+      const assetFp = await assetFingerprint(root, assetPath)
+      const filled = assetFp !== ABSENT
       const record = byTarget.get(slotTarget(name))
       let stamp: StampState
       if (record === undefined) stamp = filled ? 'pending' : 'missing'
-      else stamp = record.fingerprint === fingerprint ? 'approved' : 'stale'
-      slots.push({ slot: name, assetPath, filled, fingerprint, stamp })
+      else stamp = record.fingerprint === assetFp ? 'approved' : 'stale'
+      slots.push({ slot: name, assetPath, filled, fingerprint: assetFp, stamp })
     }
     const dialogueCount = scene.statements.filter((s) => s.kind === 'dialogue').length
     const sceneRecord = byTarget.get(sceneTarget(scene.label))
     const sceneFp = sceneFingerprint(scene)
     const sceneStamp: StampState = sceneRecord === undefined ? 'none' : sceneRecord.fingerprint === sceneFp ? 'approved' : 'stale'
-    const lintErrors = scene.problems.filter((p) => p.severity === 'error').length
+    // 场景级 lint 错误:顶层 error 按 文件+行号区间 归属(行号落在本场景起、下一场景止之间)。
+    let lintErrors = 0
+    for (const problem of inputs.problems) {
+      if (problem.severity !== 'error' || problem.file !== scene.file || problem.line === undefined) continue
+      if (problem.line >= scene.line && (!lineBounds.has(scene) || problem.line < (lineBounds.get(scene) ?? Infinity))) lintErrors += 1
+    }
     sceneProgress.push({
       label: scene.label,
       file: scene.file,
@@ -167,7 +172,6 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
   for (const scene of sceneProgress) for (const slot of scene.slots) if (!uniqueSlots.has(slot.slot)) uniqueSlots.set(slot.slot, slot)
 
   const lintErrors = inputs.problems.filter((p) => p.severity === 'error').length
-    + sceneProgress.reduce((sum, scene) => sum + scene.lintErrors, 0)
   const lintWarnings = inputs.problems.filter((p) => p.severity === 'warning').length
 
   const awaitingReview = sceneProgress.filter((s) => s.stamp === 'stale').length

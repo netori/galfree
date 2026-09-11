@@ -2,24 +2,30 @@
  * 写网关(Host 单一写通道,ADR-0004)。
  *
  * - **串行**:一个项目一个 in-flight 队列,写批按提交顺序落盘。
- * - **版本戳**:以文件内容哈希为版本(token),CAS 式拒绝过期写;漂移如实报告。
- * - **原子批**:批内先全部校验版本,再整体落盘;任一不符 → 整批不落(全有或全无)。
+ * - **版本戳**:文件内容哈希即版本(`fingerprint`,缺失哨兵 `ABSENT='absent'`)。
+ *   每个写操作**必须**携带 `expectVersion`(CAS):对已存在文件不给出期望版本 →
+ *   拒绝(`expect-required`);对新建文件传 `'absent'` 断言"我确认它不存在"。
+ *   不存在"无条件覆盖"的旁路。
+ * - **原子批**:批内先全部校验版本,再整体落盘;任一不符 → 抛错不落;落盘中途
+ *   失败 → 逐文件回滚旧内容(尽力而为);回滚失败如实记入 `errors`。
  * - **外部修改 = 观察**:文件监听把网关外的改动广播出去(工作台刷新),网关自身
  *   写盘时抑制对应事件(不把自己的写当成外部改动)。
+ * - 快照/审计钩子(`onBatchCommit`)失败**不静默**:记入 `errors` 供状态呈现
+ *   (写批已落盘的事实不被否定,但"是否成功快照"是诚实可查的)。
  * - 网关是**唯一**插件内写通道:服务不直接 write 项目文件,一律经此。
  */
-import { createHash } from 'node:crypto'
 import { mkdir, readFile, rm, watch, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, sep } from 'node:path'
 import { GalfreeError } from './error.ts'
+import { ABSENT, fingerprint } from './hash.ts'
 
 export interface WriteOp {
   /** 相对项目根的 POSIX 路径。 */
   path: string
   /** 目标内容;null = 删除该文件。 */
   content: string | null
-  /** CAS 期望版本(读取时的 version);缺省 = 无条件覆盖(仅限新建)。 */
-  expectVersion?: string
+  /** CAS 期望版本(读取时的 version;'absent' = 断言不存在)。必填,拒绝无条件覆盖。 */
+  expectVersion: string
 }
 
 export interface WriteBatchReason {
@@ -46,7 +52,7 @@ export interface FileSnapshot {
 
 export interface ChangeEvent {
   path: string
-  /** 外部改动后的新版本;删除为 'deleted'。 */
+  /** 改动后的新版本;删除为 ABSENT('absent')。 */
   version: string
   /** 该事件来自网关自身写(internal)还是被观察到的外部写(external)。 */
   kind: 'internal' | 'external'
@@ -56,15 +62,19 @@ export interface ChangeEvent {
 export interface WriteLogEntry {
   path: string
   batchId: number
-  /** 落盘后的版本('absent' = 删除)。 */
+  /** 落盘后的版本(ABSENT = 删除)。 */
   version: string
   reason: string
   origin: WriteBatchReason['origin']
   at: string
 }
 
-function versionOf(content: string): string {
-  return createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 16)
+/** 非致命但必须如实呈现的故障(快照钩子失败、回滚失败)。 */
+export interface GatewayError {
+  batchId: number
+  kind: 'snapshot-failed' | 'rollback-failed' | 'watch-failed'
+  message: string
+  at: string
 }
 
 export class WriteGateway {
@@ -76,27 +86,28 @@ export class WriteGateway {
   #watcher: ReturnType<typeof watch> | undefined
   #watchStop: AbortController | undefined
   #writeLog: WriteLogEntry[] = []
+  #errors: GatewayError[] = []
   #root: string
 
   constructor(root: string) {
     this.#root = root
   }
 
-  /** 读取文件 + 当前版本(内容哈希)。缺失文件 version = 'absent'。 */
+  /** 读取文件 + 当前版本(内容哈希)。缺失文件 version = ABSENT。 */
   async read(relPath: string): Promise<FileSnapshot> {
     const abs = this.#abs(relPath)
     try {
       const content = await readFile(abs, 'utf8')
-      return { content, version: versionOf(content), missing: false }
+      return { content, version: fingerprint(content), missing: false }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { content: '', version: 'absent', missing: true }
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'ENOENT' || code === 'EISDIR') return { content: '', version: ABSENT, missing: true }
       throw new GalfreeError('read-failed', `读取失败 ${relPath}: ${String(error)}`)
     }
   }
 
   #abs(relPath: string): string {
     const abs = join(this.#root, ...relPath.split('/'))
-    // 防路径逃逸:解析后必须仍在项目根内。
     const rel = relative(this.#root, abs)
     if (rel.startsWith('..') || rel.startsWith(sep)) throw new GalfreeError('path-escape', `路径越出项目根:${relPath}`)
     return abs
@@ -111,57 +122,71 @@ export class WriteGateway {
   }
 
   async #doBatch(ops: WriteOp[], reason: WriteBatchReason): Promise<WriteResult> {
-    // 1) 校验阶段:全部读当前版本比对 CAS,任一漂移 → 抛错,不落任何文件。
+    // 1) 校验阶段:全部读当前版本比对 CAS,任一漂移/缺期望版本 → 抛错,不落任何文件。
     for (const op of ops) {
-      if (op.expectVersion === undefined) continue
       const now = await this.read(op.path)
+      if (op.expectVersion === undefined || op.expectVersion === '') {
+        throw new GalfreeError('expect-required', `写操作缺少 expectVersion(拒绝无条件覆盖):${op.path}`, { path: op.path })
+      }
       if (now.version !== op.expectVersion) {
         throw new GalfreeError('version-drift', `版本漂移:${op.path} 期望 ${op.expectVersion},磁盘实际 ${now.version}`, {
           path: op.path, expected: op.expectVersion, actual: now.version, origin: reason.origin,
         })
       }
     }
-    // 2) 落盘阶段:逐文件写入,登记 internal 版本供 watcher 抑制。
+    // 2) 准备:计算新版本并登记 internal 标记(watcher 抑制用)。
     const batchId = ++this.#batch
     const versions: Record<string, string> = {}
-    const pending: Array<{ abs: string; rel: string; content: string | null }> = []
+    const prepared: Array<{ abs: string; op: WriteOp; prev: string | null }> = []
     for (const op of ops) {
       const abs = this.#abs(op.path)
-      pending.push({ abs, rel: op.path, content: op.content })
-      versions[op.path] = op.content === null ? 'absent' : versionOf(op.content)
-      this.#internalWrites.set(abs, op.content === null ? 'deleted' : versionOf(op.content))
+      versions[op.path] = op.content === null ? ABSENT : fingerprint(op.content)
+      this.#internalWrites.set(abs, versions[op.path]!)
+      prepared.push({ abs, op, prev: null })
     }
     // 3) 原子性:先确保目录,再写;失败回滚已写内容到旧值。
-    const rollback: Array<() => Promise<void>> = []
+    //    回滚快照在写前捕获(仅本批已写过的文件)。
+    const written: Array<{ abs: string; prev: string | null }> = []
     try {
-      for (const item of pending) {
-        const snapshot = await this.#safeReadRaw(item.abs)
-        rollback.push(() => (snapshot === null ? rm(item.abs, { force: true }) : writeFile(item.abs, snapshot, 'utf8')))
-        if (item.content === null) {
+      for (const item of prepared) {
+        const prev = await this.#safeReadRaw(item.abs)
+        if (item.op.content === null) {
           await rm(item.abs, { force: true })
         } else {
           await mkdir(dirname(item.abs), { recursive: true })
-          await writeFile(item.abs, item.content, 'utf8')
+          await writeFile(item.abs, item.op.content, 'utf8')
         }
+        written.push({ abs: item.abs, prev })
       }
     } catch (error) {
-      for (const undo of rollback.reverse()) {
-        try { await undo() } catch { /* 回滚尽力而为 */ }
+      // 回滚(尽力而为);每步失败如实记录,不吞。
+      for (const done of written.reverse()) {
+        try {
+          if (done.prev === null) await rm(done.abs, { force: true })
+          else await writeFile(done.abs, done.prev, 'utf8')
+        } catch (rollbackError) {
+          this.#recordError(batchId, 'rollback-failed', `回滚 ${relative(this.#root, done.abs)} 失败:${String(rollbackError)}`)
+        }
       }
-      throw new GalfreeError('write-failed', `写批落盘失败,已回滚:${String(error)}`)
+      throw new GalfreeError('write-failed', `写批落盘失败,已尝试回滚:${String(error)}`)
     }
     // 4) 记写日志、广播 internal 事件、触发批提交钩子(快照 T3 挂这里)。
     const at = new Date().toISOString()
     for (const op of ops) {
-      const version = versions[op.path] ?? 'absent'
+      const version = versions[op.path] ?? ABSENT
       this.#writeLog.push({ path: op.path, batchId, version, reason: reason.reason, origin: reason.origin, at })
       this.#emit({ path: op.path, version, kind: 'internal' })
     }
-    // 让 watcher 有机会消费 internal 标记后再清理(短暂窗口后按文件粒度比对)。
+    // 让 watcher 有机会消费 internal 标记后再清理(一次写可能触发多个 watch 事件)。
     const timer = setTimeout(() => { for (const op of ops) this.#internalWrites.delete(this.#abs(op.path)) }, 1500)
     timer.unref?.()
     for (const hook of this.#batchHooks) {
-      try { await hook({ batchId, reason, versions }) } catch { /* 钩子失败不否定已落盘的写批;由调用方状态如实呈现 */ }
+      try {
+        await hook({ batchId, reason, versions })
+      } catch (hookError) {
+        // 钩子失败不否定已落盘的写批(ADR-0004),但如实记录(ADR-0011 快照失败)。
+        this.#recordError(batchId, 'snapshot-failed', String(hookError))
+      }
     }
     return { versions, batchId }
   }
@@ -180,6 +205,16 @@ export class WriteGateway {
   /** 写日志(插桩:断言所有写都经过网关)。 */
   get log(): readonly WriteLogEntry[] {
     return this.#writeLog
+  }
+
+  /** 非致命故障(快照/回滚/监听失败)——状态层必须能读到。 */
+  get errors(): readonly GatewayError[] {
+    return this.#errors
+  }
+
+  #recordError(batchId: number, kind: GatewayError['kind'], message: string): void {
+    this.#errors.push({ batchId, kind, message, at: new Date().toISOString() })
+    if (this.#errors.length > 100) this.#errors.shift()
   }
 
   async #safeReadRaw(abs: string): Promise<string | null> {
@@ -214,7 +249,6 @@ export class WriteGateway {
           const filename = typeof event.filename === 'string' ? event.filename : null
           if (filename === null) continue
           const rel = filename.split(sep).join('/')
-          // 跳过 git 内部与运行噪声(不广播它们,避免抖动)。
           if (rel.split('/')[0] === '.git') continue
           if (rel.endsWith('.rpyc') || rel.split('/').includes('cache') || rel.split('/').includes('saves')) continue
           const abs = join(this.#root, filename)
@@ -224,7 +258,7 @@ export class WriteGateway {
           } catch {
             raw = null // 目录事件或已删除
           }
-          const version = raw === null ? 'deleted' : versionOf(raw)
+          const version = raw === null ? ABSENT : fingerprint(raw)
           const expectedInternal = this.#internalWrites.get(abs)
           if (expectedInternal !== undefined && version === expectedInternal) {
             // 这是网关自己的写:已在 writeBatch 广播过,抑制"外部"事件。
@@ -235,7 +269,7 @@ export class WriteGateway {
         }
       } catch (error) {
         if ((error as { name?: string }).name !== 'AbortError') {
-          // 监听失败不致命:外部观察降级,写通道仍可用(状态如实呈现靠 read 现取)。
+          this.#recordError(this.#batch, 'watch-failed', `外部监听降级:${String(error)}`)
         }
       }
     })()

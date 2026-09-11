@@ -8,7 +8,7 @@
 
 /** 场景(label)内可识别的语句。 */
 export type Statement =
-  | { kind: 'dialogue'; speaker: string | null; text: string; line: number }
+  | { kind: 'dialogue'; speaker: string | null; text: string; /** 该句发生时的画面图像引用(舞台状态快照)。 */ showing: string[]; line: number }
   | { kind: 'image'; role: 'show' | 'scene' | 'hide'; tag: string; attributes: string[]; line: number }
   | { kind: 'jump'; target: string; line: number }
   | { kind: 'return'; line: number }
@@ -35,6 +35,9 @@ export interface SceneNode {
   /** label 声明所在行(1 基)。 */
   line: number
   statements: Statement[]
+  /** 该场景的原始文本块(label 行起,到下一顶层 label 前)——审读戳指纹的输入
+   *  (ADR-0008:任何改动都算改动,包括被跳过的子集外内容)。 */
+  text: string
   /** 子集外语法 → 降级只读并记录原因(不为空时 readOnly=true)。 */
   readOnly: boolean
   problems: DialectProblem[]

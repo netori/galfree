@@ -4,11 +4,11 @@
  * 主观"玩过了、行"走场景级审读戳。运行事实记 `.studio/playtest.json`
  * (经网关写 → 进快照),进度板推导其新鲜度(内容变了 → stale)。
  */
-import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { access, readFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { GalfreeError } from './error.ts'
+import { fingerprint } from './hash.ts'
 import type { BranchGraph } from './rpy/dialect.ts'
 
 export interface SpawnResult {
@@ -57,9 +57,12 @@ export function playtestDocument(doc: PlaytestDocument): string {
   return JSON.stringify({ ...doc, history: doc.history.slice(-20) }, null, 2) + '\n'
 }
 
-/** 运行内容指纹:分支骨架的序列化哈希(任何结构/文本变化都会改变它)。 */
+/**
+ * 运行内容指纹:全部场景原始文本块 + 边结构。与场景戳同一口径(原始文本哈希),
+ * 试玩后又改任何内容(哪怕子集外)都会推导为 stale。
+ */
 export function contentFingerprint(graph: BranchGraph): string {
-  return createHash('sha256').update(JSON.stringify({ scenes: graph.scenes, edges: graph.edges }), 'utf8').digest('hex').slice(0, 16)
+  return fingerprint(graph.scenes.map((scene) => `${scene.file}\u0000${scene.text}`).join('\u0001'))
 }
 
 /** traceback 提取:优先 "Full traceback:" 段;退化到含 Exception/Error 的行块。 */
@@ -101,27 +104,4 @@ export async function realSpawn(launcher: string, projectRoot: string): Promise<
     child.on('error', rejectPromise)
     child.on('close', (code) => resolvePromise({ code: code ?? 1, log }))
   })
-}
-
-/** 平台默认启动器候选(相对 SDK 目录)。 */
-export async function defaultLauncher(sdkDir: string): Promise<string | null> {
-  const name = process.platform === 'win32' ? 'renpy.exe' : 'renpy.sh'
-  const direct = join(sdkDir, name)
-  try {
-    await access(direct)
-    return direct
-  } catch { /* nested */ }
-  try {
-    const { readdir } = await import('node:fs/promises')
-    for (const entryName of await readdir(sdkDir, { withFileTypes: false })) {
-      const nested = join(sdkDir, entryName, name)
-      try {
-        await access(nested)
-        return nested
-      } catch { /* keep looking */ }
-    }
-  } catch {
-    return null
-  }
-  return null
 }

@@ -95,6 +95,58 @@ describe('写网关(T2)', () => {
     await expect(service.writeProjectFiles('gw', [{ path: rel, content: 'after-external\n', expectVersion: observed.version }], { reason: 'edit', origin: 'agent' })).resolves.toBeTruthy()
   })
 
+  it("CAS 不可绕过:缺 expectVersion 的写批被拒绝(expect-required)", async () => {
+    // 模拟调用方偷懒:不给版本戳。
+    await expect(service.writeProjectFiles('gw', [{ path: 'game/script.rpy', content: 'sneaky\n' } as never], { reason: 'edit', origin: 'agent' }))
+      .rejects.toMatchObject({ code: 'expect-required' })
+    expect(await readFile(join(root, 'game', 'script.rpy'), 'utf8')).not.toBe('sneaky\n')
+  })
+
+  it('落盘中途失败 → 已写文件回滚为旧内容,整批不落(全有或全无)', async () => {
+    // 第二个 op 的目标路径把已存在文件当目录用 → 落盘必失败(ENOTDIR/EISDIR 类)。
+    const vs = (await service.readProjectFile('gw', 'game/script.rpy')).version
+    const vo = (await service.readProjectFile('gw', 'game/options.rpy')).version
+    const before = await readFile(join(root, 'game', 'script.rpy'), 'utf8')
+    await expect(service.writeProjectFiles('gw', [
+      { path: 'game/script.rpy', content: 'should-rollback\n', expectVersion: vs },
+      { path: 'game/script.rpy/impossible-child.rpy', content: 'boom\n', expectVersion: 'absent' },
+    ], { reason: 'edit', origin: 'agent' })).rejects.toMatchObject({ code: 'write-failed' })
+    // 第一个文件回滚为原内容,第二个不存在。
+    expect(await readFile(join(root, 'game', 'script.rpy'), 'utf8')).toBe(before)
+    expect((await service.readProjectFile('gw', 'game/script.rpy')).version).toBe(vs)
+    void vo
+  })
+
+  it('快照钩子失败不静默:errors 如实上报且写批本身不被否定', async () => {
+    const { WriteGateway } = await import('./write-gateway.ts')
+    const gateway = new WriteGateway(root)
+    gateway.onBatchCommit(async () => { throw new Error('git exploded') })
+    const vs = (await service.readProjectFile('gw', 'game/script.rpy')).version
+    const result = await gateway.writeBatch([{ path: 'game/script.rpy', content: 'hook-fails\n', expectVersion: vs }], { reason: 'edit', origin: 'agent' })
+    expect(result.batchId).toBeGreaterThan(0)
+    expect(await readFile(join(root, 'game', 'script.rpy'), 'utf8')).toBe('hook-fails\n')
+    expect(gateway.errors.some((e) => e.kind === 'snapshot-failed' && e.message.includes('git exploded'))).toBe(true)
+    await gateway.dispose()
+  })
+
+  it('网关懒建竞态:新实例上两个并发写批仍恰有一个成功(每项目单网关单队列)', async () => {
+    const v0 = (await service.readProjectFile('gw', 'game/script.rpy')).version
+    const reopened = createProjectService({ dataDir })
+    try {
+      const results = await Promise.allSettled([
+        reopened.writeProjectFiles('gw', [{ path: 'game/script.rpy', content: 'R1\n', expectVersion: v0 }], { reason: 'edit', origin: 'agent' }),
+        reopened.writeProjectFiles('gw', [{ path: 'game/script.rpy', content: 'R2\n', expectVersion: v0 }], { reason: 'edit', origin: 'workbench' }),
+      ])
+      const ok = results.filter((r) => r.status === 'fulfilled')
+      expect(ok).toHaveLength(1) // 若竞态双建网关,两个都会通过校验各自落盘 → 这里变 2
+      const log = await reopened.writeLog('gw')
+      const ids = new Set(log.map((entry) => entry.batchId))
+      expect(ids.size).toBe(log.filter((e) => !['scaffold'].includes(e.reason)).length) // 批次号同源单队列
+    } finally {
+      await reopened.dispose()
+    }
+  })
+
   it('外部修改被观察并推送事件(工作台无刷新即更新的底层)', async () => {
     const rel = 'game/script.rpy'
     const events: Array<{ path: string; kind: string }> = []

@@ -25,6 +25,7 @@ export interface StateView {
   tree: TreeNode[]
   activeRoot: string | null
   activeMissing: boolean
+  gatewayErrors: Array<{ batchId: number; kind: string; message: string; at: string }>
 }
 
 export class GalfreeApiError extends Error {
@@ -114,12 +115,13 @@ export class GalfreeApi {
     }))
   }
 
-  async activate(id: string): Promise<void> {
-    await readJson<unknown>(await fetch('/api/galfree/projects/activate', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id }),
-    }))
+  /** SDK 供给状态(T5;首次下载进度可见)。 */
+  async sdk(): Promise<{ requested: string; dir: string; launcherReady: boolean; mismatch?: { pinned: string; actual: string }; provision: { state: string; progress: { fraction: number; message?: string }; error?: string } }> {
+    return readJson(await fetch('/api/galfree/sdk'))
+  }
+
+  async sdkEnsure(): Promise<{ state: string; error: string | null; progress: { fraction: number; message?: string } }> {
+    return readJson(await fetch('/api/galfree/sdk/ensure', { method: 'POST' }))
   }
 
   async snapshots(relPath: string): Promise<SnapshotEntry[]> {

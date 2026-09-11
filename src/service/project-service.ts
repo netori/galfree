@@ -21,9 +21,8 @@ import type { BranchGraph } from './rpy/dialect.ts'
 import { computeProgress, sceneFingerprint, slotAssetPath, type ProgressSnapshot } from './progress.ts'
 import { readStamps, sceneTarget, slotTarget, stampsDocument, withStamp, type StampRecord } from './stamps.ts'
 import { contentFingerprint, launchPlaytest, playtestDocument, readPlaytest, PLAYTEST_FILE, type PlaytestPorts, type PlaytestRun } from './playtest.ts'
-import { createHash } from 'node:crypto'
-import { readFile as readFileNode } from 'node:fs/promises'
-import { WriteGateway, type ChangeEvent, type FileSnapshot, type WriteLogEntry, type WriteOp, type WriteResult } from './write-gateway.ts'
+import { ABSENT, fileFingerprint } from './hash.ts'
+import { WriteGateway, type ChangeEvent, type FileSnapshot, type GatewayError, type WriteLogEntry, type WriteOp, type WriteResult } from './write-gateway.ts'
 import type { WriteBatchReason } from './write-gateway.ts'
 import type { ValidationReport } from './validation/contract.ts'
 
@@ -49,24 +48,30 @@ export interface CreateProjectInput {
   title?: string
 }
 
+/**
+ * 验证器端口:服务把"校验激活项目"委托给它。默认假验证器(快测);
+ * 生产可注入合成端口(假 lint + 就绪时真 SDK lint 合并),让 SDK 验证真正生效。
+ */
+export type ValidatorPort = (project: ProjectInfo) => Promise<ValidationReport>
+
 export interface ProjectServiceOptions {
   /** 插件数据目录(注册表等宿主侧状态落这里)。 */
   dataDir: string
-  /** 注入验证器(T1 假验证器;T5 真 SDK 适配器实现同一契约)。 */
-  validator?: FakeValidator
+  /** 注入验证器端口(缺省 = 假验证器;T5 生产注入假+真合成)。 */
+  validator?: ValidatorPort
   /** 试玩端口(T7;缺省 = SDK 未就绪的诚实失败)。 */
   playtest?: PlaytestPorts
 }
 
 export class ProjectService {
   #registry: ProjectRegistry
-  #validator: FakeValidator
+  #validator: ValidatorPort
   #playtestPorts: PlaytestPorts
-  #gateways = new Map<string, WriteGateway>()
+  #gateways = new Map<string, Promise<WriteGateway>>()
 
   constructor(options: ProjectServiceOptions) {
     this.#registry = new ProjectRegistry(join(options.dataDir, 'registry.json'))
-    this.#validator = options.validator ?? new FakeValidator()
+    this.#validator = options.validator ?? (async (project) => new FakeValidator().validate(join(project.root, 'game')))
     this.#playtestPorts = options.playtest ?? { resolveLauncher: async () => null, spawn: async () => ({ code: 0, log: '' }) }
   }
 
@@ -97,10 +102,10 @@ export class ProjectService {
     const files = [...renderTemplateFiles({ name: input.name, title, id }), ...templateKeepFiles()]
     const gateway = this.#newGateway(root)
     await gateway.writeBatch(
-      files.map((file): WriteOp => ({ path: file.path, content: file.content, expectVersion: 'absent' })),
+      files.map((file): WriteOp => ({ path: file.path, content: file.content, expectVersion: ABSENT })),
       { origin: 'workbench', reason: 'scaffold' },
     )
-    this.#gateways.set(id, gateway)
+    this.#gateways.set(id, Promise.resolve(gateway))
 
     try {
       await this.#initGit(root, input.name)
@@ -109,6 +114,8 @@ export class ProjectService {
     }
 
     await this.#registry.add({ id, name: input.name, title, path: root, createdAt })
+    // 新建即进入当前工作项目(v1 无切换 UI;激活位随建随切)。
+    await this.#registry.setActive(id)
     return this.#toInfo(id)
   }
 
@@ -122,16 +129,12 @@ export class ProjectService {
     return this.#toInfo(id)
   }
 
-  /** 注册表里按 id 取元数据(id/名称/路径)。 */
-  async getRegistryEntry(id: string): Promise<{ id: string; name: string; title: string; path: string } | null> {
-    return (await this.#registry.get(id)) ?? null
-  }
-
   async getActiveProject(): Promise<ProjectInfo | null> {
     const id = await this.#registry.activeId()
     return id === null ? null : this.#toInfo(id)
   }
 
+  /** 设置激活项目(数据模型 v1 就位;切换 UI 留后续票)。 */
   async setActive(id: string): Promise<void> {
     await this.#registry.setActive(id)
   }
@@ -167,6 +170,12 @@ export class ProjectService {
     return [...gateway.log]
   }
 
+  /** 网关批处理的非致命故障(快照失败/回滚失败/监听降级)——状态层如实呈现。 */
+  async gatewayErrors(projectRef: string): Promise<GatewayError[]> {
+    const gateway = await this.#gatewayFor(projectRef)
+    return [...gateway.errors]
+  }
+
   // ─── 快照(T3)───────────────────────────────────────────────────────
 
   /** 单文件快照历史(最新在前)。 */
@@ -197,12 +206,12 @@ export class ProjectService {
     )
   }
 
-  /** 校验回路:对当前激活项目跑验证器(T1 假验证器;T4 接方言解析契约)。 */
+  /** 校验回路:对当前激活项目跑验证器端口(默认假;生产可合成真 SDK)。 */
   async validateActiveProject(): Promise<ValidationReport> {
     const active = await this.getActiveProject()
     if (active === null) throw new GalfreeError('no-active-project', '没有激活项目可校验')
     if (active.missing) throw new GalfreeError('project-missing', `项目目录已不存在:${active.root}`)
-    return this.#validator.validate(join(active.root, 'game'))
+    return this.#validator(active)
   }
 
   /** 分支骨架(派生视图:可缓存、全量重算;ADR-0009 `.rpy` 为尊)。 */
@@ -273,23 +282,14 @@ export class ProjectService {
   async stampSlot(projectRef: string, slot: string, actor: { via: 'human' | 'agent' }): Promise<void> {
     this.#requireHuman(actor)
     const entry = await this.#resolve(projectRef)
-    const fingerprint = await this.#assetFingerprint(entry.path, slotAssetPath(slot))
-    if (fingerprint === 'absent') throw new GalfreeError('slot-not-filled', `素材槽未填,不能盖审读戳:${slot}`)
-    await this.#putStamp(projectRef, slotTarget(slot), fingerprint)
+    const fp = await fileFingerprint(entry.path, slotAssetPath(slot))
+    if (fp === ABSENT) throw new GalfreeError('slot-not-filled', `素材槽未填,不能盖审读戳:${slot}`)
+    await this.#putStamp(projectRef, slotTarget(slot), fp)
   }
 
   #requireHuman(actor: { via: 'human' | 'agent' }): void {
     if (actor.via !== 'human') {
       throw new GalfreeError('stamp-forbidden', '审读戳只能由人盖(工作台真实动作),agent 无权设置')
-    }
-  }
-
-  async #assetFingerprint(root: string, assetPath: string): Promise<string> {
-    try {
-      const bytes = await readFileNode(join(root, ...assetPath.split('/')))
-      return createHash('sha256').update(bytes).digest('hex').slice(0, 16)
-    } catch {
-      return 'absent'
     }
   }
 
@@ -306,7 +306,8 @@ export class ProjectService {
 
   /** 停掉全部监听(宿主 dispose 与测试收尾用)。 */
   async dispose(): Promise<void> {
-    for (const gateway of this.#gateways.values()) await gateway.dispose()
+    const gateways = await Promise.all([...this.#gateways.values()])
+    for (const gateway of gateways) await gateway.dispose()
     this.#gateways.clear()
   }
 
@@ -322,16 +323,27 @@ export class ProjectService {
     return gateway
   }
 
-  /** 按 id 或 name 解析项目,返回其网关(懒建)。 */
+  /**
+   * 按 id 或 name 解析项目并返回其网关(懒建)。
+   * 竞态安全:在 `await` 之前**同步**写入 promise,两个并发调用拿到同一实例
+   * (否则"每项目一队列"的串行保证与"唯一写通道"日志会被双网关穿透)。
+   */
   async #gatewayFor(projectRef: string): Promise<WriteGateway> {
     const entry = await this.#resolve(projectRef)
-    let gateway = this.#gateways.get(entry.id)
-    if (gateway === undefined) {
+    const existing = this.#gateways.get(entry.id)
+    if (existing !== undefined) return existing
+    // 同步占位:先建 promise 再 await 任何异步,消除 get→set 竞态窗口。
+    const created = (async () => {
       await this.#assertPresent(entry)
-      gateway = this.#newGateway(entry.path)
-      this.#gateways.set(entry.id, gateway)
+      return this.#newGateway(entry.path)
+    })()
+    this.#gateways.set(entry.id, created)
+    try {
+      return await created
+    } catch (error) {
+      this.#gateways.delete(entry.id) // 建失败(如项目缺失):清占位,下次可重试。
+      throw error
     }
-    return gateway
   }
 
   async #resolve(projectRef: string): Promise<RegistryEntry> {

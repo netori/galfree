@@ -101,8 +101,12 @@ export function parseRpy(files: RpyFile[]): ParsedScript {
 
   for (const file of [...files].sort((a, b) => a.name.localeCompare(b.name))) {
     const lines = toRawLines(file.text)
+    const rawLines = file.text.split('\n')
+    const fileScenes: Array<{ scene: SceneNode; start: number }> = []
     let index = 0
     let current: SceneNode | null = null
+    /** 舞台状态:tag → 图像引用名(showing 快照的输入;每个场景重置)。 */
+    let stage = new Map<string, string>()
 
     const degrade = (problem: DialectProblem): void => {
       if (current !== null) {
@@ -111,6 +115,14 @@ export function parseRpy(files: RpyFile[]): ParsedScript {
       } else {
         problems.push(problem)
       }
+    }
+
+    /** 舞台状态更新:scene 清场换背景;show 挂/替换立绘;hide 摘除。 */
+    const applyStage = (role: 'show' | 'scene' | 'hide', tag: string, attributes: string[]): void => {
+      const name = [tag, ...attributes].join(' ')
+      if (role === 'scene') { stage.clear(); stage.set('bg', name) }
+      else if (role === 'show') stage.set(tag, name)
+      else { stage.delete(tag); if (tag === 'bg') stage.delete('bg') }
     }
 
     /** 解析一段块体(indent 严格大于 minIndent 的行)。 */
@@ -172,12 +184,14 @@ export function parseRpy(files: RpyFile[]): ParsedScript {
         return { kind: 'pause', seconds: pauseMatch[1] === undefined ? null : Number(pauseMatch[1]), line: line.no }
       }
       if (SHOW_BLOCK_RE.test(body)) {
-        // show/scene + ATL 块:记 warning、跳过整块。
+        // show/scene + ATL 块:记 warning、跳过整块(标签仍进舞台状态)。
+        const role = /^(show|scene|hide)/.exec(body)![1] as 'show' | 'scene' | 'hide'
         const tag = /^(?:show|scene|hide)\s+([A-Za-z0-9_]+)/.exec(body)?.[1] ?? '?'
         degrade({ severity: 'warning', file: file.name, line: line.no, code: 'unsupported-atl', message: `show ${tag} 带 ATL 块不在子集内(只读降级,块体跳过)`, snippet: body })
         index += 1
         while (index < lines.length && lines[index]!.indent > line.indent) index += 1
-        return { kind: 'image', role: /^(show|scene|hide)/.exec(body)![1] as 'show' | 'scene' | 'hide', tag, attributes: [], line: line.no }
+        applyStage(role, tag, [])
+        return { kind: 'image', role, tag, attributes: [], line: line.no }
       }
       if ((m = SHOW_RE.exec(body)) !== null) {
         // show/scene/hide:tag + 属性;排除 `at`/`with` 修饰词。
@@ -190,6 +204,7 @@ export function parseRpy(files: RpyFile[]): ParsedScript {
           if (token === 'at' || token === 'with' || token === 'behind' || token === 'zorder') break
           attributes.push(token)
         }
+        applyStage(role, tag, attributes)
         return { kind: 'image', role, tag, attributes, line: line.no }
       }
       if ((m = PLAY_RE.exec(body)) !== null) {
@@ -200,8 +215,8 @@ export function parseRpy(files: RpyFile[]): ParsedScript {
         index += 1
         return { kind: 'audio', action: 'stop', channel: m[1] as 'music' | 'sound' | 'voice', file: null, loop: false, line: line.no }
       }
-      // 对白:字符串(可带说话人变量)。
-      const dialogue = parseDialogue(body, line.no)
+      // 对白:字符串(可带说话人变量)+ 当时画面的图像引用快照。
+      const dialogue = parseDialogue(body, line.no, [...stage.values()])
       if (dialogue !== null) { index += 1; return dialogue }
       // 未知行:如实报告,不罢工。
       degrade({ severity: 'warning', file: file.name, line: line.no, code: 'unrecognized-line', message: `无法按方言子集解析(本场景降级只读)`, snippet: body })
@@ -248,10 +263,12 @@ export function parseRpy(files: RpyFile[]): ParsedScript {
       }
       const labelMatch = /^label\s+([A-Za-z0-9_]+):\s*$/.exec(line.body)
       if (labelMatch !== null) {
-        const scene: SceneNode = { label: labelMatch[1]!, file: file.name, line: line.no, statements: [], readOnly: false, problems: [] }
+        const scene: SceneNode = { label: labelMatch[1]!, file: file.name, line: line.no, statements: [], text: '', readOnly: false, problems: [] }
         current = scene
+        stage = new Map()
         index += 1
         scene.statements = parseBlock(0)
+        fileScenes.push({ scene, start: line.no - 1 })
         scenes.push(scene)
         current = null
         continue
@@ -282,6 +299,13 @@ export function parseRpy(files: RpyFile[]): ParsedScript {
       problems.push({ severity: 'warning', file: file.name, line: line.no, code: 'unrecognized-top-level', message: '无法按方言子集解析的顶层行(跳过)', snippet: line.body })
       index += 1
     }
+
+    // 场景原始文本块:label 行起,到下一场景 label 前(EOF 截断)。
+    const ordered = [...fileScenes].sort((a, b) => a.start - b.start)
+    ordered.forEach((entry, position) => {
+      const end = position + 1 < ordered.length ? ordered[position + 1]!.start : rawLines.length
+      entry.scene.text = rawLines.slice(entry.start, end).join('\n')
+    })
   }
 
   const labelSet = new Map<string, SceneNode>()
@@ -333,12 +357,12 @@ function collectEdges(
   }
 }
 
-function parseDialogue(body: string, lineNo: number): Statement | null {
+function parseDialogue(body: string, lineNo: number, showing: string[]): Statement | null {
   const match = DIALOGUE_RE.exec(body)
   if (match === null) return null
   const speaker = match[1] ?? null
   const text = match[2]!
-  return { kind: 'dialogue', speaker, text, line: lineNo }
+  return { kind: 'dialogue', speaker, text, showing, line: lineNo }
 }
 
 /** 分支骨架派生(可缓存、全量重算)。 */

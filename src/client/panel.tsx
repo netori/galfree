@@ -49,6 +49,15 @@ export function WorkbenchPanel() {
   const [diff, setDiff] = useState<string | null>(null)
   const [progress, setProgress] = useState<ProgressView | null>(null)
   const [playing, setPlaying] = useState(false)
+  const [sdk, setSdk] = useState<{ requested: string; launcherReady: boolean; mismatch?: { pinned: string; actual: string }; provision: { state: string; progress: { fraction: number; message?: string }; error?: string } } | null>(null)
+
+  const loadSdk = useCallback(async () => {
+    try {
+      setSdk(await api.sdk())
+    } catch {
+      setSdk(null)
+    }
+  }, [])
 
   const selectFile = useCallback(async (path: string) => {
     setSelectedFile(path)
@@ -77,6 +86,7 @@ export function WorkbenchPanel() {
 
   useEffect(() => {
     void refresh()
+    void loadSdk()
     // 推送优先:SSE(网关观察到外部修改即推);轮询 8s 仅做兜底。
     let source: EventSource | undefined
     try {
@@ -90,7 +100,7 @@ export function WorkbenchPanel() {
       window.clearInterval(timer)
       source?.close()
     }
-  }, [refresh, state?.activeId])
+  }, [refresh, loadSdk, state?.activeId])
 
   const create = async (): Promise<void> => {
     setBusy(true)
@@ -140,18 +150,11 @@ export function WorkbenchPanel() {
 
       {state !== null && state.projects.length > 0 ? (
         <section aria-label="项目列表" style={{ marginBlock: 12 }}>
-          <div style={{ fontWeight: 600, marginBlockEnd: 4 }}>项目</div>
+          <div style={{ fontWeight: 600, marginBlockEnd: 4 }}>项目(切换 UI 后补;新建即激活)</div>
           <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
             {state.projects.map((p) => (
-              <li key={p.id}>
-                <button
-                  type="button"
-                  disabled={p.active}
-                  onClick={() => void api.activate(p.id).then(refresh)}
-                  style={{ background: 'none', border: 0, cursor: p.active ? 'default' : 'pointer', padding: '2px 0', fontWeight: p.active ? 700 : 400 }}
-                >
-                  {p.title}{p.missing ? '(缺失)' : ''}{p.active ? ' ✓' : ''}
-                </button>
+              <li key={p.id} style={{ padding: '2px 0', fontWeight: p.active ? 700 : 400 }}>
+                {p.title}{p.missing ? '(缺失)' : ''}{p.active ? ' ✓' : ''}
               </li>
             ))}
           </ul>
@@ -231,6 +234,33 @@ export function WorkbenchPanel() {
           ) : null}
         </section>
       ) : null}
+      {state !== null && state.gatewayErrors.length > 0 ? (
+        <section aria-label="网关故障" style={{ marginBlock: 12 }}>
+          <div style={{ fontWeight: 600, color: 'crimson', marginBlockEnd: 4 }}>网关故障(如实呈现)</div>
+          <ul style={{ margin: 0, paddingInlineStart: 18 }}>
+            {state.gatewayErrors.slice(-5).map((entry, i) => (
+              <li key={i} style={{ opacity: 0.85 }}>{entry.kind} @batch{entry.batchId}:{entry.message}</li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      <section aria-label="SDK" style={{ marginBlock: 12 }}>
+        <div style={{ fontWeight: 600, marginBlockEnd: 4 }}>钉版 SDK</div>
+        {sdk === null ? <div style={{ opacity: 0.6 }}>(读不到供给状态)</div> : sdk.launcherReady ? (
+          <div>
+            就绪({sdk.requested === 'override' ? '覆盖路径' : '钉版目录'})
+            {sdk.mismatch ? <span style={{ color: 'goldenrod', marginLeft: 8 }}>方言差异:实际 {sdk.mismatch.actual} ≠ 钉版 {sdk.mismatch.pinned}(警告,不阻塞)</span> : null}
+          </div>
+        ) : (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <span>未就绪:{sdk.provision.state}{sdk.provision.progress.message ? ` · ${sdk.provision.progress.message}` : ''}{sdk.provision.progress.fraction > 0 && sdk.provision.progress.fraction < 1 ? `(${Math.round(sdk.provision.progress.fraction * 100)}%)` : ''}</span>
+            <button type="button" disabled={sdk.provision.state === 'downloading' || sdk.provision.state === 'extracting'} onClick={() => {
+              void api.sdkEnsure().then(() => loadSdk()).catch((e) => setError(String(e)))
+            }}>{sdk.provision.state === 'failed' ? '重试下载' : '下载 SDK'}</button>
+          </div>
+        )}
+      </section>
     </div>
   )
 }

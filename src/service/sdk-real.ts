@@ -1,12 +1,13 @@
 /**
  * 真实现端口(Host 装配用):https 下载(带进度)+ extract-zip 解压。
  * 快测不加载这里(用假端口);慢集成带与生产运行时才走真网络。
+ * 启动器探测复用 hash.ts 的 findLauncher(单一实现)。
  */
 import { get } from 'node:https'
 import { createWriteStream } from 'node:fs'
-import { mkdtemp, readdir, rename, rm, stat } from 'node:fs/promises'
+import { mkdtemp, readdir, rename, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, basename } from 'node:path'
+import { join } from 'node:path'
 import { GalfreeError } from './error.ts'
 import type { Downloader, Extractor } from './sdk-provision.ts'
 
@@ -56,7 +57,6 @@ export const extractZip: Extractor = async (bytes, destDir) => {
     const entries = await readdir(unpack, { withFileTypes: true })
     const dirs = entries.filter((entry) => entry.isDirectory())
     if (entries.length === 1 && dirs.length === 1) {
-      // 单一顶层目录:提升到 destDir。
       await rename(join(unpack, dirs[0]!.name), destDir)
     } else {
       await rename(unpack, destDir)
@@ -74,31 +74,3 @@ async function writeFileBuffer(path: string, bytes: Uint8Array): Promise<void> {
     stream.end(Buffer.from(bytes))
   })
 }
-
-/** 平台启动器文件名。 */
-export function platformLauncherName(): string {
-  return process.platform === 'win32' ? 'renpy.exe' : 'renpy.sh'
-}
-
-/** 在 SDK 目录里找启动器(允许一层嵌套)。 */
-export async function findLauncher(sdkDir: string): Promise<string | null> {
-  const name = platformLauncherName()
-  const direct = join(sdkDir, name)
-  try {
-    const info = await stat(direct)
-    if (info.isFile()) return direct
-  } catch { /* not here */ }
-  try {
-    for (const entry of await readdir(sdkDir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue
-      const nested = join(sdkDir, entry.name, name)
-      try {
-        const info = await stat(nested)
-        if (info.isFile()) return nested
-      } catch { /* keep looking */ }
-    }
-  } catch { /* missing dir */ }
-  return null
-}
-
-export { basename }

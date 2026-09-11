@@ -10,7 +10,7 @@ import { access, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { createProjectService, type ProjectService } from '../service/project-service.ts'
-import { TemplateValidator } from '../service/validation/template-validator.ts'
+import { FakeValidator } from './validation/template-validator.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
 
 const exec = promisify(execFile)
@@ -146,7 +146,7 @@ describe('项目服务 · 模板新建项目(T1)', () => {
 
   it('模板脚本通过解析契约(假验证器判定干净)', async () => {
     const project = await service.createProject({ projectsRoot, name: 'story5', title: undefined })
-    const validator = new TemplateValidator()
+    const validator = new FakeValidator()
     const report = await validator.validate(join(project.root, 'game'))
     expect(report).toMatchObject({ ok: true, problems: [] })
   })

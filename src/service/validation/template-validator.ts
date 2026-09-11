@@ -27,6 +27,3 @@ export class FakeValidator {
     return { ok: errors.length === 0, problems, validator: 'fake', at: new Date().toISOString() }
   }
 }
-
-/** T1 兼容名(模板验证即假验证器的最初形态)。 */
-export const TemplateValidator = FakeValidator
