@@ -299,6 +299,8 @@ export function apply(ctx: Context, config?: Config): void {
         // 模型发现(T14 续):与出图共用同一个出网端口 —— 生产 fetch,快带假上游。
         discoverModels: (input) => discoverModels(imageHttp, input),
         sdk: {
+          // 新建项目要从这里拷界面模板(screens.rpy / gui.rpy)。
+          dir: () => sdkDir(),
           status: async () => {
             const override = current().sdkPath
             const dir = sdkDir()

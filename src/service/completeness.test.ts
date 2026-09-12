@@ -12,6 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 
 const SCRIPT = [
   'label start:',
@@ -30,13 +31,15 @@ const SCRIPT = [
 
 describe('整线组装试玩(T13)', () => {
   let dataDir: string
+  let sdkDir: string
   let projectsRoot: string
   let service: ProjectService
 
   beforeEach(async () => {
+    sdkDir = await makeFakeSdk()
     dataDir = await makeTempDir('galfree-t13-data-')
     projectsRoot = await makeTempDir('galfree-t13-projects-')
-    service = createProjectService({ dataDir })
+    service = createProjectService({ dataDir, uiTemplate: fakeUiTemplate(sdkDir) })
     await service.createProject({ projectsRoot, name: 'flow', title: '整线' })
     const snap = await service.readProjectFile('flow', 'game/script.rpy')
     await service.writeProjectFiles('flow', [{ path: 'game/script.rpy', content: SCRIPT, expectVersion: snap.version }], { origin: 'agent', reason: 'scenario' })
@@ -118,6 +121,7 @@ describe('整线组装试玩(T13)', () => {
     const calls: Array<{ root: string; from: string | null }> = []
     const withPorts = createProjectService({
       dataDir: `${dataDir}-ports`,
+      uiTemplate: fakeUiTemplate(sdkDir),
       // 假启动器端口:快带不碰真 SDK,但把"用什么参数启动"如实记下来。
       playtest: {
         resolveLauncher: async () => '/fake/renpy',
@@ -154,6 +158,7 @@ describe('整线组装试玩(T13)', () => {
   it('运行期错误 → traceback 摘要入状态、板可见、agent 可读', async () => {
     const withPorts = createProjectService({
       dataDir: `${dataDir}-crash`,
+      uiTemplate: fakeUiTemplate(sdkDir),
       playtest: {
         resolveLauncher: async () => '/fake/renpy',
         spawn: async () => ({

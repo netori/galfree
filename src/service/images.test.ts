@@ -17,6 +17,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 import { slotAssetPath } from './slot-naming.ts'
 import { createNodeHttpClient } from './images.ts'
 import type { GenerationTask, ImageChannelSettings } from './images.ts'
@@ -126,6 +127,7 @@ function channel(baseUrl: string, overrides: Partial<ImageChannelSettings> = {})
 
 describe('图像渠道 + 任务队列(T14)', () => {
   let dataDir: string
+  let sdkDir: string
   let projectsRoot: string
   let service: ProjectService
   let upstream: FakeUpstream
@@ -133,6 +135,7 @@ describe('图像渠道 + 任务队列(T14)', () => {
   let root: string
 
   beforeEach(async () => {
+    sdkDir = await makeFakeSdk()
     dataDir = await makeTempDir('galfree-t14-data-')
     projectsRoot = await makeTempDir('galfree-t14-projects-')
     upstream = new FakeUpstream()
@@ -140,6 +143,7 @@ describe('图像渠道 + 任务队列(T14)', () => {
 
     service = createProjectService({
       dataDir,
+      uiTemplate: fakeUiTemplate(sdkDir),
       images: {
         http: createNodeHttpClient(),
         channel: () => channel(baseUrl),
@@ -323,7 +327,7 @@ describe('图像渠道 + 任务队列(T14)', () => {
   // ── 渠道与设置的诚实边界 ───────────────────────────────────────────
 
   it('没配渠道 → 建任务如实拒绝(不假装能出图)', async () => {
-    const bare = createProjectService({ dataDir, images: { http: createNodeHttpClient(), channel: () => null } })
+    const bare = createProjectService({ dataDir, uiTemplate: fakeUiTemplate(sdkDir), images: { http: createNodeHttpClient(), channel: () => null } })
     try {
       await bare.createProject({ projectsRoot, name: 'nochannel', title: '没渠道' })
       await expect(bare.createGenerationTask('nochannel', { slot: 'bg school', model: 'gpt-image-1', prompt: '教室' }))

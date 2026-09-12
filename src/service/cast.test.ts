@@ -14,6 +14,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 
 /** 两个场景:一个引用已有素材的槽,一个引用缺素材的槽;有对白与角色。 */
 const SCRIPT = [
@@ -34,14 +35,16 @@ const SCRIPT = [
 ].join('\n')
 
 describe('角色登记簿 + 素材槽账本(T8)', () => {
+  let sdkDir: string
   let dataDir: string
   let projectsRoot: string
   let service: ProjectService
 
   beforeEach(async () => {
+    sdkDir = await makeFakeSdk()
     dataDir = await makeTempDir('galfree-t8-data-')
     projectsRoot = await makeTempDir('galfree-t8-projects-')
-    service = createProjectService({ dataDir })
+    service = createProjectService({ dataDir, uiTemplate: fakeUiTemplate(sdkDir) })
     await service.createProject({ projectsRoot, name: 'cast', title: '选角' })
     const project = await service.getActiveProject()
     const snap = await service.readProjectFile('cast', 'game/script.rpy')

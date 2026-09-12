@@ -8,6 +8,7 @@ import { createProjectService, type ProjectService } from '../project-service.ts
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { cleanupTempDirs, makeTempDir } from '../../testing/tmp.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../../testing/sdk-fixture.ts'
 
 const TEMPLATE_SCRIPT = `label start:
     "从这里开始你的故事。"
@@ -153,13 +154,15 @@ describe('方言子集解析器(T4)', () => {
 
 describe('校验回路契约 · 假验证器 + 分支图进入接缝状态(T4)', () => {
   let dataDir: string
+  let sdkDir: string
   let projectsRoot: string
   let service: ProjectService
 
   beforeEach(async () => {
+    sdkDir = await makeFakeSdk()
     dataDir = await makeTempDir('galfree-t4-data-')
     projectsRoot = await makeTempDir('galfree-t4-projects-')
-    service = createProjectService({ dataDir })
+    service = createProjectService({ dataDir, uiTemplate: fakeUiTemplate(sdkDir) })
   })
   afterEach(async () => {
     await service.dispose()

@@ -8,19 +8,22 @@ import { join } from 'node:path'
 import { createCompositeValidator } from './composite-validator.ts'
 import { createProjectService, type ProjectInfo, type ProjectService } from '../project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../../testing/tmp.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../../testing/sdk-fixture.ts'
 
 describe('合成验证器(T5 接线)', () => {
   let base: string
+  let sdkDir: string
   let service: ProjectService
   let project: ProjectInfo
 
   beforeEach(async () => {
     base = await makeTempDir('galfree-composite-')
+    sdkDir = await makeFakeSdk()
     const validator = createCompositeValidator({
       pinnedSdkDir: join(base, 'no-sdk-here'),
       overrideSdkPath: () => '',
     })
-    service = createProjectService({ dataDir: join(base, 'data'), validator })
+    service = createProjectService({ dataDir: join(base, 'data'), validator, uiTemplate: fakeUiTemplate(sdkDir) })
     project = await service.createProject({ projectsRoot: join(base, 'projects'), name: 'comp', title: undefined })
   })
   afterEach(async () => {
@@ -42,6 +45,7 @@ describe('合成验证器(T5 接线)', () => {
     await writeFile(join(override, 'renpy-9.9.9-sdk', 'renpy.exe'), '@echo off')
     const service2 = createProjectService({
       dataDir: join(base, 'data'),
+      uiTemplate: fakeUiTemplate(sdkDir),
       validator: createCompositeValidator({ pinnedSdkDir: override, overrideSdkPath: () => override }),
     })
     try {

@@ -18,6 +18,7 @@ import { readdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 
 const START_SCENE = [
   'label scene_one:',
@@ -29,14 +30,16 @@ const START_SCENE = [
 ].join('\n')
 
 describe('逐场剧本生成(T10)', () => {
+  let sdkDir: string
   let dataDir: string
   let projectsRoot: string
   let service: ProjectService
 
   beforeEach(async () => {
+    sdkDir = await makeFakeSdk()
     dataDir = await makeTempDir('galfree-t10-data-')
     projectsRoot = await makeTempDir('galfree-t10-projects-')
-    service = createProjectService({ dataDir })
+    service = createProjectService({ dataDir, uiTemplate: fakeUiTemplate(sdkDir) })
     await service.createProject({ projectsRoot, name: 'gen', title: '生成' })
   })
 

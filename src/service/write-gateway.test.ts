@@ -7,17 +7,20 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createProjectService, type ProjectService } from '../service/project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 
 describe('写网关(T2)', () => {
+  let sdkDir: string
   let dataDir: string
   let projectsRoot: string
   let service: ProjectService
   let root: string
 
   beforeEach(async () => {
+    sdkDir = await makeFakeSdk()
     dataDir = await makeTempDir('galfree-data-')
     projectsRoot = await makeTempDir('galfree-projects-')
-    service = createProjectService({ dataDir })
+    service = createProjectService({ dataDir, uiTemplate: fakeUiTemplate(sdkDir) })
     const project = await service.createProject({ projectsRoot, name: 'gw', title: undefined })
     root = project.root
   })
@@ -158,7 +161,7 @@ describe('写网关(T2)', () => {
 
   it('网关懒建竞态:新实例上两个并发写批仍恰有一个成功(每项目单网关单队列)', async () => {
     const v0 = (await service.readProjectFile('gw', 'game/script.rpy')).version
-    const reopened = createProjectService({ dataDir })
+    const reopened = createProjectService({ dataDir, uiTemplate: fakeUiTemplate(sdkDir) })
     try {
       const results = await Promise.allSettled([
         reopened.writeProjectFiles('gw', [{ path: 'game/script.rpy', content: 'R1\n', expectVersion: v0 }], { reason: 'edit', origin: 'agent' }),

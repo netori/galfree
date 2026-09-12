@@ -16,6 +16,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 
 const SCRIPT = [
   'define xiao_tang = Character("小棠")',
@@ -37,14 +38,16 @@ const HUMAN_OUTLINE = `第一章 天台的雨
 （备注给自己:第三章先别写,等我想清楚结局。）`
 
 describe('设定集工作周期(T9)', () => {
+  let sdkDir: string
   let dataDir: string
   let projectsRoot: string
   let service: ProjectService
 
   beforeEach(async () => {
+    sdkDir = await makeFakeSdk()
     dataDir = await makeTempDir('galfree-t9-data-')
     projectsRoot = await makeTempDir('galfree-t9-projects-')
-    service = createProjectService({ dataDir })
+    service = createProjectService({ dataDir, uiTemplate: fakeUiTemplate(sdkDir) })
     await service.createProject({ projectsRoot, name: 'bible', title: '设定集' })
     const snap = await service.readProjectFile('bible', 'game/script.rpy')
     await service.writeProjectFiles('bible', [{ path: 'game/script.rpy', content: SCRIPT, expectVersion: snap.version }], { origin: 'agent', reason: 'scenario' })

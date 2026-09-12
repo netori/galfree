@@ -34,6 +34,8 @@ export interface RouteDeps {
   }
   /** SDK 供给(T5;未装配时路由如实报告不可用)。 */
   sdk?: {
+    /** 当前 SDK 目录(新建项目要从它拷界面模板)。 */
+    dir?: () => string
     status: () => Promise<{
       requested: 'override' | 'pinned'
       dir: string
@@ -248,6 +250,8 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
       projectsRoot,
       name: String(body.name ?? ''),
       title: typeof body.title === 'string' && body.title !== '' ? body.title : undefined,
+      // 界面文件从钉版 SDK 的 GUI 模板拷(少了 screens.rpy,项目连关窗确认都崩)。
+      ...(deps.sdk?.dir === undefined ? {} : { sdkDir: deps.sdk.dir() }),
     })
     writeJson(res, 201, { project })
     return

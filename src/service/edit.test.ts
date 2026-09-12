@@ -17,6 +17,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 
 const exec = promisify(execFile)
 
@@ -46,15 +47,17 @@ async function git(repo: string, args: string[]): Promise<string> {
 }
 
 describe('对话流结构化编辑器(T11)', () => {
+  let sdkDir: string
   let dataDir: string
   let projectsRoot: string
   let service: ProjectService
   let root: string
 
   beforeEach(async () => {
+    sdkDir = await makeFakeSdk()
     dataDir = await makeTempDir('galfree-t11-data-')
     projectsRoot = await makeTempDir('galfree-t11-projects-')
-    service = createProjectService({ dataDir })
+    service = createProjectService({ dataDir, uiTemplate: fakeUiTemplate(sdkDir) })
     await service.createProject({ projectsRoot, name: 'edit', title: '编辑器' })
     const project = await service.getActiveProject()
     root = project!.root

@@ -8,6 +8,7 @@ import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 
 const SCENE_WITH_IMAGE = `label start:
     show xiao_tang angry
@@ -16,14 +17,16 @@ const SCENE_WITH_IMAGE = `label start:
 `
 
 describe('推导进度 + 审读戳(T6)', () => {
+  let sdkDir: string
   let dataDir: string
   let projectsRoot: string
   let service: ProjectService
 
   beforeEach(async () => {
+    sdkDir = await makeFakeSdk()
     dataDir = await makeTempDir('galfree-t6-data-')
     projectsRoot = await makeTempDir('galfree-t6-projects-')
-    service = createProjectService({ dataDir })
+    service = createProjectService({ dataDir, uiTemplate: fakeUiTemplate(sdkDir) })
     await service.createProject({ projectsRoot, name: 'prog', title: undefined })
   })
 

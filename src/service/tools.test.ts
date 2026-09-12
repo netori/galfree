@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import { registerGalfreeTools } from './tools.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 import type { Context } from '@deepseek-ai/cordis'
 
 interface FakeTool {
@@ -40,14 +41,16 @@ function fakeTools(): { tools: FakeTool[]; register: (tool: unknown) => () => vo
 const SCENE = 'label scene_one:\n    "开场。"\n    jump prologue\n'
 
 describe('agent 工具(T10)', () => {
+  let sdkDir: string
   let dataDir: string
   let projectsRoot: string
   let service: ProjectService
 
   beforeEach(async () => {
+    sdkDir = await makeFakeSdk()
     dataDir = await makeTempDir('galfree-t10tools-data-')
     projectsRoot = await makeTempDir('galfree-t10tools-projects-')
-    service = createProjectService({ dataDir })
+    service = createProjectService({ dataDir, uiTemplate: fakeUiTemplate(sdkDir) })
     await service.createProject({ projectsRoot, name: 'tools', title: '工具' })
   })
 

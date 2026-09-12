@@ -8,19 +8,23 @@ import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 import type { SpawnResult } from './playtest.ts'
 import { realSpawn } from './playtest.ts'
 
 describe('试玩控制(T7,假 spawn)', () => {
   let dataDir: string
+  let sdkDir: string
   let projectsRoot: string
   let service: ProjectService
 
   beforeEach(async () => {
+    sdkDir = await makeFakeSdk()
     dataDir = await makeTempDir('galfree-t7-data-')
     projectsRoot = await makeTempDir('galfree-t7-projects-')
     service = createProjectService({
       dataDir,
+      uiTemplate: fakeUiTemplate(sdkDir),
       playtest: {
         resolveLauncher: async () => '/fake/renpy.exe',
         spawn: async () => ({ code: 0, log: "Ren'Py 8.5.3 starting\n" }),
@@ -56,6 +60,7 @@ describe('试玩控制(T7,假 spawn)', () => {
   it('注入坏脚本(子集内语义错,运行期 traceback)→ 摘要回传状态对象', async () => {
     service = createProjectService({
       dataDir: dataDir + '-2',
+      uiTemplate: fakeUiTemplate(sdkDir),
       playtest: {
         resolveLauncher: async () => '/fake/renpy.exe',
         spawn: async () => ({
@@ -80,7 +85,11 @@ describe('试玩控制(T7,假 spawn)', () => {
   })
 
   it('SDK 未就绪 → 试玩如实失败并报告原因(不静默)', async () => {
-    service = createProjectService({ dataDir: dataDir + '-3', playtest: { resolveLauncher: async () => null, spawn: async () => ({ code: 0, log: '' }) } })
+    service = createProjectService({
+      dataDir: dataDir + '-3',
+      uiTemplate: fakeUiTemplate(sdkDir),
+      playtest: { resolveLauncher: async () => null, spawn: async () => ({ code: 0, log: '' }) },
+    })
     await service.createProject({ projectsRoot, name: 'nosdk', title: undefined })
     await expect(service.playtestStart('nosdk')).rejects.toMatchObject({ code: 'sdk-not-ready' })
     const progress = await service.progress('nosdk')

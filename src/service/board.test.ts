@@ -17,6 +17,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 import { slotAssetPath } from './slot-naming.ts'
 import { createNodeHttpClient } from './images.ts'
 
@@ -75,12 +76,14 @@ class FakeUpstream {
 
 describe('出图操作与素材板动作面(T15)', () => {
   let dataDir: string
+  let sdkDir: string
   let projectsRoot: string
   let service: ProjectService
   let upstream: FakeUpstream
   let root: string
 
   beforeEach(async () => {
+    sdkDir = await makeFakeSdk()
     dataDir = await makeTempDir('galfree-t15-data-')
     projectsRoot = await makeTempDir('galfree-t15-projects-')
     upstream = new FakeUpstream()
@@ -88,6 +91,7 @@ describe('出图操作与素材板动作面(T15)', () => {
 
     service = createProjectService({
       dataDir,
+      uiTemplate: fakeUiTemplate(sdkDir),
       images: {
         http: createNodeHttpClient(),
         channel: () => ({
@@ -244,7 +248,7 @@ describe('出图操作与素材板动作面(T15)', () => {
   // ── 动作面的诚实边界 ───────────────────────────────────────────────
 
   it('没配渠道时,"补全全部"如实失败(不产假任务、不假装已排队)', async () => {
-    const bare = createProjectService({ dataDir, images: { http: createNodeHttpClient(), channel: () => null } })
+    const bare = createProjectService({ dataDir, uiTemplate: fakeUiTemplate(sdkDir), images: { http: createNodeHttpClient(), channel: () => null } })
     try {
       await bare.createProject({ projectsRoot, name: 'bare', title: '没渠道' })
       await expect(bare.createTasksForMissingSlots('bare', { model: 'gpt-image-1' }))

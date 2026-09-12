@@ -575,6 +575,40 @@ agent 的 `galfree_reroll_image {prompt}` 走的是同一个入口("把小棠的
 **面板的进度是推出来的**:有任务处于 `queued|running` 时按 2.5s 轮询 `/tasks` 并重取推导,
 不在面板里攒状态。失败原因、降级说明都按接缝原话显示,不美化。
 
+## 模板的界面层(T7 之后补齐的一块,实测换来的)
+
+**新建项目必须整份带上 SDK 的 GUI 模板**(`screens.rpy` / `gui.rpy` / `guisupport.rpy` / `testcases.rpy`),
+外加一份**项目内**的中文字体。这不是"锦上添花",是"能不能跑"的问题 —— 下面三条都是实测:
+
+1. **没有 `screens.rpy` → 点窗口关闭按钮直接崩。** Ren'Py 的 `yesno_prompt`(关窗确认)
+   只在 `renpy.has_screen("yesno_prompt")` 成立时才挂到 `layout` 上;没有该 screen 时会抛
+   `AttributeError: 'Layout' object has no attribute 'yesno_prompt'`。
+   后果:**试玩永远以失败收场** —— 游戏跑得再好,一退出就崩。
+2. **中文字体必须是"项目内的相对路径"。** SDK 的 `gui.rpy` 把界面字体钉在 `DejaVuSans.ttf`
+   (不含中文字形 → 中文全是方块)。补丁改用 SDK 自带的 `sdk-fonts/SourceHanSansLite.ttf`
+   (思源黑体,2.77MB,开源可携带)并**拷进项目**。试过直接写绝对路径
+   `C:/Windows/Fonts/msyh.ttc`:Ren'Py **静默回退**成默认字体(不报错),中文照样是方块。
+3. **`gui.language` 没有 `"chinese"` 这个值。** 写错会在渲染时抛
+   `Exception: Unknown language: chinese`,把整个对话屏打崩。合法值是
+   `unicode` / `eastasian` / `western` / `japanese-*` / `korean-with-spaces` / `anywhere`;
+   中文用 `eastasian`。
+
+界面文件取不到时**如实拒绝建项目**(`sdk-ui-missing`),而且**先取齐模板内容再建目录** ——
+拒绝得干干净净,不留"建了一半"的空壳。字体拿不到**不阻断**(补丁会在注释里说明中文会显示成方块):
+项目本身是好的,没必要为少一个字体不让建。
+
+另外两件**记录在案的事实**(不在本票范围,但别再对着现象猜):
+
+- **解析范围划界**:方言子集只解析**叙述文件** —— `game/script.rpy` 与 `game/scenes/**`
+  (`isNarrativeFile`)。`screens.rpy` / `gui.rpy` / `options.rpy` 是 Ren'Py 自己的界面与配置,
+  不按子集解析。实测量过:把它们算进来会一次产出 **265 条 warning**(239 条来自 `gui.rpy`
+  的 `init` 块),把板上真正有用的判断整个淹掉。
+- **图片名不会自动定义**:现代 Ren'Py 关了 `config.automatic_images`(见 SDK 的 `00obsolete.rpy`),
+  `game/images/bg-rooftop.png` **不会**自动成为图片名 `bg rooftop`。素材槽出图落在约定路径上,
+  但剧本要用它得显式写一行 `image bg rooftop = "images/bg-rooftop.png"`。
+  缺这一行时画面是**灰底 + 图片名**(Ren'Py 的"找不到图"提示,不是图坏了)。
+  "出图"到"图上屏"之间这一环留给素材环节的后续票。
+
 ## 测试纪律(spec Testing Decisions 落地)
 
 - 只在 `ProjectService` 公共接口上断言外部可观察行为:磁盘终态、推导对象、

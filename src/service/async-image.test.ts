@@ -14,6 +14,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 import { slotAssetPath } from './slot-naming.ts'
 import { createNodeHttpClient, imageFormatOf } from './images.ts'
 
@@ -134,12 +135,14 @@ function asyncModel() {
 
 describe('异步任务制适配器(T14 续)', () => {
   let dataDir: string
+  let sdkDir: string
   let projectsRoot: string
   let service: ProjectService
   let upstream: FakeAsyncUpstream
   let root: string
 
   beforeEach(async () => {
+    sdkDir = await makeFakeSdk()
     dataDir = await makeTempDir('galfree-async-data-')
     projectsRoot = await makeTempDir('galfree-async-projects-')
     upstream = new FakeAsyncUpstream()
@@ -147,6 +150,7 @@ describe('异步任务制适配器(T14 续)', () => {
 
     service = createProjectService({
       dataDir,
+      uiTemplate: fakeUiTemplate(sdkDir),
       images: { http: createNodeHttpClient(), channel: () => ({ baseUrl, apiKey: 'sk-async', models: [asyncModel()] }) },
     })
     const project = await service.createProject({ projectsRoot, name: 'async', title: '异步' })
@@ -223,6 +227,7 @@ describe('异步任务制适配器(T14 续)', () => {
     // 不是图片 —— 适配器必须如实说不匹配,并指出该换成哪个协议。
     const misconfigured = createProjectService({
       dataDir,
+      uiTemplate: fakeUiTemplate(sdkDir),
       images: {
         http: createNodeHttpClient(),
         channel: () => ({
@@ -248,6 +253,7 @@ describe('异步任务制适配器(T14 续)', () => {
     // 假上游只认单数路径 → 复数路径 404(这正是用户实际遇到的那个 404)。
     const misconfigured = createProjectService({
       dataDir,
+      uiTemplate: fakeUiTemplate(sdkDir),
       images: {
         http: createNodeHttpClient(),
         channel: () => ({

@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { createProjectService, type ProjectService } from '../service/project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 
 const exec = promisify(execFile)
 async function git(repo: string, args: string[]): Promise<string> {
@@ -17,15 +18,17 @@ async function git(repo: string, args: string[]): Promise<string> {
 }
 
 describe('快照(T3)', () => {
+  let sdkDir: string
   let dataDir: string
   let projectsRoot: string
   let service: ProjectService
   let root: string
 
   beforeEach(async () => {
+    sdkDir = await makeFakeSdk()
     dataDir = await makeTempDir('galfree-data-')
     projectsRoot = await makeTempDir('galfree-projects-')
-    service = createProjectService({ dataDir })
+    service = createProjectService({ dataDir, uiTemplate: fakeUiTemplate(sdkDir) })
     const project = await service.createProject({ projectsRoot, name: 'snap', title: undefined })
     root = project.root
   })

@@ -14,7 +14,7 @@ import { GalfreeError } from './error.ts'
 import { runGit } from './git.ts'
 import { ProjectRegistry, type RegistryEntry } from './registry.ts'
 import { commitSnapshot, fileDiff, fileHistory, rollbackFile, type SnapshotEntry } from './snapshot.ts'
-import { PROJECT_NAME_RE, renderTemplateFiles, templateKeepFiles } from './template.ts'
+import { PROJECT_NAME_RE, TEMPLATE_CJK_FONT, TEMPLATE_UI_FILES, renderTemplateFiles, renderUiPatch, templateKeepFiles } from './template.ts'
 import { FakeValidator } from './validation/template-validator.ts'
 import { deriveGraph, parseRpy } from './rpy/parse.ts'
 import { readRpyFiles } from './rpy/files.ts'
@@ -70,6 +70,11 @@ export interface CreateProjectInput {
   name: string
   /** 显示标题;缺省等于 name。 */
   title?: string
+  /**
+   * 钉版 SDK 目录:里面的 GUI 模板(`gui/game/*.rpy`)会被整份拷进新项目。
+   * 缺省 = 用服务装配时注入的界面文件来源(见 `ProjectServiceOptions.uiTemplate`)。
+   */
+  sdkDir?: string
 }
 
 /** 逐场生成的输入(T10)。 */
@@ -150,6 +155,14 @@ export interface ProjectServiceOptions {
    * 与读设置文档的 `channel()`。
    */
   images?: ImagePorts
+  /**
+   * 界面模板来源(新建项目时从哪儿取 `screens.rpy` / `gui.rpy` 等)。
+   *
+   * 生产 = 钉版 SDK 的 `gui/game/`(随设置实时解析);快带 = 假 SDK 夹具。
+   * 缺省实现按 `CreateProjectInput.sdkDir` 现取 —— 两个入口最终都落到
+   * "读 SDK 的 GUI 模板",没有第二套界面来源。
+   */
+  uiTemplate?: (sdkDir: string | undefined) => Promise<{ files: Array<{ path: string; content: string }>; fontFiles: Array<{ path: string; content: Uint8Array }> }>
 }
 
 /** 图像子系统的注入端口(T14)。 */
@@ -165,6 +178,7 @@ export class ProjectService {
   #validator: ValidatorPort
   #playtestPorts: PlaytestPorts
   #imagePorts: ImagePorts | null
+  #uiTemplate: (sdkDir: string | undefined) => Promise<{ files: Array<{ path: string; content: string }>; fontFiles: Array<{ path: string; content: Uint8Array }> }>
   #gateways = new Map<string, Promise<WriteGateway>>()
   /** 图像任务账本的写串行(与网关的串行合起来构成"读-改-写"原子性)。 */
   #taskQueue: Promise<unknown> = Promise.resolve()
@@ -174,6 +188,7 @@ export class ProjectService {
     this.#validator = options.validator ?? (async (project) => new FakeValidator().validate(join(project.root, 'game')))
     this.#playtestPorts = options.playtest ?? { resolveLauncher: async () => null, spawn: async () => ({ code: 0, log: '' }) }
     this.#imagePorts = options.images ?? null
+    this.#uiTemplate = options.uiTemplate ?? ((sdkDir) => this.#uiFilesFrom(sdkDir))
   }
 
   // ─── 注册表与模板新建(T1)────────────────────────────────────────────
@@ -197,10 +212,24 @@ export class ProjectService {
 
     const id = randomUUID()
     const createdAt = new Date().toISOString()
-    await mkdir(root, { recursive: true })
 
+    // 先把模板内容取齐**再建目录**:界面文件缺失要拒绝得干干净净
+    // (否则磁盘上会留一个空壳目录,人以为"建了一半")。
     // 模板内容一律经网关落盘(网关是唯一写通道)。
-    const files = [...renderTemplateFiles({ name: input.name, title, id }), ...templateKeepFiles()]
+    const ui = await this.#uiTemplate(input.sdkDir)
+    const files = [
+      ...renderTemplateFiles({ name: input.name, title, id }),
+      ...templateKeepFiles(),
+      // 中文字体:拷进项目(相对路径引用才有效;绝对路径会被静默回退)。
+      ...ui.fontFiles,
+      // 中文字体/界面变量补丁。
+      renderUiPatch(ui.fontFiles.length > 0),
+      // 界面文件从**钉版 SDK 的 GUI 模板**整份拷(见 template.ts 的说明:少了 screens.rpy,
+      // 连关窗确认都会崩)。取不到 → 如实抛 sdk-ui-missing,不静默拼凑。
+      ...ui.files,
+    ]
+
+    await mkdir(root, { recursive: true })
     const gateway = this.#newGateway(root)
     await gateway.writeBatch(
       files.map((file): WriteOp => ({ path: file.path, content: file.content, expectVersion: ABSENT })),
@@ -1325,6 +1354,44 @@ export class ProjectService {
   }
 
   /** 模板 git 化:init + 初始提交(作者 GALFree,ADR-0011)。 */
+  /**
+   * 从钉版 SDK 的 GUI 模板取界面文件(整份)。
+   *
+   * 取不到就**如实抛**:一个没有 `screens.rpy` 的项目是跑不起来的(关窗即崩),
+   * 与其造一个"看着像项目、一玩就崩"的东西,不如当场说清缺什么、去哪儿补。
+   */
+  async #uiFilesFrom(sdkDir: string | undefined): Promise<{ files: Array<{ path: string; content: string }>; fontFiles: Array<{ path: string; content: Uint8Array }> }> {
+    if (sdkDir === undefined || sdkDir === '') {
+      throw new GalfreeError(
+        'sdk-ui-missing',
+        '新建项目需要钉版 SDK 的界面模板(screens.rpy / gui.rpy):没有它们,项目连关窗确认都会崩。请先完成 SDK 供给,或在设置里指定既有 SDK 路径。',
+      )
+    }
+    const dir = join(sdkDir, 'gui', 'game')
+    const files: Array<{ path: string; content: string }> = []
+    for (const name of TEMPLATE_UI_FILES) {
+      try {
+        files.push({ path: `game/${name}`, content: await readFile(join(dir, name), 'utf8') })
+      } catch (error) {
+        throw new GalfreeError(
+          'sdk-ui-missing',
+          `SDK 的界面模板里缺 ${name}:${join(dir, name)} 读不到(${String(error)})。请检查 SDK 是否完整(设置 → GALFree → SDK 路径)。`,
+        )
+      }
+    }
+    // 中文字体:SDK 自带思源黑体,拷进项目(**相对路径才有效**;绝对路径会被静默回退)。
+    // 拿不到不阻断建项目 —— 界面补丁会在注释里说明"中文会显示成方块",
+    // 这比"因为少一个字体就不让人建项目"合理:项目本身是好的。
+    const fontFiles: Array<{ path: string; content: Uint8Array }> = []
+    try {
+      fontFiles.push({
+        path: `game/${TEMPLATE_CJK_FONT.target}`,
+        content: await readFile(join(sdkDir, 'sdk-fonts', TEMPLATE_CJK_FONT.source)),
+      })
+    } catch { /* 见上:不阻断 */ }
+    return { files, fontFiles }
+  }
+
   async #initGit(root: string, name: string): Promise<void> {
     await runGit(root, ['init', '--initial-branch', 'main'])
     await runGit(root, ['add', '--all'])

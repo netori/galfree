@@ -6,12 +6,13 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { execFile } from 'node:child_process'
-import { access, readFile, stat } from 'node:fs/promises'
+import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { createProjectService, type ProjectService } from '../service/project-service.ts'
 import { FakeValidator } from './validation/template-validator.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 
 const exec = promisify(execFile)
 
@@ -31,19 +32,95 @@ async function exists(path: string): Promise<boolean> {
 }
 
 describe('项目服务 · 模板新建项目(T1)', () => {
+  let sdkDir: string
   let dataDir: string
   let projectsRoot: string
   let service: ProjectService
 
   beforeEach(async () => {
+    sdkDir = await makeFakeSdk()
     dataDir = await makeTempDir('galfree-data-')
     projectsRoot = await makeTempDir('galfree-projects-')
-    service = createProjectService({ dataDir })
+    service = createProjectService({ dataDir, uiTemplate: fakeUiTemplate(sdkDir) })
   })
 
   afterEach(async () => {
     await service.dispose()
     await cleanupTempDirs()
+  })
+
+  // ─── 界面文件(实测缺口:少了 screens.rpy,连关窗确认都崩)─────────────
+
+  it('建项目带上 SDK 的界面文件(少了 screens.rpy,关窗即 AttributeError 崩)', async () => {
+    const project = await service.createProject({ projectsRoot, name: 'ui-story', title: '界面' })
+
+    // 四个界面文件都从 SDK 拷进来了,内容逐字一致(不是自己仿造的)。
+    for (const name of ['screens.rpy', 'gui.rpy', 'guisupport.rpy', 'testcases.rpy']) {
+      const onDisk = await readFile(join(project.root, 'game', name), 'utf8')
+      const fromSdk = await readFile(join(sdkDir, 'gui', 'game', name), 'utf8')
+      expect(onDisk).toBe(fromSdk)
+    }
+    // 中文字体**拷进了项目**,补丁指到项目内的相对路径。
+    // (实测教训:写成 C:/Windows/Fonts/msyh.ttc 这种绝对路径会被 Ren'Py 静默回退,
+    //  中文照样是方块 —— 所以必须是项目内路径,而且文件真在。)
+    const fontOnDisk = await readFile(join(project.root, 'game', 'fonts', 'SourceHanSansLite.ttf'))
+    const fontFromSdk = await readFile(join(sdkDir, 'sdk-fonts', 'SourceHanSansLite.ttf'))
+    expect(fontOnDisk.equals(fontFromSdk)).toBe(true)
+
+    const patch = await readFile(join(project.root, 'game', 'zz_galfree_ui.rpy'), 'utf8')
+    expect(patch).toContain('gui.text_font = "fonts/SourceHanSansLite.ttf"')
+    expect(patch).toContain('gui.interface_text_font')
+    // options.rpy 补上了 screens.rpy 依赖的变量。
+    const options = await readFile(join(project.root, 'game', 'options.rpy'), 'utf8')
+    expect(options).toContain('gui.show_name')
+    expect(options).toContain('gui.about')
+  })
+
+  it('界面文件进快照(它们也是项目的一部分,回滚要能回去)', async () => {
+    const project = await service.createProject({ projectsRoot, name: 'ui-snap', title: '界面' })
+    const history = await service.snapshotHistory(project.id, 'game/screens.rpy')
+    expect(history.length).toBeGreaterThan(0)
+  })
+
+  it('SDK 界面模板缺失 → 如实拒绝建项目(不造一个一玩就崩的空壳)', async () => {
+    // 假 SDK 里少一个 screens.rpy。
+    const brokenSdk = await makeTempDir('galfree-broken-sdk-')
+    await mkdir(join(brokenSdk, 'gui', 'game'), { recursive: true })
+    await writeFile(join(brokenSdk, 'gui', 'game', 'gui.rpy'), 'define gui.x = 1\n', 'utf8')
+
+    await expect(service.createProject({ projectsRoot, name: 'broken', title: undefined, sdkDir: brokenSdk }))
+      .rejects.toMatchObject({ code: 'sdk-ui-missing' })
+    // 拒绝得干干净净:没有留下半个项目目录。
+    expect(await exists(join(projectsRoot, 'broken'))).toBe(false)
+  })
+
+  it('解析范围只认叙述文件:界面/配置不按方言子集解析(否则一次 265 条 warning)', async () => {
+    const project = await service.createProject({ projectsRoot, name: 'scope', title: '范围' })
+    // 往 game/ 塞一个满是子集外构造的界面文件(模拟真 screens.rpy / gui.rpy)。
+    const v = (await service.readProjectFile(project.id, 'game/options.rpy')).version
+    await service.writeProjectFiles(project.id, [{
+      path: 'game/screens_like.rpy',
+      content: 'init python:\n    x = 1\n\nscreen foo():\n    pass\n\nstyle bar:\n    size 12\n',
+      expectVersion: 'absent',
+    }], { reason: 'edit', origin: 'workbench' })
+    void v
+
+    const progress = await service.progress(project.id)
+    // 界面文件不参与解析:narrative 的两场戏照常,问题里没有它的份。
+    expect(progress.scenes.map((scene) => scene.label).sort()).toEqual(['prologue', 'start'])
+    expect(progress.problems.filter((problem) => problem.file.includes('screens_like'))).toEqual([])
+    expect(progress.lint.warnings).toBe(0)
+  })
+
+  it('生成到 game/scenes/ 的场次仍在解析范围内(划界没划过头)', async () => {
+    const project = await service.createProject({ projectsRoot, name: 'scope2', title: '范围' })
+    await service.writeProjectFiles(project.id, [{
+      path: 'game/scenes/extra.rpy',
+      content: 'label extra:\n    "一句话。"\n    return\n',
+      expectVersion: 'absent',
+    }], { reason: 'scenario', origin: 'agent' })
+    const progress = await service.progress(project.id)
+    expect(progress.scenes.map((scene) => scene.label)).toContain('extra')
   })
 
   it('新建项目 → 注册表出现该条目,路径指向磁盘上的新目录,并激活', async () => {
@@ -181,7 +258,7 @@ describe('项目服务 · 模板新建项目(T1)', () => {
     const other = await service.createProject({ projectsRoot, name: 'other', title: undefined })
     await service.setActive(created.id)
 
-    const reopened = createProjectService({ dataDir })
+    const reopened = createProjectService({ dataDir, uiTemplate: fakeUiTemplate(sdkDir) })
     const listed = await reopened.listProjects()
     expect(listed.map((p) => p.id).sort()).toEqual([created.id, other.id].sort())
     const active = await reopened.getActiveProject()
