@@ -144,11 +144,18 @@ class SectionBoundary extends Component<{ children: ReactNode }, { error: string
 export function ChannelSettingsCard({ ctx }: { ctx: SettingsCardContext }) {
   // 依赖缺失时**不许白屏**:说清缺什么。设置分区是用户看得见的地方,
   // 一片空白会让人以为"功能没做",而真相是"装配缺了一个服务"。
-  if (ctx?.settingsScope === undefined || ctx?.remote?.settings === undefined) {
-    const missing = [
-      ctx?.settingsScope === undefined ? 'settingsScope' : null,
-      ctx?.remote?.settings === undefined ? 'remote.settings' : null,
-    ].filter((entry): entry is string => entry !== null)
+  //
+  // 注意:这里必须用 try 包住 —— 宿主对**未声明**的子服务(如 `remote.settings`)
+  // 属性访问本身就是抛错(`cannot get property "remote.settings" without inject`),
+  // 直接读它做判断会把"缺依赖"变成"崩溃"。
+  const missing: string[] = []
+  try {
+    if ((ctx as { settingsScope?: unknown })?.settingsScope === undefined) missing.push('settingsScope')
+    if ((ctx as { remote?: { settings?: unknown } })?.remote?.settings === undefined) missing.push('remote.settings')
+  } catch (error) {
+    missing.push(`访问服务时出错(${error instanceof Error ? error.message : String(error)})`)
+  }
+  if (missing.length > 0) {
     return (
       <section className={s.card} aria-label="GALFree 图像渠道">
         <header className={s.head}>
