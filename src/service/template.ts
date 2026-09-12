@@ -170,6 +170,10 @@ export function renderTemplateFiles(project: TemplateProject): TemplateFile[] {
         'game/log.txt',
         'game/traceback.txt',
         'game/errors.txt',
+        // 项目**根**下的同名文件也是 Ren'Py 崩出来的噪声(实测:启动期崩溃会写在根目录)。
+        'traceback.txt',
+        'errors.txt',
+        'log.txt',
         'project.log',
         '.DS_Store',
         '# GALFree 临时区(导出缓冲等);账本本体 .studio/*.json 是被管文件。',
