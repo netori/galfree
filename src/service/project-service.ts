@@ -29,6 +29,7 @@ import {
   type CharacterRecord, type SlotRecord,
 } from './characters.ts'
 import { deriveSlots } from './slots.ts'
+import { deriveCompleteness, type CompletenessReport } from './completeness.ts'
 import {
   BIBLE_FILE, OUTLINE_FILE, applyBiblePatch, bibleDocument, bibleFingerprint, buildGenerationContext,
   outlineRef, readBible, readOutline,
@@ -316,12 +317,19 @@ export class ProjectService {
       readOutline(entry.path),
     ])
     const derived = deriveSlots({ parsed, ledger, characters })
+    // 项目级完整性(T13):孤立场景 / 结局不可达,外加把全局问题**定位到场景**。
+    const completeness = deriveCompleteness(graph)
     return computeProgress(entry.path, {
       scenes: graph.scenes,
-      problems: [...graph.problems, ...derived.problems],
+      problems: [...graph.problems, ...completeness.problems, ...derived.problems],
       derivedSlots: derived.slots,
       characters,
       definedCharacters: parsed.characters,
+      completeness: {
+        entry: completeness.entry,
+        orphans: completeness.orphans,
+        endingReachable: completeness.endingReachable,
+      },
       bible: {
         fingerprint: bibleFingerprint(bible),
         chapters: bible.chapters.length,
@@ -342,14 +350,20 @@ export class ProjectService {
   }
 
   /**
-   * 一键试玩:钉版 SDK 启动当前项目、退出回传;运行事实经网关落 `.studio/playtest.json`
+   * 一键试玩(T7/T13):钉版 SDK 启动当前项目、退出回传;运行事实经网关落 `.studio/playtest.json`
    * 并进快照。技术通过是推导(退出码/日志),不是人盖的戳。
+   *
+   * `fromLabel` 给了就**从这一场开始**(T13):在副本里覆写 start 跳过去 —— 用户项目一个
+   * 字节都不动。目标场不存在会在启动时崩出 traceback,所以"落对了"这件事有可红的信号。
    */
-  async playtestStart(projectRef: string): Promise<PlaytestRun> {
+  async playtestStart(projectRef: string, fromLabel: string | null = null): Promise<PlaytestRun> {
     const graph = await this.branchGraph(projectRef)
     const entry = await this.#resolve(projectRef)
+    if (fromLabel !== null && !graph.scenes.some((scene) => scene.label === fromLabel)) {
+      throw new GalfreeError('unknown-scene', `场景 ${fromLabel} 不存在,无法从它开始试玩`)
+    }
     const gateway = await this.#gatewayFor(projectRef)
-    const run = await launchPlaytest(this.#playtestPorts, entry.path, contentFingerprint(graph))
+    const run = await launchPlaytest(this.#playtestPorts, entry.path, contentFingerprint(graph), fromLabel)
     const ledger = (await readPlaytest(entry.path)) ?? { schemaVersion: 1 as const, last: null, history: [] }
     const next = { schemaVersion: 1 as const, last: run, history: [...ledger.history, run] }
     const current = await gateway.read(PLAYTEST_FILE)
@@ -358,6 +372,15 @@ export class ProjectService {
       { origin: 'workbench', reason: 'playtest' },
     )
     return run
+  }
+
+  /**
+   * 项目级完整性(读,T13):入口 / 可达 / 孤立场景 / 结局可达 + 已定位到场景的问题。
+   * 纯推导,可全量重算 —— 与板上的其他判断同源。
+   */
+  async completeness(projectRef: string): Promise<CompletenessReport> {
+    const graph = await this.branchGraph(projectRef)
+    return deriveCompleteness(graph)
   }
 
   /** 审读戳账本(历史记录,含失效者)。 */

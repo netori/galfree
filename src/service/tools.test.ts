@@ -35,7 +35,9 @@ function fakeTools(): { tools: FakeTool[]; register: (tool: unknown) => () => vo
   }
 }
 
-const SCENE = 'label scene_one:\n    "开场。"\n    return\n'
+// 这一场要**可达**(跳进模板的 prologue),否则完整性推导会如实报孤立场景 —— 那是 T13 的
+// 正确行为,但会让这条"生成机制"的断言被别的问题干扰。
+const SCENE = 'label scene_one:\n    "开场。"\n    jump prologue\n'
 
 describe('agent 工具(T10)', () => {
   let dataDir: string
@@ -94,6 +96,16 @@ describe('agent 工具(T10)', () => {
     // 先备好定稿设定集(工具默认要求它)。
     await service.writeBible('tools', { theme: '雨天的重逢', chapters: [], characters: [] }, { via: 'agent' })
     await service.stampBible('tools', { via: 'human' })
+    // 让生成的这一场**可达**:在模板 start 的块体最前面插一句 `jump scene_one`。
+    // 不这么做,完整性推导会如实报孤立场景 —— 那是 T13 的正确行为,但会盖住这条测试要验的东西。
+    // 注意锚点:必须匹配行首的 `label start:`,否则会命中别的 label 名里的子串。
+    const snap = await service.readProjectFile('tools', 'game/script.rpy')
+    expect(snap.content).toContain('label start:')
+    await service.writeProjectFiles('tools', [{
+      path: 'game/script.rpy',
+      content: snap.content.replace(/^label start:\n/m, 'label start:\n    jump scene_one\n'),
+      expectVersion: snap.version,
+    }], { origin: 'agent', reason: 'scenario' })
 
     const generate = register().find((tool) => tool.name === 'galfree_generate_scene')!
     const report = JSON.parse(await generate.execute({ label: 'scene_one', source: SCENE })) as {
@@ -145,21 +157,25 @@ describe('agent 工具(T10)', () => {
   })
 
   it('状态工具:与工作台阶段板同源(场景/槽/角色/设定集/lint)', async () => {
+    // 这一场是孤立的(没人跳进去)—— T13 的完整性推导会如实报 orphan-scene,所以这里
+    // 不假设 lint 通过,只断言**工具与接缝读的是同一份判断**(那才是这条测试要验的东西)。
     await service.generateScene('tools', { label: 'scene_one', source: SCENE, outline: undefined })
     const status = JSON.parse(await register().find((tool) => tool.name === 'galfree_project_status')!.execute({})) as {
       scenes: Array<{ label: string; stamp: string }>
       slots: Array<{ slot: string; scenes: string[] }>
       bible: { stamp: string }
-      lint: { ok: boolean }
+      lint: { ok: boolean; errors: number }
       summary: { scenes: number }
     }
     expect(status.scenes.map((scene) => scene.label)).toContain('scene_one')
     expect(status.summary.scenes).toBeGreaterThanOrEqual(1)
     expect(status.bible.stamp).toBe('none')
-    expect(status.lint.ok).toBe(true)
     // 与接缝读出来的同一份判断(不是工具自己算的)。
     const progress = await service.progress('tools')
     expect(status.summary.scenes).toBe(progress.summary.scenes)
     expect(status.lint.ok).toBe(progress.lint.ok)
+    expect(status.lint.errors).toBe(progress.lint.errors)
+    // 孤立场景照旧被如实带出来(工具不美化)。
+    expect(progress.completeness.orphans).toContain('scene_one')
   })
 })

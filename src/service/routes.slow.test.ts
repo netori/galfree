@@ -612,6 +612,35 @@ describe('路由适配层(/api/galfree)', () => {
     expect(withOdd.body.degraded).toBe(true)
   })
 
+  it('整线完整性 + 从此场试玩:状态码与拒绝语义都如实', async () => {
+    const project = await freshProject()
+    // 完整性:模板两场是通的。
+    const graph = await req('/api/galfree/scenes/graph')
+    expect(graph.body.degraded).toBe(false)
+    const progressBefore = await req('/api/galfree/progress')
+    expect(progressBefore.body.completeness).toMatchObject({ entry: 'start', orphans: [], endingReachable: true })
+
+    // 造一个孤立场景 → 板上如实报,并定位到它自己。
+    await service.generateScene(project.id, {
+      label: 'lonely',
+      source: 'label lonely:\n    "没人走得到。"\n    return\n',
+      outline: undefined,
+    })
+    const progressAfter = await req('/api/galfree/progress')
+    expect(progressAfter.body.completeness.orphans).toEqual(['lonely'])
+    expect(progressAfter.body.problems.some((problem: { code: string }) => problem.code === 'orphan-scene')).toBe(true)
+
+    // 试玩路由:`from` 指向不存在的场 → 404(不静默地从 start 跑一遍糊弄过去)。
+    const bogus = await postJson('/api/galfree/playtest', { from: 'no_such_scene' })
+    expect(bogus.status).toBe(404)
+    expect(bogus.body.code).toBe('unknown-scene')
+
+    // 不带 body(面板的"启动试玩")也不该因为读不到 JSON 而 500 —— 这里没有真 SDK,
+    // 所以期望的是 **sdk-not-ready**(409),而不是解析错误。
+    const noBody = await postJson('/api/galfree/playtest', {})
+    expect([409, 200]).toContain(noBody.status)
+  })
+
   it('停用开关:仅 /state 可读,其余 503', async () => {
     const offline = createProjectService({ dataDir: join(dataDir, 'disabled') })
     const routes = makeRoutes({ service: offline, config: () => ({ enabled: false, defaultProjectsRoot: '' }) })

@@ -585,11 +585,14 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
-  // 一键试玩(T7):接缝同一控制器,无第二管线。
+  // 一键试玩(T7/T13):接缝同一控制器,无第二管线。
+  // `from` 给了就**从这一场开始**(副本里覆写 start;用户项目不动)。
   if (method === 'POST' && path === '/playtest') {
     const active = await service.getActiveProject()
     if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
-    const run = await service.playtestStart(active.id)
+    const body: Record<string, unknown> = await readJsonBody(req).catch(() => ({}))
+    const from = typeof body.from === 'string' && body.from !== '' ? body.from : null
+    const run = await service.playtestStart(active.id, from)
     writeJson(res, 200, { run })
     return
   }

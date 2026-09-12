@@ -96,6 +96,15 @@ export interface PlaytestView {
   exitCode: number
   technicalPass: boolean
   traceback: string | null
+  /** 从哪一场开始试的(null = 从头)。 */
+  from: string | null
+}
+
+/** 项目级完整性处境(T13):板上一眼看出"这条线走不走得通"。 */
+export interface CompletenessView {
+  entry: string | null
+  orphans: string[]
+  endingReachable: boolean
 }
 
 /**
@@ -145,6 +154,8 @@ export interface ProgressSnapshot {
   characters: CharacterBoardEntry[]
   /** 设定集处境(推导:戳指纹比对 + 原文指纹比对)。 */
   bible: BibleProgress
+  /** 项目级完整性(T13):入口 / 孤立场景 / 结局可达。 */
+  completeness: CompletenessView
   /** 顶层(非场景内)结构问题。 */
   problems: DialectProblem[]
   lint: { ok: boolean; errors: number; warnings: number }
@@ -263,6 +274,12 @@ export interface ProgressInputs {
     outlineFingerprint: string | null
     /** 设定集里记的原文引用(没导入过 = null)。 */
     outlineRef: { fingerprint: string } | null
+  }
+  /** 项目级完整性输入(T13):入口 / 孤立场景 / 结局可达。 */
+  completeness?: {
+    entry: string | null
+    orphans: string[]
+    endingReachable: boolean
   }
   /** 试玩事实(账本 last + 当前内容指纹);缺省视为未跑过。 */
   playtest?: { last: PlaytestRun | null; currentFingerprint: string }
@@ -435,7 +452,14 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
       exitCode: last.exitCode,
       technicalPass: last.technicalPass,
       traceback: last.traceback,
+      from: last.from ?? null,
     }
+  }
+
+  const completeness: CompletenessView = {
+    entry: inputs.completeness?.entry ?? null,
+    orphans: inputs.completeness?.orphans ?? [],
+    endingReachable: inputs.completeness?.endingReachable ?? true,
   }
 
   const summary: ProgressSummary = {
@@ -454,6 +478,7 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
     slots,
     characters,
     bible,
+    completeness,
     problems,
     lint: { ok: lintErrors === 0, errors: lintErrors, warnings: lintWarnings },
     playtest,

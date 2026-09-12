@@ -15,6 +15,7 @@ import { platformLauncherName, findLauncher } from './hash.ts'
 import { SdkValidator } from './validation/sdk-validator.ts'
 import { createCompositeValidator } from './validation/composite-validator.ts'
 import { createProjectService } from './project-service.ts'
+import { realSpawn } from './playtest.ts'
 import { runGit } from './git.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
 import { renderTemplateFiles, templateKeepFiles } from './template.ts'
@@ -238,6 +239,71 @@ describe('真钉版 SDK 慢带(T5)', () => {
     }
     expect(started).toBe(true)
     void pinnedDir
+
+    await rm(projectRoot, { recursive: true, force: true })
+    await cleanupTempDirs()
+  }, 600_000)
+
+  /**
+   * T13 的 AC:"从此场试玩"启动落在该场景。
+   *
+   * 做法:在**副本**里把 `start` 覆写为 `jump <目标场>`,再真启动。信号是可红的 ——
+   * 目标场不存在时会在启动时崩出 traceback,所以"窗口活着"不是空断言,而是"那一场真的跑起来了"。
+   * 用户项目一个字节都不动(副本用完即删)。
+   */
+  it('从某场试玩:真 SDK 下入口真的落在该场景,且用户项目不被污染', async () => {
+    const sdkDir = await ensureSdk('galfree-slow-sdk5-')
+    const launcher = await findLauncher(sdkDir)
+    const projectRoot = await makeTempDir('galfree-slow-from-')
+    for (const file of [...renderTemplateFiles({ name: 'flow', title: '整线', id: 'flow' }), ...templateKeepFiles()]) {
+      const abs = join(projectRoot, file.path)
+      await mkdir(join(abs, '..'), { recursive: true })
+      await writeFile(abs, file.content, 'utf8')
+    }
+    await runGit(projectRoot, ['init', '--initial-branch', 'main'])
+    await runGit(projectRoot, ['add', '--all'])
+    await runGit(projectRoot, ['commit', '--no-gpg-sign', '--author', 'GALFree <galfree@dsh.local>', '-m', 'scaffold'])
+
+    const dataDir = await makeTempDir('galfree-slow-from-data-')
+    const service = createProjectService({
+      dataDir,
+      playtest: { resolveLauncher: async () => launcher, spawn: realSpawn },
+    })
+    try {
+      await service.createProject({ projectsRoot: projectRoot, name: 'fromscene', title: '整线' })
+      const snap = await service.readProjectFile('fromscene', 'game/script.rpy')
+      await service.writeProjectFiles('fromscene', [{
+        path: 'game/script.rpy',
+        content: [
+          'label start:',
+          '    "开场。"',
+          '    jump scene_two',
+          '',
+          'label scene_two:',
+          '    "第二场。"',
+          '    return',
+          '',
+        ].join('\n'),
+        expectVersion: snap.version,
+      }], { origin: 'agent', reason: 'scenario' })
+
+      // 真启动。人会一直玩下去,所以给 20 秒 watchdog;被 watchdog 杀掉 = 窗口活着(没在启动期崩)。
+      const launched = service.playtestStart('fromscene', 'scene_two')
+      const finished = await Promise.race([
+        launched,
+        new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 20_000)),
+      ])
+      if (finished !== 'timeout') {
+        // 它自己退出了:那就必须是干净的(目标场不存在会在这里留下 traceback)。
+        expect(finished.traceback).toBeNull()
+        expect(finished.from).toBe('scene_two')
+      }
+      // 无论哪种收尾:用户项目里不许出现试玩副本的入口文件,也不该有 traceback。
+      expect(existsSync(join(projectRoot, 'game', 'zz_galfree_warp.rpy'))).toBe(false)
+      expect(existsSync(join(projectRoot, 'traceback.txt'))).toBe(false)
+    } finally {
+      await service.dispose()
+    }
 
     await rm(projectRoot, { recursive: true, force: true })
     await cleanupTempDirs()

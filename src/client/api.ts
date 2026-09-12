@@ -238,6 +238,13 @@ export interface BranchGraphView {
   problems: Array<{ severity: string; file: string; line?: number; code: string; message: string }>
 }
 
+/** 项目级完整性处境(T13)。 */
+export interface CompletenessView {
+  entry: string | null
+  orphans: string[]
+  endingReachable: boolean
+}
+
 export interface ProgressView {
   scenes: SceneProgressView[]
   /** 素材板:`.rpy` 派生的槽清单(挂账本 + 推导状态)。 */
@@ -246,9 +253,11 @@ export interface ProgressView {
   characters: CharacterBoardEntryView[]
   /** 设定集处境(戳 + 原文指纹比对)。 */
   bible: BibleProgressView
+  /** 项目级完整性(入口 / 孤立场景 / 结局可达)。 */
+  completeness: CompletenessView
   problems: DialectProblemView[]
   lint: { ok: boolean; errors: number; warnings: number }
-  playtest: { at: string; state: 'pass' | 'fail' | 'stale'; exitCode: number; technicalPass: boolean; traceback: string | null } | null
+  playtest: { at: string; state: 'pass' | 'fail' | 'stale'; exitCode: number; technicalPass: boolean; traceback: string | null; from: string | null } | null
   summary: { scenes: number; missingDialogue: number; missingSlots: number; lintErrors: number; awaitingReview: number; degraded: number; playtestFail: number; playtestNotRun: number }
   degraded: boolean
 }
@@ -309,8 +318,16 @@ export class GalfreeApi {
     }))
   }
 
-  async playtest(): Promise<{ at: string; exitCode: number; technicalPass: boolean; traceback: string | null }> {
-    const body = await readJson<{ run: { at: string; exitCode: number; technicalPass: boolean; traceback: string | null } }>(await fetch('/api/galfree/playtest', { method: 'POST' }))
+  /** 试玩(T13):`from` 给了就从这一场开始(副本里覆写 start;项目不动)。 */
+  async playtest(from?: string): Promise<{ at: string; exitCode: number; technicalPass: boolean; traceback: string | null; from: string | null }> {
+    const body = await readJson<{ run: { at: string; exitCode: number; technicalPass: boolean; traceback: string | null; from: string | null } }>(
+      await fetch('/api/galfree/playtest', {
+        method: 'POST',
+        ...(from === undefined || from === ''
+          ? {}
+          : { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ from }) }),
+      }),
+    )
     return body.run
   }
 

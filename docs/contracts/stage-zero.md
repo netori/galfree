@@ -343,6 +343,32 @@ generateScene(ref,{label,source,nextLabel?,requireContext?}) → {
 **工作台**:「场景」卡 = 分支图(点节点定位)+ 编辑器(逐行表单 / 源文本两个 tab);
 舞台板每场展开后有「编辑这一场」入口。
 
+## 整线组装试玩(T13 之后追加)
+
+**项目级完整性 = 纯推导**(`src/service/completeness.ts`):`completeness(ref)` 给
+`{entry, reachable[], orphans[], endingReachable, problems[]}`。三件事:
+
+1. **定位**:把全局问题(悬空跳转等)落到它所在的场景 —— 板要说"是这一幕的问题 + 哪一行",
+   而不只是"项目里有个问题"。`locateScene()` 按文件 + 行区间归属。
+2. **可达**:从主菜单入口 `start` 沿 jump/call/菜单选项走,走不到的场是 **`orphan-scene`**
+   (error)。孤立场景是真实的坑:剧本写了、玩不到。
+3. **结局可达**:从入口能否走到一个含 `return` 的场景;走不到是 **`no-ending-reachable`**
+   (error)。**`return` 可能藏在菜单选项体里**(模板的 `start` 就是这样),递归查 —— 只看
+   顶层会把这种项目误判成"结局不可达",那是比漏报更糟的假阳性。
+
+`progress.completeness` 把三者交给面板(阶段板上一枚徽标);问题与 lint 同源进板。
+
+**从某场试玩**(`playtestStart(ref, fromLabel)`):
+
+- 实现是**在副本里覆写 `start`** 跳向目标场,再把整份拷贝交给 SDK 跑 —— 副本用完即删,
+  **用户项目一个字节都不动**。不在用户项目里塞临时 `.rpy`(`.rpy` 是唯一真相,试玩副本不是)。
+- 信号是可红的:目标场不存在 → 启动即崩出 traceback。所以"窗口活着"= 那一场真的跑起来了,
+  而不是"没报错"的空断言(慢带有真 SDK 断言)。
+- 运行事实(含 `from`:从哪一场跑的)照旧经网关落 `.studio/playtest.json` 并进快照;
+  `progress.playtest.from` 让板说得出"这次是从第几场试的"。
+
+**路由**:`POST /playtest` 接受 `{from}`,不存在的场 → 404(`unknown-scene`)。
+
 ## 测试纪律(spec Testing Decisions 落地)
 
 - 只在 `ProjectService` 公共接口上断言外部可观察行为:磁盘终态、推导对象、

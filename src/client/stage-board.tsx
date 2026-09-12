@@ -22,13 +22,15 @@ function markTone(severity: string): 'warn' | 'bad' | 'none' {
   return MARK_TONE[severity] ?? 'none'
 }
 
-export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, onRelocate, onOpenScene, hasProject }: {
+export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, onPlaytestFrom, onRelocate, onOpenScene, hasProject }: {
   progress: ProgressView | null
   /** 正在盖戳的目标 key(stampKey 的产物);null = 空闲。 */
   busyKey: string | null
   playing: boolean
   onStamp: (target: StampTarget) => void
   onPlaytest: () => void
+  /** 从这一场开始试玩(T13)。 */
+  onPlaytestFrom: (label: string) => void
   /** 把手写文件里的段搬进生成目录(T10):搬完这一场才能被重生成。 */
   onRelocate: (label: string) => void
   /** 打开场景编辑器定位到这一场(T11)。 */
@@ -67,6 +69,17 @@ export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, on
                     : progress.playtest.state === 'pass' ? `技术通过 · ${relativeTime(progress.playtest.at)}`
                     : progress.playtest.state === 'fail' ? `有报错 · 退出码 ${progress.playtest.exitCode}`
                     : `已过期 · ${relativeTime(progress.playtest.at)}`}
+                  {progress.playtest !== null && progress.playtest.from !== null ? ` · 从 ${progress.playtest.from}` : ''}
+                </Chip>
+              ) : null}
+              {progress !== null ? (
+                <Chip
+                  tone={progress.completeness.orphans.length === 0 && progress.completeness.endingReachable ? 'ok' : 'bad'}
+                  dot
+                  title="项目级完整性:从入口能不能走到每一场、能不能走到结局(T13)"
+                >
+                  {progress.completeness.endingReachable ? '' : '结局不可达 · '}
+                  {progress.completeness.orphans.length === 0 ? '全场景可达' : `${progress.completeness.orphans.length} 场孤立`}
                 </Chip>
               ) : null}
               <button type="button" className={s.button} disabled={playing} onClick={onPlaytest}
@@ -118,6 +131,7 @@ export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, on
                     onStamp={onStamp}
                     onRelocate={onRelocate}
                     onOpen={() => onOpenScene(scene.label)}
+                    onPlaytestFrom={() => onPlaytestFrom(scene.label)}
                   />
                 ))}
               </div>
@@ -150,7 +164,7 @@ export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, on
   )
 }
 
-function SceneRow({ scene, open, busyKey, onToggle, onStamp, onRelocate, onOpen }: {
+function SceneRow({ scene, open, busyKey, onToggle, onStamp, onRelocate, onOpen, onPlaytestFrom }: {
   scene: SceneProgressView
   open: boolean
   busyKey: string | null
@@ -158,6 +172,7 @@ function SceneRow({ scene, open, busyKey, onToggle, onStamp, onRelocate, onOpen 
   onStamp: (target: StampTarget) => void
   onRelocate: (label: string) => void
   onOpen: () => void
+  onPlaytestFrom: () => void
 }) {
   const sceneTarget: StampTarget = { kind: 'scene', label: scene.label }
   const sceneBusy = busyKey === stampKey(sceneTarget)
@@ -250,6 +265,14 @@ function SceneRow({ scene, open, busyKey, onToggle, onStamp, onRelocate, onOpen 
               title="打开场景编辑器:逐行改对白/图像引用,或切到源文本直接改 .rpy(两路同走网关)"
             >
               编辑这一场
+            </button>
+            <button
+              type="button"
+              className={`${s.button} ${s.ghost} ${s.tiny}`}
+              onClick={onPlaytestFrom}
+              title={`从 ${scene.label} 开始试玩:在副本里把入口指向这一场,用户项目不动。目标场不存在会崩出 traceback,所以"落对了"是可验证的。`}
+            >
+              从此场试玩
             </button>
             {scene.file.startsWith('scenes/')
               ? <Chip tone="quiet" title="这一场住在生成目录,可以让 agent 重生成">可生成</Chip>

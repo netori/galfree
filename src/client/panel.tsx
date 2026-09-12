@@ -188,10 +188,10 @@ export function WorkbenchPanel() {
     }
   }
 
-  const runPlaytest = async (): Promise<void> => {
+  const runPlaytest = async (from?: string): Promise<void> => {
     setPlaying(true)
     try {
-      await api.playtest()
+      await api.playtest(from)
       await refresh()
     } catch (error) {
       pushNotice('bad', `试玩失败:${describeError(error)}`)
@@ -327,6 +327,7 @@ export function WorkbenchPanel() {
           playing={playing}
           onStamp={(target) => void stamp(target)}
           onPlaytest={() => void runPlaytest()}
+          onPlaytestFrom={(label) => void runPlaytest(label)}
           onRelocate={(label) => void relocate(label)}
           onOpenScene={(label) => setFocusScene(label)}
           hasProject={hasProject}
