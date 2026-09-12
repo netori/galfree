@@ -394,22 +394,29 @@ generateScene(ref,{label,source,nextLabel?,requireContext?}) → {
 接缝的 `imageChannel()` 只回报 `apiKeyConfigured` 布尔,不回传密钥本身。
 没填端点 = 没渠道 → 出图动作在接缝上抛 **`no-image-channel`**(路由 503),绝不假装能出图。
 
-**设置命名空间 ≠ 设置有界面(实测,别踩第二遍)。** Host 半 `ctx.settings.register(ns, schema)`
-只让设置**可读写**;宿主「设置 → 插件」页的「插件配置」标签页是**按命名空间分发卡片**的
-(`settings.plugin.item`,keyed by ns),而那张卡要**插件自己的 Client 半**贡献:
+**设置命名空间 ≠ 设置有界面(实测两遍才走对)。** Host 半 `ctx.settings.register(ns, schema)`
+只让设置**可读写**。界面上有两条路,只有第二条对第三方插件可靠:
+
+1. **`settings.plugin.item`(keyed by ns)—— 行不通**。表面上写着"插件自己提供那张卡",
+   但「插件配置」标签页的实现是把 slot 注册表与**宿主自己的命名空间清单交叉比对**来决定
+   渲染谁(`new ConfigurablePluginsTabController(settingsScope.describe(), () => slots.entries("settings.plugin.item"))`),
+   插件拿不到那套过滤依据 —— **实测:卡注册进去了,那一页里仍然不出现**。
+2. **自己贡献一个 `settings.section`(走这条)**。宿主自己的功能页(「Agent 预设」等)
+   就是这么做的,设置左侧直接多一项,**不依赖任何枚举**:
 
 ```
-ctx.slots.inject('settings.plugin.item', () => ctx.slots.register(
-  { name: 'settings.plugin.item', key: 'dsh-galfree' }, ChannelSettingsCard))
+ctx.slots.inject('settings.section', () => ctx.slots.register(
+  { name: 'settings.section', id: 'galfree', order: 40, label: () => 'GALFree' },
+  ChannelSettingsSection))
 ```
 
 写入走宿主既有的一套:读 `ctx.settingsScope.describe()` 的共享镜像拿「当前值 + revision」,
 保存时提交 `ctx.remote.settings.mutate(ns, ops, revision)`(`ops` = `{op:'set',path:[field],value}`
 或 `{op:'unset',path:[field]}`;revision 围栏保证并发改动被拒而不是被静默覆盖),成功后
-`describe.acceptView(response.value)` 把应答折回镜像。卡片**长在设置页里,不在工作台面板里**
+`describe.acceptView(response.value)` 把应答折回镜像。渠道配置**长在设置里,不在工作台面板里**
 —— 面板里再开一处渠道配置面就是第二真相面(不做)。
 
-**镜像是宿主持有的,读它得到的对象身份不保证稳定。** 卡片把镜像同步进 React 状态时
+**镜像是宿主持有的,读它得到的对象身份不保证稳定。** 表单把镜像同步进 React 状态时
 必须**按内容比对**(内容没变就返回原 state),否则「渲染 → setState → 渲染」会自锁成死循环:
 页面看着还在,按钮点不动(靠渲染回路里的点击超时才发现的那个 bug)。
 

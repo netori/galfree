@@ -1,16 +1,16 @@
 /**
- * 图像渠道设置卡(T14)—— 宿主「设置 → 插件 → 插件配置」页里的一张卡。
+ * 图像渠道设置界面(T14)—— 设置左侧导航里的一个独立分区「GALFree」。
  *
- * 为什么需要这个文件:设置页的「插件配置」标签页**只按命名空间分发卡片**
- * (`settings.plugin.item`),"插件自己提供那张卡"。光注册设置命名空间
- * (Host 半的 `ctx.settings.register`)不会长出界面 —— 用户就找不到地方填渠道。
- * 所以卡片由插件自己的 Client 半贡献,长在**设置页**里,而不是工作台面板里
- * (面板里再开一处配置面 = 第二真相面,不做)。
+ * 为什么是独立分区,而不是挤进「插件配置」标签页:那个标签页把
+ * `settings.plugin.item` 的注册表与**宿主自己的命名空间清单**交叉比对来决定渲染谁,
+ * 插件拿不到那套过滤依据(实测:卡注册进去了,那个标签页里仍然不出现)。
+ * 而宿主自己的功能页(「Agent 预设」等)走的是另一条路 —— 直接贡献一个
+ * `settings.section`,设置左侧就多一项,**完全不依赖任何枚举**。本插件走这条。
  *
  * 写入走宿主既有的一套:读 `ctx.settingsScope.describe()` 的共享镜像拿
  * 「当前值 + revision」,保存时提交 `ctx.remote.settings.mutate(ns, ops, revision)`
  * —— revision 围栏保证并发改动被拒而不是被静默覆盖。**密钥明文**按 ADR-0010
- * 存本机设置文档:卡片上如实写明这一点,不含糊。
+ * 存本机设置文档:界面上如实写明这一点,不含糊。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
@@ -307,10 +307,11 @@ function describeError(error: unknown): string {
 }
 
 /**
- * 注册这张卡到宿主的「插件配置」页。
+ * 注册成设置里的一个独立分区。
  *
- * `key` 必须是**它编辑的命名空间**(宿主的那个标签页按 key 分发卡片),
- * 所以这里用 `SETTINGS_NAMESPACE`,与 Host 半的注册一一对应。
+ * 两条都必要:`settings.section` 让它出现在设置左侧导航;里面的表单本体由
+ * 组件自己渲染。**不**注册 `settings.plugin.item` —— 那会让同一件事在两处
+ * 界面里可改(第二配置面),而它恰恰又不显示,没必要。
  */
 export function apply(ctx: Context): void {
   const slots = (ctx as unknown as {
@@ -323,10 +324,12 @@ export function apply(ctx: Context): void {
   const settings = ctx as unknown as SettingsCardContext
 
   ctx.effect(
-    () => slots.inject('settings.plugin.item', () => slots.register({
-      name: 'settings.plugin.item',
-      key: SETTINGS_NAMESPACE,
+    () => slots.inject('settings.section', () => slots.register({
+      name: 'settings.section',
+      id: 'galfree',
+      order: 40,
+      label: () => 'GALFree',
     }, () => <ChannelSettingsCard ctx={settings} />)) as () => void,
-    'dsh-galfree: image channel settings card',
+    'dsh-galfree: image channel settings section',
   )
 }
