@@ -84,7 +84,16 @@ export const TEMPLATE_UI_IMAGE_DIR = 'gui'
  */
 export const TEMPLATE_IMAGE_DEFINITION_NOTE = 'image <名字> = "<路径>"'
 
-/** 中文字体补丁的文件名(init 顺序靠后,所以用 zz_ 前缀保证它在 gui.rpy 之后跑)。 */
+/**
+ * 中文字体与界面变量补丁的文件名。
+ *
+ * `zz_` 前缀是为了**排在 `gui.rpy` 之后**:`gui.rpy` 的 `define` 在文件顺序里先跑,
+ * 本补丁要覆盖它写下的默认字体;而 `screens.rpy` 里那些
+ * `properties gui.text_properties("<前缀>")` / `gui.button_properties(…)` 是**样式**,
+ * 它们的属性在样式应用阶段读 `gui.*_font` 的当前值(实测:init 999 读到的样式值还没应用完,
+ * 所以"补丁文件与 screens.rpy 谁先谁后"不是这里的决定因素 —— **变量本身的值**才是)。
+ * 结论:字体要改在**变量**上,连 `gui.rpy` 里那两条**拷贝赋值**一起重推(见下)。
+ */
 export const TEMPLATE_UI_PATCH = 'zz_galfree_ui.rpy'
 
 /**
@@ -122,6 +131,16 @@ export function renderUiPatch(hasFont: boolean): TemplateFile {
       hasFont ? `define gui.text_font = "${TEMPLATE_CJK_FONT.target}"` : '# 字体文件没拷成功,保持默认字体(中文会显示成方块)。',
       hasFont ? `define gui.name_text_font = "${TEMPLATE_CJK_FONT.target}"` : '',
       hasFont ? `define gui.interface_text_font = "${TEMPLATE_CJK_FONT.target}"` : '',
+      '',
+      '# ── 派生字体也要重指(用户实测:分支选项是方块字)──────────────────────',
+      "# SDK 的 gui.rpy 里有两条**拷贝赋值**(值在自己那一行就被抄走了):",
+      '#     define gui.button_text_font = gui.interface_text_font        (162 行)',
+      '#     define gui.choice_button_text_font = gui.text_font           (212 行)',
+      '# 上面改了 text/interface 字体之后,这两条**不会跟着变** —— 后果是:对白正常,',
+      '# 而**选项与按钮上的中文是方块**(选项读的正是 gui.choice_button_text_font)。',
+      '# 这里按新值重推一遍(顺序在字体定义之后,读到的就是中文字体)。',
+      hasFont ? 'define gui.button_text_font = gui.interface_text_font' : '',
+      hasFont ? 'define gui.choice_button_text_font = gui.text_font' : '',
       '',
       '# 中文断行:按字断(合法值是 eastasian / unicode / western…,**没有 "chinese"** ——',
       '#  写错会在渲染时抛 Exception: Unknown language,把整个对话屏打崩。这是个实测过的坑)。',

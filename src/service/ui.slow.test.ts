@@ -17,13 +17,14 @@
  * "从某场试玩真的落在那一场"由 `sdk.slow.test.ts` 自己的用例覆盖。
  */
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdir, readFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { createProjectService } from './project-service.ts'
 import { createCompositeValidator } from './validation/composite-validator.ts'
 import { findLauncher } from './hash.ts'
+import { TEMPLATE_UI_PATCH } from './template.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
 
 /** 拿钉版 SDK 目录(与别的慢带用例同一口径)。 */
@@ -62,7 +63,7 @@ describe('项目的界面层(慢带,真 SDK)', () => {
       expect(existsSync(join(root, 'game', 'fonts', 'SourceHanSansLite.ttf')), '缺中文字体').toBe(true)
 
       // 2) 字体补丁必须指**项目内相对路径**:绝对路径会被 Ren'Py 静默回退 → 中文方块。
-      const patch = await readFile(join(root, 'game', 'zz_galfree_ui.rpy'), 'utf8')
+      const patch = await readFile(join(root, 'game', TEMPLATE_UI_PATCH), 'utf8')
       expect(patch).toContain('gui.text_font = "fonts/SourceHanSansLite.ttf"')
       expect(patch, '字体不能用绝对路径(会被静默回退)').not.toMatch(/gui\.text_font = "[A-Za-z]:/)
       // 断行的合法值(写 "chinese" 会在渲染时抛 Unknown language 把对话屏打崩)。
@@ -127,6 +128,109 @@ describe('项目的界面层(慢带,真 SDK)', () => {
       }
       expect(alive, '引擎没能把项目启动起来(进程提前退出)').toBe(true)
     } finally {
+      await service.dispose()
+    }
+  }, 300_000)
+
+  /**
+   * **分支选项是方块字**(2026-09-12 用户实测)。
+   *
+   * 根因:`SDK` 的 `gui.rpy` 里有两条**拷贝赋值** ——
+   *   `define gui.button_text_font = gui.interface_text_font`(162 行)
+   *   `define gui.choice_button_text_font = gui.text_font`(212 行)
+   * 值在那一行就被抄走了。我们的补丁(在 `gui.rpy` 之后)把 `gui.text_font` 指到中文字体,
+   * 但**这两条不会跟着变** → 选项与按钮仍读 DejaVuSans(不含中文字形)→ 方块。
+   * 对白正常、只有选项是方块,正是这个形状。
+   *
+   * 这条守卫问两处:
+   *  1. **变量**(init 探针 + 真 lint):`gui.*_font` 是否都指到项目里的中文字体 —— 这是修复点;
+   *  2. **样式**(运行时探针 + 真启动):`style.choice_button_text.font` 等**渲染真正用的**值 ——
+   *     因为样式属性在 init 之后才应用完(init 999 读到的还是引擎默认值,这点也是实测的),
+   *     只在 init 里读样式会得出错误结论。
+   */
+  it('引擎最终用的字体是项目里那份中文字体(对话 / 角色名 / 界面 / **选项** / 按钮)', async () => {
+    const sdkDir = await sdkDirFor()
+    const launcher = (await findLauncher(sdkDir))!
+    const base = await makeTempDir('galfree-slow-font-')
+    const projectsRoot = join(base, 'projects')
+    await mkdir(projectsRoot, { recursive: true })
+
+    const service = createProjectService({
+      dataDir: join(base, 'data'),
+      validator: createCompositeValidator({ pinnedSdkDir: sdkDir, overrideSdkPath: () => '' }),
+    })
+    let child: ReturnType<typeof spawn> | null = null
+    try {
+      const project = await service.createProject({ projectsRoot, name: 'fontflow', title: '字体链路', sdkDir })
+      const styles = [
+        'style.default.font', 'style.say_dialogue.font', 'style.name_text.font',
+        'style.button_text.font', 'style.choice_button_text.font', 'style.interface_text.font',
+      ]
+      const vars = [
+        'gui.text_font', 'gui.name_text_font', 'gui.interface_text_font',
+        'gui.button_text_font', 'gui.choice_button_text_font',
+      ]
+
+      // 探针:init 999 记变量(修复点在变量上);periodic 回调记样式(渲染真正用的值)。
+      await writeFile(join(project.root, 'game', 'zz_galfree_font_probe.rpy'), [
+        'init 999 python:',
+        '    import json',
+        '    with open(config.basedir + "/galfree-font-vars.json", "w") as handle:',
+        `        json.dump({${vars.map((key) => `"${key}": ${key.replace('gui.', 'gui.')}`).join(', ')}}, handle, ensure_ascii=False, indent=2)`,
+        '',
+        'init python:',
+        '    _gf_style_probe_done = False',
+        '',
+        '    def _gf_style_probe():',
+        '        global _gf_style_probe_done',
+        '        if _gf_style_probe_done:',
+        '            return',
+        '        _gf_style_probe_done = True',
+        '        import json',
+        `        probe = {${styles.map((key) => `"${key}": ${key}`).join(', ')}}`,
+        '        with open(config.basedir + "/galfree-font-styles.json", "w") as handle:',
+        '            json.dump(probe, handle, ensure_ascii=False, indent=2)',
+        '',
+        '    config.periodic_callbacks.append(_gf_style_probe)',
+        '',
+      ].join('\n'), 'utf8')
+
+      // ① 真 lint(会跑完 init)→ 变量那一份。
+      const validation = await service.validateActiveProject()
+      expect(validation.validator).toBe('sdk')
+      expect(validation.problems.filter((problem) => problem.severity === 'error')).toEqual([])
+      const varProbe = JSON.parse(await readFile(join(project.root, 'galfree-font-vars.json'), 'utf8')) as Record<string, string>
+      const wrongVars = vars.filter((key) => !(varProbe[key] ?? '').includes('SourceHanSansLite.ttf'))
+      expect(
+        wrongVars.map((key) => `${key} = ${String(varProbe[key])}`),
+        '这些**变量**没指到项目里的中文字体(选项/按钮读的就是它们)',
+      ).toEqual([])
+
+      // ② 真启动(与上面那条同一个路数:进程活着就够,不必玩到某处)→ 样式那一份。
+      child = spawn(launcher, [project.root], {
+        cwd: project.root,
+        env: { ...process.env, RENPY_DISABLE_SOUND: '1', RENPY_LESS_UPDATES: '1' },
+        stdio: 'ignore',
+      })
+      const styleProbePath = join(project.root, 'galfree-font-styles.json')
+      const deadline = Date.now() + 40_000
+      while (Date.now() < deadline && !existsSync(styleProbePath)) {
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      }
+      expect(existsSync(styleProbePath), '真启动后运行时探针没写出来(游戏没跑到主菜单?)').toBe(true)
+
+      const styleProbe = JSON.parse(await readFile(styleProbePath, 'utf8')) as Record<string, string>
+      const wrongStyles = styles.filter((key) => !(styleProbe[key] ?? '').includes('SourceHanSansLite.ttf'))
+      expect(
+        wrongStyles.map((key) => `${key} = ${String(styleProbe[key])}`),
+        '这些**样式**(渲染真正用的值)没指到项目里的中文字体 —— 中文会显示成方块字',
+      ).toEqual([])
+
+      // 启动期没崩(与第一条用例同一口径)。
+      expect(existsSync(join(project.root, 'traceback.txt')), '真启动崩了').toBe(false)
+    } finally {
+      child?.kill()
+      await new Promise((resolve) => setTimeout(resolve, 1500))
       await service.dispose()
     }
   }, 300_000)

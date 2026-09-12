@@ -13,6 +13,7 @@ import { createProjectService, type ProjectService } from '../service/project-se
 import { FakeValidator } from './validation/template-validator.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
 import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
+import { TEMPLATE_UI_PATCH } from './template.ts'
 
 const exec = promisify(execFile)
 
@@ -67,9 +68,13 @@ describe('项目服务 · 模板新建项目(T1)', () => {
     const fontFromSdk = await readFile(join(sdkDir, 'sdk-fonts', 'SourceHanSansLite.ttf'))
     expect(fontOnDisk.equals(fontFromSdk)).toBe(true)
 
-    const patch = await readFile(join(project.root, 'game', 'zz_galfree_ui.rpy'), 'utf8')
+    const patch = await readFile(join(project.root, 'game', TEMPLATE_UI_PATCH), 'utf8')
     expect(patch).toContain('gui.text_font = "fonts/SourceHanSansLite.ttf"')
     expect(patch).toContain('gui.interface_text_font')
+    // **派生字体也要重指**:`gui.rpy` 里那两条是拷贝赋值(`gui.choice_button_text_font = gui.text_font`),
+    // 不重推的话:对白正常,而**选项/按钮上的中文是方块**(用户实测)。
+    expect(patch).toContain('define gui.button_text_font = gui.interface_text_font')
+    expect(patch).toContain('define gui.choice_button_text_font = gui.text_font')
     // options.rpy 补上了 screens.rpy 依赖的变量。
     const options = await readFile(join(project.root, 'game', 'options.rpy'), 'utf8')
     expect(options).toContain('gui.show_name')

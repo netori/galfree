@@ -1252,6 +1252,25 @@ interface NextAction {
   但剧本要用它得显式写一行 `image bg rooftop = "images/bg-rooftop.png"`。
   缺这一行时画面是**灰底 + 图片名**(Ren'Py 的"找不到图"提示,不是图坏了)。
   "出图"到"图上屏"之间这一环留给素材环节的后续票。
+- **中文字体要连"派生变量"一起重指**(T23,用户实测:分支选项是方块字)。SDK 的 `gui.rpy` 里有两条
+  **拷贝赋值**,值在自己那一行就被抄走了:
+
+  ```
+  162: define gui.button_text_font = gui.interface_text_font
+  212: define gui.choice_button_text_font = gui.text_font
+  ```
+
+  只改 `gui.text_font` / `gui.name_text_font` / `gui.interface_text_font` 的话,后果正好是
+  **对白正常、选项与按钮是方块**(它们读的是那两条被抄走的变量,值是 DejaVuSans —— 不含中文字形)。
+  所以补丁里要把这两条**按新值重推一遍**。
+
+  **怎么验(方法论上也值得记)**:这一条**只有运行时读得到真值**。
+  `style.<名字>.font` 在 init 阶段读到的是**还没应用完的引擎默认值**(实测:init 999 读三处样式
+  全是 DejaVuSans,而变量已经是中文字体) —— 我第一版就是被这个假象误导、先去怀疑文件加载顺序的。
+  `ui.slow.test.ts` 现在问两处:**init 探针 + 真 lint** 看变量、**运行时探针
+  (`config.periodic_callbacks`)+ 真启动**看样式;去掉那两行 `define` 就红,并指名它俩。
+  **模板只修新项目**:老项目要往 `game/zz_galfree_ui.rpy` 补那两行,而且**目前没有任何机制会
+  主动告诉它"界面补丁过期了"**(这次是人在游戏里撞见的;要不要加板上的 warning 留作后续决定)。
 
 ## 测试纪律(spec Testing Decisions 落地)
 

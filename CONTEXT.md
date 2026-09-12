@@ -105,6 +105,13 @@
   前置检查在**插件缺席时带原因地拒绝**(会话创建失败并指名那一行),而不是静默少几个工具。
   插件与 preset 的两种摆法**互斥**(都装会重复注册设置命名空间与路由),README 写明。
   契约见「galgame 专用 agent preset(T22)」节。
+- **#31 已交付(T23)**:**分支选项 / 按钮显示方块字**(用户实测)。根因是 SDK 的 `gui.rpy` 里两条
+  **拷贝赋值**(`gui.button_text_font = gui.interface_text_font` /
+  `gui.choice_button_text_font = gui.text_font`)—— 中文字体补丁只改了 text/name/interface 三处,
+  于是对白正常、选项与按钮读的是被抄走的 DejaVuSans → 方块。补丁现在把那两条按新值重推一遍;
+  **模板只修新项目**,老项目要往 `game/zz_galfree_ui.rpy` 补那两行(**目前没有机制主动告知**)。
+  守卫在 `ui.slow.test.ts`:init 探针看变量、**运行时探针**看样式 —— 后者才是真值
+  (init 阶段读 `style.*.font` 得到的是还没应用完的引擎默认值,这一点也实测过)。
 - 遗留:人工验收还欠"点一次试玩看窗口能否正常退出";`alice` 还没进角色登记簿(warning);
   **参考链在用户渠道上不可用**(上游只要公网 URL,建议关掉该模型的「参考链」);
   **老项目**(`hjm`,旧模板建的)缺 `build.name` 与界面补丁里那两行 `build.classify`,
