@@ -96,7 +96,7 @@ export const GALFREE_WORKFLOW: readonly WorkflowStage[] = [
   {
     name: '设定集',
     what: '世界观 / 角色设定(同步落角色登记簿)/ 章节大纲 —— 下游所有生成的唯一记忆源',
-    tools: ['galfree_write_bible', 'galfree_import_outline'],
+    tools: ['galfree_story_bible'],
     gate: { what: '空设定集生成出来的东西没有上游依据 —— 先把世界观 / 角色 / 章节写下(人给的主题或大纲是它的输入)' },
     // 这一步的"做完"就是**人拍板**:设定集是后面每一次生成的上游,不盖章就往下走等于拿草稿当真源。
     done: [{ path: 'bible.stamp', op: 'equals', value: 'approved' }],
@@ -105,7 +105,7 @@ export const GALFREE_WORKFLOW: readonly WorkflowStage[] = [
   {
     name: '剧本',
     what: '逐场写 `.rpy`(方言子集,一场一个 label):`.rpy` 是叙述与分支结构的唯一真相',
-    tools: ['galfree_generate_scene'],
+    tools: ['galfree_generate_scene', 'galfree_edit_scene'],
     gate: {
       code: GATE.bibleNotFinal,
       what: '设定集还没盖「设定定稿」戳(或盖过之后内容又改了)—— **这不是故障,是"去请人盖戳"**;盖上再来生成',
@@ -134,7 +134,7 @@ export const GALFREE_WORKFLOW: readonly WorkflowStage[] = [
   {
     name: '音频',
     what: 'BGM/SE 是**接进来的**,不是生成的:把音频文件放进 `game/`,再在场景里接线(引用是**相对 `game/` 的路径**)',
-    tools: ['galfree_set_scene_audio'],
+    tools: ['galfree_wire_audio'],
     gate: { what: '池是派生的(文件丢进 `game/` 就有,不用登记),但**引用必须落地**:悬空的音频引用在板上是一条 error(定位到哪一场哪一行),发布前置也会被它拦下' },
     done: [{ path: 'audio.missing', op: 'empty' }],
     human: '试听靠试玩,认可靠人盖场景戳',

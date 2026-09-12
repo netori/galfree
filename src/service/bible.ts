@@ -140,6 +140,15 @@ export function assertBibleValid(doc: BibleDocument): void {
     if (!ID_RE.test(chapter.id)) throw new GalfreeError('bible-invalid', `章节 id 需匹配 ${ID_RE}:${chapter.id}`)
     if (seen.has(chapter.id)) throw new GalfreeError('bible-invalid', `章节 id 重复:${chapter.id}`)
     seen.add(chapter.id)
+    // 形状也要拦:章节是可以从工具面/面板当自由 JSON 送进来的(`scenes` 缺了会让指纹计算抛
+    // `chapter.scenes is not iterable` —— 那是**内部错误**,还会让整份文档写到盘上之后
+    // 每次读板都炸)。所以"写之前拒绝"是这里唯一的正确时机。
+    if (typeof chapter.title !== 'string' || chapter.title.trim() === '') {
+      throw new GalfreeError('bible-invalid', `章节「${chapter.id}」需要一个标题`)
+    }
+    if (!Array.isArray(chapter.scenes) || chapter.scenes.some((scene) => typeof scene !== 'string')) {
+      throw new GalfreeError('bible-invalid', `章节「${chapter.id}」的 scenes 必须是 label 字符串数组(要覆盖哪些场景)`)
+    }
     if ((chapter.outline?.length ?? 0) > MAX_BIBLE_FIELD_CHARS) {
       throw new GalfreeError('bible-invalid', `章节「${chapter.id}」的梗概太长:设定集存意图,不存正文`)
     }

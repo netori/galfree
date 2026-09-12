@@ -68,20 +68,29 @@ describe('agent 工具(T10)', () => {
     return registry.tools
   }
 
-  it('注册出模型看到的契约:两个工具,参数与输出声明齐备', () => {
+  it('注册出模型看到的契约:十四个工具,参数与输出声明齐备', () => {
     const tools = register()
-    // 剧本环节两个 + 美术环节(T15)五个 + 参考链回路(T16)两个 + 发布(T18)一个。
+    // 剧本环节两个 + 美术环节(T15)五个 + 参考链回路(T16)两个 + 发布(T18)一个
+    // + 项目工作周期 / 设定集 / 场景编辑 / 音频接线 / 试玩 / 快照(T20)六个。
+    // **这份清单是显式的**:新增一个工具必须在这里露面,漏一个就红 ——
+    // 于是"某个动作悄悄多了个 agent 入口"不可能没人看见(审读戳那条红线靠的就是它)。
     expect(tools.map((tool) => tool.name).sort()).toEqual([
       'galfree_art_queue',
       'galfree_character_art',
+      'galfree_create_project',
+      'galfree_edit_scene',
       'galfree_fill_missing_art',
       'galfree_generate_image',
       'galfree_generate_scene',
       'galfree_image_channel',
+      'galfree_playtest',
       'galfree_project_status',
       'galfree_publish',
       'galfree_reference_chain',
       'galfree_reroll_image',
+      'galfree_snapshot',
+      'galfree_story_bible',
+      'galfree_wire_audio',
     ])
 
     // T18:发布可以先只看前置检查(readiness_only),构建是可选的动作。
@@ -256,5 +265,43 @@ describe('agent 工具(T10)', () => {
     expect(out).toContain('还没有出图任务')
     const noArgs = await tools.find((tool) => tool.name === 'galfree_reroll_image')!.execute({})
     expect(noArgs).toContain('task_id 或 slot')
+  })
+
+  // ─── AC3:审读戳的 agent 入口**不存在**(ADR-0008 的红线)───────────────
+
+  it('AC3 工具面里没有审读戳入口,而且接缝上 agent 也盖不了(两道都要有)', async () => {
+    const names = register().map((tool) => tool.name)
+    // ① **存在性**:名字里不许有"盖章/认可"这一类动作。
+    //    这一条之所以有力,是因为上面那份工具名清单是**显式**的 —— 新增一个工具
+    //    不可能不被看见,漏加也红。
+    expect(names.filter((name) => /stamp|approve|review|定稿|审读/.test(name))).toEqual([])
+    // 也没有把盖戳藏进别的工具的参数里(例如 `galfree_edit_scene` 的 edit 里)。
+    const editScene = register().find((tool) => tool.name === 'galfree_edit_scene')!
+    expect(JSON.stringify(editScene.parameters)).not.toMatch(/stamp|approve/i)
+
+    // ② **行为**:就算有人接错线,接缝也会拒 —— 三个戳动作对 agent 一律 stamp-forbidden。
+    //    这一半才是真的保证:名字清单只能防"看不见的入口",接缝才能防"真的盖上"。
+    await expect(service.stampScene('tools', 'start', { via: 'agent' })).rejects.toMatchObject({ code: 'stamp-forbidden' })
+    await expect(service.stampSlot('tools', 'xiao_tang smile', { via: 'agent' })).rejects.toMatchObject({ code: 'stamp-forbidden' })
+    await expect(service.stampBible('tools', { via: 'agent' })).rejects.toMatchObject({ code: 'stamp-forbidden' })
+
+    // ③ 人盖是通的(不是"谁都盖不了"—— 那只是把功能关了)。
+    await service.stampScene('tools', 'start', { via: 'human' })
+    expect((await service.progress('tools')).scenes.find((scene) => scene.label === 'start')?.stamp).toBe('approved')
+  })
+
+  it('T20 六个新工具的参数契约:必填项与"可选但要解释"的地方都对', () => {
+    const tools = register()
+    const required = (name: string): string[] | undefined => tools.find((tool) => tool.name === name)!.parameters.required
+    // 项目操作:action 必填;名字之类按 action 分,所以不设必填(执行期给可执行的拒绝)。
+    expect(required('galfree_create_project')).toEqual(['action'])
+    expect(required('galfree_story_bible')).toEqual(['action'])
+    expect(required('galfree_edit_scene')).toEqual(['action', 'label'])
+    expect(required('galfree_wire_audio')).toEqual(['action'])
+    expect(required('galfree_playtest')).toBeUndefined()
+    expect(required('galfree_snapshot')).toEqual(['action', 'path'])
+    // 编辑指令是结构化对象(不是自由文本),外观卡也是。
+    expect(tools.find((tool) => tool.name === 'galfree_edit_scene')!.parameters.properties.edit?.type).toBe('object')
+    expect(tools.find((tool) => tool.name === 'galfree_story_bible')!.parameters.properties.characters?.type).toBe('array')
   })
 })

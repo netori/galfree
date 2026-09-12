@@ -299,7 +299,7 @@ describe('agent 流程指引(T19)', () => {
       }
     })
 
-    it('工具面与注册表同源:注册出来的工具要么是某环的入口,要么是查询工具', () => {
+    it('工具面与注册表同源:注册出来的工具要么是某环的入口,要么是横跨环节的工具', () => {
       // 真注册一次拿**真名**(模型看到的工具面):名字写错一个字母会在这里红,
       // 而不是静默渲染成"目前没有 agent 入口"(那是反方向的谎)。
       const registry = { tools: [] as Array<{ name: string }>, register(tool: unknown) { registry.tools.push(tool as { name: string }); return () => {} } }
@@ -308,14 +308,38 @@ describe('agent 流程指引(T19)', () => {
       expect(registered.length).toBeGreaterThan(0)
 
       const claimed = new Set(GALFREE_WORKFLOW.flatMap((stage) => stage.tools))
-      // "读现状 / 查队列"这类横跨所有环节的工具:不进任何一环的入口列表,是**显式**的例外。
-      const queries = new Set(['galfree_project_status', 'galfree_art_queue', 'galfree_reference_chain'])
+      // **横跨所有环节**的工具(读现状 / 查队列 / 查历史、以及回滚这种随时可用的动作):
+      // 它们不属于任何一环,所以在这里**显式**列出来 —— 新工具要么被某一环认领,要么进这张表,
+      // 两条都不占就红(提醒作者:要不要在指引里给它一个位置?)。
+      const crossCutting = new Set([
+        'galfree_project_status',
+        'galfree_art_queue',
+        'galfree_reference_chain',
+        'galfree_snapshot',
+      ])
       for (const name of registered) {
-        expect(claimed.has(name) || queries.has(name), `${name} 既不是任何环节的入口,也不在查询工具白名单里`).toBe(true)
+        expect(claimed.has(name) || crossCutting.has(name), `${name} 既不是任何环节的入口,也不在横跨环节的白名单里`).toBe(true)
       }
       // 反向:已经注册的入口,指引必须点名它(名字写错 → 上面那条先红;这条保证"说有的确实有")。
       const text = registeredText({ hasTool: (name) => registered.includes(name) })
       for (const name of claimed) if (registered.includes(name)) expect(text).toContain(name)
+    })
+
+    it('T20 之后:七个环节里除了"发布前的取舍",每一环都真的有 agent 入口了', () => {
+      // 这条是 T19 与 T20 的接缝:指引里"目前没有 agent 入口"的环节,应当随工具补齐而变少。
+      // 注册全部工具后,除"设定集定稿 / 试玩认读"这类**人的判断**外,流程每一步都有入口。
+      const registry = { tools: [] as Array<{ name: string }>, register(tool: unknown) { registry.tools.push(tool as { name: string }); return () => {} } }
+      registerGalfreeTools({ tools: registry } as unknown as Parameters<typeof registerGalfreeTools>[0], service)
+      const registered = new Set(registry.tools.map((tool) => tool.name))
+      const noEntry = GALFREE_WORKFLOW
+        .filter((stage) => stage.tools.length > 0 && !stage.tools.some((tool) => registered.has(tool)))
+        .map((stage) => stage.name)
+      // 每一环都列了工具,而且现在**注册面覆盖了全部环节**。
+      expect(noEntry).toEqual([])
+      for (const stage of GALFREE_WORKFLOW) expect(stage.tools.length).toBeGreaterThan(0)
+      // 渲染出来也就不该再有"目前没有 agent 入口"了(那句是被 T20 兑现掉的)。
+      const text = registeredText({ hasTool: (name) => registered.has(name) })
+      expect(text).not.toMatch(/没有 agent 入口/)
     })
 
     it('指引不写死数字:判据只以字段形态出现', () => {

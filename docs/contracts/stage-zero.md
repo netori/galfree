@@ -963,6 +963,67 @@ playbook(`src/service/playbook.ts`)。
   (与面板的人工验收同一批)。
 - **指引只讲流程,不讲台词**:它不替 agent 编剧情,也不改任何接缝判断。
 
+## 全流程工具面(T20 / #28 之后追加)
+
+T19 之后新会话知道**该按什么顺序做**,但其中一半环节**没有 agent 入口**(只能人在工作台点)——
+所以那段指引里到处是"目前没有 agent 入口 —— 请人在工作台做"。T20 把入口补齐:工具面从 10 个
+长到 **16 个**,七个环节全部有 agent 入口。
+
+### 新增的六个工具(每个都是接缝的搬运工)
+
+| 工具 | 搬运 | 要点 |
+|---|---|---|
+| `galfree_create_project` | `createProject` / `listProjects` / `setActive` | `action: create / list / activate`;**删除不做** |
+| `galfree_story_bible` | `writeBible` / `importOutline` / `bible` + `bibleOutline` | `action: read / write / import_outline`;**定稿戳仍只有人能盖** |
+| `galfree_edit_scene` | `sceneForm` / `editScene` | `action: read / edit`;`edit` 是结构化指令(五种 kind) |
+| `galfree_wire_audio` | `audioPool` + `editScene(setAudio)` | `action: pool / wire / stop`;写完当场报悬空 |
+| `galfree_playtest` | `playtestStart`(含 `from`) | 真跑真窗口;退出码 / traceback 原样回传 |
+| `galfree_snapshot` | `snapshotHistory` / `snapshotDiff` / `snapshotRollback` | `action: history / diff / rollback`;回滚也是写(留下一条新快照) |
+
+### 工具面要用、而接缝不拥有的那点环境事实
+
+新建项目要**父目录**与 **SDK 界面模板**,这两样由宿主设置决定(面板经 `deps.config` / `deps.sdk`
+拿同一份)。所以 `registerGalfreeTools(ctx, service, ports)` 多了第三个参数
+`GalfreeToolPorts = { defaultProjectsRoot?, sdkDir? }`,入口从设置里现取。缺省 = 两样都没有,
+于是 `createProject` 如实拒绝(`no-projects-root` / `sdk-ui-missing`),**不猜一个目录、不假装
+拷到了界面文件**。
+
+### 一条**没有**补的入口:`relocateScene`(搬家)
+
+票面的表里列了 `relocateScene`,但接缝上它是 `#requireHuman`(`generate.test.ts` 断言 agent 被拒,
+面板路由传 `via:'human'`):它**重写的是人的手写文件**(把 `script.rpy` 里的 label 段搬进生成目录)。
+所以 T20 **不暴露它** —— 给 agent 一个永远会被拒的入口,或者让它谎称自己是人,两条都不能接受。
+可走的路有两条,都不需要搬家:手写的场景用 `editScene(replaceSource)` 直接改那个文件;
+要让某个 label 变成"可生成的场景",请人在工作台点「搬进生成目录」。
+**要改这条(给 agent 搬家权)** 先提 ADR 修订 —— 那是放宽 agent 的权力,不是实现细节。
+
+### AC1 的证据:一段脚本化的会话回放(快带)
+
+`src/service/tools-flow.test.ts` 的最后一条**只经工具调用**走完:建项目 → 写设定集 →
+(人盖定稿戳)→ 把 start 接到第一场 → 逐场生成 → 补素材 → 接线音频 → 试玩 → 发布。
+中间**只有两步是人做的**(盖定稿戳、把音频文件丢进 `game/`),其余全部经工具 ——
+终态断言板上全绿(`lint.ok` / `orphans` 空 / `missingSlots` 0 / `audio.missing` 空 /
+`playtest.state = pass` / `bible.stamp = approved` / `publish.ok` 且 `stale:false`),产物在项目源树之外。
+夹具全是注入端口(假 SDK / 假图像上游 / 假试玩 / 假构建),几十毫秒级。
+
+### AC3 的红线:两道守卫
+
+审读戳**没有、也不会有** agent 入口,这一点由**两道**一起守:
+
+1. **存在性**:工具名清单在 `tools.test.ts` 里是**显式**的(新增一个工具必须露面);
+   另有断言 `名字里不许有 stamp/approve/审读/定稿`,以及"盖戳没有藏进别的工具的参数里"。
+   T19 那份"注册出来的工具要么被某一环认领、要么在横跨环节的白名单里"的守卫也顺带看着它。
+2. **行为**:`stampScene` / `stampSlot` / `stampBible` 对 `via:'agent'` 一律 `stamp-forbidden`,
+   人盖是通的。名字清单只能防"看不见的入口",接缝才能防"真的盖上"。
+
+验红:临时注册一个 `galfree_stamp_scene` → 三条守卫同时红(名字清单 / 红线段言 / T19 认领检查)。
+
+### 指引随工具面自动变
+
+`GALFREE_WORKFLOW` 里每一环挂的工具名是**意图**(可以超前于实现),渲染时只露真的注册了的。
+T20 补齐之后,指引里"目前没有 agent 入口"那句**自动消失**(有一条守卫断言它确实消失了:
+`playbook.test.ts` 的"七个环节里每一环都真的有 agent 入口了")。
+
 ## 模板的界面层(T7 之后补齐的一块,实测换来的)
 **新建项目必须整份带上 SDK 的 GUI 模板**(`screens.rpy` / `gui.rpy` / `guisupport.rpy` / `testcases.rpy`),
 外加一份**项目内**的中文字体。这不是"锦上添花",是"能不能跑"的问题 —— 下面三条都是实测:

@@ -14,14 +14,34 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { GalfreeError } from './error.ts'
 import type { ProjectService } from './project-service.ts'
+import type { BibleChapter } from './bible.ts'
+import type { SceneEdit } from './scene-form.ts'
 
 function describe(error: unknown): string {
   if (error instanceof GalfreeError) return `[${error.code}] ${error.message}`
   return error instanceof Error ? error.message : String(error)
 }
 
+/**
+ * 工具面要用、而接缝不拥有的那点**环境事实**(与面板同一个来源:设置文档)。
+ *
+ * 只有两件,都是"新建项目"必需的 —— 接缝的 `createProject` 要父目录与 SDK 界面模板,
+ * 而这两样由宿主设置决定(面板经 `deps.config` / `deps.sdk` 拿同一份)。缺省 = 都没有,
+ * 于是 `galfree_create_project` 如实拒绝并说清怎么补(不猜一个目录、不假装拷到了界面文件)。
+ */
+export interface GalfreeToolPorts {
+  /** 新建项目的默认父目录(空 = 没配,让调用方显式给 `projects_root`)。 */
+  defaultProjectsRoot?: () => string
+  /** 钉版 SDK 目录(新建项目要从它拷 `screens.rpy` 等界面文件)。 */
+  sdkDir?: () => string
+}
+
 /** 注册 GALFree 的 agent 工具;返回 disposer(cordis effect 用)。 */
-export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: unknown) => () => void } }, service: ProjectService): () => void {
+export function registerGalfreeTools(
+  ctx: Context & { tools: { register: (tool: unknown) => () => void } },
+  service: ProjectService,
+  ports: GalfreeToolPorts = {},
+): () => void {
   const disposers: Array<() => void> = []
 
   disposers.push(ctx.tools.register(defineTool({
@@ -574,8 +594,530 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
     },
   })))
 
+  // ─── 项目工作周期(T20):建项目 / 列项目 / 切激活位 ──────────────────
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_create_project',
+    description: [
+      '项目工作周期:新建一个 GALFree 项目 / 列出全部项目 / 切换激活项目。',
+      '**新建**从插件模板落一个真的 Ren\'Py 项目目录(界面文件从钉版 SDK 拷),并立刻切为激活项目;',
+      '父目录取 `projects_root`,没给就用设置里的默认父目录 —— 两处都没有会如实拒绝,请人先在设置里填。',
+      '**删除不做**(这一票没有这个动作):项目目录是人的东西,删只有在文件管理器里删。',
+      '这是全流程的第一步:没有项目时,别的 galfree 工具都只会让你先建一个。',
+    ].join(' '),
+    parameters: {
+      action: { type: 'string', required: true, description: 'create = 新建;list = 列出;activate = 切换激活项目' },
+      name: { type: 'string', description: 'create 用:项目名(slug:小写字母/数字/下划线/连字符)' },
+      title: { type: 'string', description: 'create 用:显示标题(缺省 = 项目名)' },
+      projects_root: { type: 'string', description: 'create 用:父目录绝对路径(省略 = 用设置里的默认父目录)' },
+      project: { type: 'string', description: 'activate 用:项目 id 或唯一 name' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const action = String(args.action ?? '')
+      try {
+        if (action === 'list') {
+          const projects = await service.listProjects()
+          return JSON.stringify({
+            projects: projects.map((project) => ({
+              id: project.id, name: project.name, title: project.title,
+              root: project.root, active: project.active, missing: project.missing,
+            })),
+            active: projects.find((project) => project.active)?.name ?? null,
+          }, null, 2)
+        }
+        if (action === 'activate') {
+          const ref = String(args.project ?? '')
+          if (ref === '') return 'activate 需要 `project`(项目 id 或唯一 name);先 action: "list" 看一眼。'
+          const hit = (await service.listProjects()).find((project) => project.id === ref || project.name === ref)
+          if (hit === undefined) {
+            const known = (await service.listProjects()).map((project) => project.name)
+            return `没有这个项目:${ref}${known.length === 0 ? '(现在一个项目都没有,先 action: "create")' : `(现有:${known.join('、')})`}`
+          }
+          await service.setActive(hit.id)
+          return JSON.stringify({ ok: true, active: { id: hit.id, name: hit.name, root: hit.root } }, null, 2)
+        }
+        if (action !== 'create') {
+          return `不认识的 action:${action || '(空)'} —— 只有 create / list / activate(删除不做)。`
+        }
+
+        const name = String(args.name ?? '')
+        if (name === '') return 'create 需要 `name`(slug:小写字母/数字/下划线/连字符)。'
+        const projectsRoot = String(args.projects_root ?? '') !== '' ? String(args.projects_root) : (ports.defaultProjectsRoot?.() ?? '').trim()
+        if (projectsRoot === '') {
+          throw new GalfreeError('no-projects-root', '未指定项目父目录:给 `projects_root`,或请人在设置里填「新建项目的默认父目录」')
+        }
+        const project = await service.createProject({
+          projectsRoot,
+          name,
+          ...(String(args.title ?? '') === '' ? {} : { title: String(args.title) }),
+          // 界面文件从钉版 SDK 的 GUI 模板拷 —— 少了它们项目连关窗都会崩(见契约「模板的界面层」)。
+          ...(ports.sdkDir === undefined ? {} : { sdkDir: ports.sdkDir() }),
+        })
+        return JSON.stringify({
+          ok: true,
+          project: { id: project.id, name: project.name, title: project.title, root: project.root },
+          next: '立刻可以写设定集(galfree_story_bible),然后请人盖「设定定稿」戳 —— 没盖章时逐场生成会被 bible-not-final 拒。',
+        }, null, 2)
+      } catch (error) {
+        return `项目操作未执行:${describe(error)}`
+      }
+    },
+  })))
+
+  // ─── 设定集(T20):它是下游所有生成的唯一记忆源 ──────────────────────
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_story_bible',
+    description: [
+      '设定集(项目的第一记忆源):读 / 写 / 导入人写的大纲原文。',
+      '**write** 写世界观与章节(存**意图**,不存正文;单字段上限见接缝),给 `characters` 会同步落**角色登记簿**',
+      '(同一张脸只有一处说明)。写设定集是**设定改动**,不是主观认可 —— agent 可以写。',
+      '**import_outline** 只搬**人写的**原文,逐字落盘:不要顺手改写/整理它(原文即权威)。',
+      '**「设定定稿」戳只有人能盖**:没盖章时逐场生成会被 `bible-not-final` 拒 —— 那不是故障,是"去请人盖戳"。',
+      '改过已定稿的设定集,戳会自动变成"待复审",下游生成同样被拒。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      action: { type: 'string', required: true, description: 'read = 读;write = 写; import_outline = 导入人写的大纲原文' },
+      theme: { type: 'string', description: 'write 用:一句话主题' },
+      world: { type: 'string', description: 'write 用:世界观(人的意图,不是叙述正文)' },
+      chapters: {
+        type: 'array',
+        description: 'write 用:章节骨架(**整段替换**,不做逐字段合并)',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            id: { type: 'string', required: true, description: '章节 id(slug,如 ch1)' },
+            title: { type: 'string', description: '章节标题' },
+            outline: { type: 'string', description: '这一章的梗概(存意图,不抄正文)' },
+            scenes: { type: 'array', description: '这一章包含的场景 label', items: { type: 'string' } },
+          },
+        },
+      },
+      characters: {
+        type: 'array',
+        description: 'write 用:角色设定卡(同步落角色登记簿;外观是**结构化字段**,不是散文)',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            id: { type: 'string', required: true, description: '角色 id(登记簿 key,slug,如 xiao_tang)' },
+            name: { type: 'string', required: true, description: '显示名(如 小棠)' },
+            voice: { type: 'string', description: '.rpy 里 define 的变量名(如 xiao_tang)—— 对剧本的引用' },
+            appearance: {
+              type: 'object',
+              description: '外观设定卡(生成时的一致性锚)',
+              additionalProperties: false,
+              properties: {
+                hair: { type: 'string', description: '发色/发型' },
+                eyes: { type: 'string', description: '瞳色' },
+                outfit: { type: 'string', description: '服装' },
+                build: { type: 'string', description: '体型/年龄感' },
+                notes: { type: 'string', description: '其他外观要点' },
+              },
+            },
+            style_anchor: { type: 'string', description: '画风锚:出图时强制带上的风格提示词' },
+            note: { type: 'string', description: '制作备注(不是叙述内容)' },
+          },
+        },
+      },
+      text: { type: 'string', description: 'import_outline 用:人写的原文(**逐字**落盘,不要改写)' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目:先建一个(galfree_create_project)。'
+      const action = String(args.action ?? '')
+      try {
+        if (action === 'read') {
+          const [doc, outline, progress] = await Promise.all([
+            service.bible(active),
+            service.bibleOutline(active),
+            service.progress(active),
+          ])
+          return JSON.stringify({
+            bible: doc,
+            outline,
+            board: progress.bible,
+            outlineFingerprintOk: progress.bible.outlineFingerprintOk,
+            next: progress.bible.stamp === 'approved' ? null : '还没定稿:请人在工作台盖「设定定稿」戳,盖上才能逐场生成。',
+          }, null, 2)
+        }
+
+        if (action === 'import_outline') {
+          const text = String(args.text ?? '')
+          if (text.trim() === '') throw new GalfreeError('bible-invalid', '大纲原文不能为空')
+          await service.importOutline(active, text)
+          const progress = await service.progress(active)
+          return JSON.stringify({
+            ok: true,
+            chars: text.length,
+            board: progress.bible,
+            next: '原文已逐字落盘。要让它变成可生成的骨架,再 write 章节与角色(原文不要改)。',
+          }, null, 2)
+        }
+
+        if (action !== 'write') {
+          return `不认识的 action:${action || '(空)'} —— 只有 read / write / import_outline。`
+        }
+
+        // 有给的字段才写(缺省 = 不动那一格);章节**整段替换**(接缝的口径,不做逐字段合并)。
+        await service.writeBible(active, {
+          ...(args.theme === undefined ? {} : { theme: String(args.theme) }),
+          ...(args.world === undefined ? {} : { world: String(args.world) }),
+          ...(args.chapters === undefined ? {} : {
+            // `scenes` 在这张工具契约里是可选(章节先立着、场景还没定是常态);
+            // 接缝那边它是必填数组,所以这里补个空数组 —— 形状判断仍归接缝。
+            chapters: (args.chapters as Array<Record<string, unknown>>).map((chapter) => ({
+              ...chapter,
+              scenes: Array.isArray(chapter.scenes) ? chapter.scenes : [],
+            })) as BibleChapter[],
+          }),
+          // 角色设定卡:工具面用 snake_case(`style_anchor`)对外,登记簿用 camelCase(`styleAnchor`);
+          // 映射住在这里,判断(什么算合法记录)仍在接缝(`upsertCharacter`)。参考链不在这里写
+          // —— 那是 `galfree_reference_chain` 的事(同一张脸只有一条链)。
+          ...(args.characters === undefined ? {} : {
+            characters: (args.characters as Array<Record<string, unknown>>).map((entry) => ({
+              id: String(entry.id ?? ''),
+              name: String(entry.name ?? ''),
+              ...(entry.voice === undefined ? {} : { voice: String(entry.voice) }),
+              appearance: (entry.appearance ?? {}) as Record<string, string>,
+              ...(entry.style_anchor === undefined ? {} : { styleAnchor: String(entry.style_anchor) }),
+              references: [],
+              ...(entry.note === undefined ? {} : { note: String(entry.note) }),
+            })) as never,
+          }),
+        }, { via: 'agent' })
+
+        const progress = await service.progress(active)
+        return JSON.stringify({
+          ok: true,
+          bible: progress.bible,
+          characters: (await service.characters(active)).map((record) => record.id),
+          next: progress.bible.stamp === 'approved'
+            ? null
+            : '请人在工作台盖「设定定稿」戳:没盖章时生成会被 bible-not-final 拒(这是设计,不是故障)。',
+        }, null, 2)
+      } catch (error) {
+        return `设定集操作未执行:${describe(error)}`
+      }
+    },
+  })))
+
+  // ─── 场景编辑(T20):与面板「场景」卡同一条写路 ──────────────────────
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_edit_scene',
+    description: [
+      '逐行编辑一场戏(读行模型 / 改一行 / 整段换源),与工作台「场景」卡**同一条写路**:经写网关 + 自动快照 + 归属规则。',
+      '**read** 给行模型(每行是什么:对白/图像/跳转/音频…)与源文本,改之前先看它。',
+      '**edit** 的 `edit` 是一个结构化指令:`setDialogue` / `setImage` / `insertStatement` / `deleteStatement` / `replaceSource`。',
+      '**结构编辑只对生成目录(`game/scenes/<label>.rpy`)里的场景开放** —— 手写文件里的场景要么用 `replaceSource`',
+      '(直接改那个文件),要么请人在工作台点「搬进生成目录」(搬家重写的是人的手写文件,**只能由人发起**)。',
+      '改完不会抛错:返回落盘路径、解析/校验结果与问题清单 —— 照它当场修,别换个名字绕开。',
+      '接线音频用 `galfree_wire_audio`(它写的是同一种行,但会把池与悬空引用一并报回来)。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      action: { type: 'string', required: true, description: 'read = 读行模型;edit = 应用一条编辑指令' },
+      label: { type: 'string', required: true, description: '场景 label(如 scene_one)' },
+      edit: {
+        type: 'object',
+        description: 'edit 用:一条结构化编辑指令(kind 决定其余字段)',
+        additionalProperties: false,
+        properties: {
+          kind: { type: 'string', required: true, description: 'setDialogue / setImage / insertStatement / deleteStatement / replaceSource' },
+          line: { type: 'number', description: 'setDialogue / setImage / deleteStatement:改哪一行(行号见 read 的 rows)' },
+          speaker: { type: 'string', description: 'setDialogue:说话人变量名(空 = 旁白)' },
+          text: { type: 'string', description: 'setDialogue:台词(只写台词,不写引号)' },
+          role: { type: 'string', description: 'setImage:show / scene / hide' },
+          tag: { type: 'string', description: 'setImage:图像 tag(如 bg / xiao_tang)' },
+          attributes: { type: 'array', description: 'setImage:属性(如 ["smile"])', items: { type: 'string' } },
+          after_line: { type: 'number', description: 'insertStatement:插在这一行之后' },
+          anchor: { type: 'string', description: 'insertStatement:插在这一行**原文**之后(比行号稳;要插在某行之前,锚它的上一行)' },
+          source: { type: 'string', description: 'insertStatement / replaceSource:要写进去的 `.rpy` 源文本' },
+        },
+      },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目:先建一个(galfree_create_project)。'
+      const label = String(args.label ?? '')
+      if (label === '') return '需要 `label`(要编辑哪一场;先 galfree_project_status 看有哪些)。'
+      try {
+        if (String(args.action ?? '') === 'read') {
+          const form = await service.sceneForm(active, label)
+          return JSON.stringify({
+            label: form.label,
+            path: form.path,
+            file: form.file,
+            readOnly: form.readOnly,
+            readOnlyReason: form.readOnlyReason ?? null,
+            rows: form.rows,
+            source: form.source,
+          }, null, 2)
+        }
+        if (String(args.action ?? '') !== 'edit') {
+          return `不认识的 action:${String(args.action ?? '') || '(空)'} —— 只有 read / edit。`
+        }
+        const edit = sceneEditOf(args.edit)
+        if (edit === null) return '需要 `edit`(一条结构化编辑指令,kind 决定其余字段;先 action: "read" 看行号)。'
+        const report = await service.editScene(active, { label, edit })
+        return JSON.stringify({
+          ok: report.parseOk && report.issues.every((issue) => issue.severity !== 'error'),
+          path: report.path,
+          parseOk: report.parseOk,
+          validation: { validator: report.validation.validator, ok: report.validation.ok },
+          issues: report.issues.map((issue) => ({ severity: issue.severity, code: issue.code, file: issue.file, line: issue.line, message: issue.message })),
+          lint: report.progress.lint,
+          scene: report.progress.scenes.find((scene) => scene.label === label) ?? null,
+          next: '改完请人读一遍、盖场景戳才算这一幕定稿(戳只有人能盖)。',
+        }, null, 2)
+      } catch (error) {
+        return `场景编辑未执行:${describe(error)}`
+      }
+    },
+  })))
+
+  // ─── 音频接线(T20):池是派生的,接线就是写 `.rpy` 那一行 ─────────────
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_wire_audio',
+    description: [
+      '音频:看池 / 接线 / 停声道。**BGM 与 SE 是接进来的,不是生成的**(这一票不做音乐生成与 TTS)。',
+      '**pool** 列 `game/` 下的音频文件(池是派生的:人把文件丢进去就有它,删掉就没了)与引用处境。',
+      '**wire / stop** 就是往场景里写一行 `play music "audio/rain.ogg" loop` / `stop music` —— 引用是',
+      '**相对 `game/` 的路径**。写完当场把池与引用处境报回来:文件不在池里会**立刻**显示成悬空',
+      '(板上是 error,发布前置也会被它拦下),别留着不管。',
+      '试听靠试玩;认可靠人盖场景戳。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      action: { type: 'string', required: true, description: 'pool = 看池与引用;wire = 接一行 play;stop = 停声道' },
+      label: { type: 'string', description: 'wire / stop 用:写在哪一场' },
+      line: { type: 'number', description: 'wire / stop 用:写在哪一行(galfree_edit_scene 的 read 给行号)' },
+      channel: { type: 'string', description: 'wire / stop 用:music / sound / voice' },
+      file: { type: 'string', description: 'wire 用:音频文件(相对 game/ 的路径,如 audio/rain.ogg)' },
+      loop: { type: 'boolean', description: 'wire 用:循环播放(默认 false)' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目:先建一个(galfree_create_project)。'
+      const action = String(args.action ?? '')
+      try {
+        if (action === 'pool') {
+          const pool = await service.audioPool(active)
+          return JSON.stringify({
+            files: pool.files.map((file) => file.path),
+            references: pool.references.map((reference) => ({ ref: reference.ref, scene: reference.scene, line: reference.line, channel: reference.channel, found: reference.found })),
+            missing: pool.missing.map((reference) => ({ ref: reference.ref, scene: reference.scene, line: reference.line })),
+            unused: pool.unused,
+            note: '接线的写法:`play music "audio/rain.ogg" [loop]` / `stop music`;引用是**相对 game/ 的路径**。',
+          }, null, 2)
+        }
+        if (action !== 'wire' && action !== 'stop') {
+          return `不认识的 action:${action || '(空)'} —— 只有 pool / wire / stop。`
+        }
+        const label = String(args.label ?? '')
+        if (label === '') return `${action} 需要 \`label\`(写在哪一场)。`
+        const channel = String(args.channel ?? '')
+        if (!['music', 'sound', 'voice'].includes(channel)) return '`channel` 只能是 music / sound / voice。'
+        const line = Number(args.line ?? 0)
+        if (!Number.isInteger(line) || line < 1) return '`line` 需要行号(先 galfree_edit_scene 的 read 看 rows)。'
+
+        await service.editScene(active, {
+          label,
+          edit: {
+            kind: 'setAudio',
+            line,
+            action: action === 'stop' ? 'stop' : 'play',
+            channel: channel as 'music' | 'sound' | 'voice',
+            file: action === 'stop' ? null : String(args.file ?? ''),
+            loop: args.loop === true,
+          },
+        })
+        const pool = await service.audioPool(active)
+        const missing = pool.missing.map((reference) => ({ ref: reference.ref, scene: reference.scene, line: reference.line }))
+        return JSON.stringify({
+          ok: true,
+          wrote: action === 'stop' ? `stop ${channel}` : `play ${channel} "${String(args.file ?? '')}"${args.loop === true ? ' loop' : ''}`,
+          audio: {
+            files: pool.files.map((file) => file.path),
+            references: pool.references.map((reference) => ({ ref: reference.ref, scene: reference.scene, line: reference.line, channel: reference.channel, found: reference.found })),
+            missing,
+            unused: pool.unused,
+          },
+          next: missing.length === 0
+            ? '引用都落地了。试听靠试玩(galfree_playtest);认可靠人盖场景戳。'
+            : `**悬空引用**:${missing.map((entry) => `${entry.ref}(${entry.scene}:${entry.line})`).join('、')} —— 把文件放进 game/(相对路径照上面写的那个),或改成池里已有的路径。`,
+        }, null, 2)
+      } catch (error) {
+        return `音频操作未执行:${describe(error)}`
+      }
+    },
+  })))
+
+  // ─── 快照历史与回滚(T20):spec US22 说"从工作台/对话里都能查" ─────────
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_snapshot',
+    description: [
+      '快照历史 / 版本对比 / 回滚(**每个写批自动一条快照**,作者 GALFree;永不 push)。',
+      '**history** 给一个文件的历次快照(最新在前,带 commit / 说明 / 时间);',
+      '**diff** 给两个版本之间改了什么(原话,不是摘要);',
+      '**rollback** 把一个文件回滚到历史版本 —— 它**也是写**:经网关,于是回滚本身也留下一条新快照(可以再回滚回去)。',
+      '回滚会覆盖当前内容:回之前先 `diff` 看清要丢掉什么。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      action: { type: 'string', required: true, description: 'history = 历次快照;diff = 两版对比;rollback = 回滚到某一版' },
+      path: { type: 'string', required: true, description: '项目内相对路径(如 game/scenes/scene_one.rpy / .studio/bible/bible.json)' },
+      from: { type: 'string', description: 'diff 用:起始 commit(history 里的 commit)' },
+      to: { type: 'string', description: 'diff 用:目标 commit;rollback 用:回滚到哪个 commit' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目:先建一个(galfree_create_project)。'
+      const path = String(args.path ?? '')
+      if (path === '') return '需要 `path`(项目内相对路径)。'
+      const action = String(args.action ?? '')
+      try {
+        if (action === 'history') {
+          const entries = await service.snapshotHistory(active, path)
+          return JSON.stringify({
+            path,
+            entries: entries.map((entry) => ({ commit: entry.commit, subject: entry.subject, author: entry.author, at: entry.at })),
+            note: entries.length === 0 ? '这个文件还没有快照(没写过?路径对不对?)' : '最新在前;diff/rollback 用其中的 commit。',
+          }, null, 2)
+        }
+        if (action === 'diff') {
+          const from = String(args.from ?? '')
+          const to = String(args.to ?? '')
+          if (from === '' || to === '') return 'diff 需要 `from` 与 `to`(两个 commit;先 action: "history")。'
+          return JSON.stringify({ path, from, to, diff: await service.snapshotDiff(active, path, from, to) }, null, 2)
+        }
+        if (action === 'rollback') {
+          const to = String(args.to ?? '')
+          if (to === '') return 'rollback 需要 `to`(回滚到哪个 commit;先 action: "history")。'
+          const result = await service.snapshotRollback(active, path, to)
+          return JSON.stringify({
+            ok: true,
+            path,
+            to,
+            batchId: result.batchId,
+            next: '回滚本身也是一条快照:再 action: "history" 能看到它,想反悔就回滚到回滚前那一版。',
+          }, null, 2)
+        }
+        return `不认识的 action:${action || '(空)'} —— 只有 history / diff / rollback。`
+      } catch (error) {
+        return `快照操作未执行:${describe(error)}`
+      }
+    },
+  })))
+
+  // ─── 试玩(T20):用钉版 SDK 真跑一次,退出回传 ───────────────────────
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_playtest',
+    description: [
+      '一键试玩:用**钉版 SDK** 真跑一次游戏(会开真窗口,退出后回传)。',
+      '技术通过是**推导**(退出码 + 日志干净),不是人盖的戳:退出码非 0 或日志里有 traceback 就如实报失败,',
+      '并把 traceback 摘要带回来给你照它修。**"玩过了、行"只有人能说**(盖场景戳)—— 技术通过不等于好玩。',
+      '`from` 给一个场景 label 就**从那一场开始**(做法是在副本里覆写 start,你的项目一个字节都不动)。',
+      'SDK 没就绪会如实拒绝(`sdk-not-ready`):先去工作台/设置完成 SDK 供给。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      from: { type: 'string', description: '从哪一场开始试玩(省略 = 从头);label 必须在剧本里存在' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目:先建一个(galfree_create_project)。'
+      try {
+        const run = await service.playtestStart(active, String(args.from ?? '') === '' ? null : String(args.from))
+        const progress = await service.progress(active)
+        const board = progress.playtest
+        return JSON.stringify({
+          ok: run.technicalPass,
+          exitCode: run.exitCode,
+          technicalPass: run.technicalPass,
+          traceback: run.traceback,
+          from: run.from ?? null,
+          at: run.at,
+          board: board === null ? null : { state: board.state, technicalPass: board.technicalPass, from: board.from },
+          next: run.technicalPass
+            ? '技术通过。请人玩一遍并盖场景戳("玩过了、行"只有人能说);界面图也是这一刻生成进项目的。'
+            : `没通过,照 traceback 修完再跑一次:${run.traceback ?? '(没有 traceback,看退出码)'}`,
+        }, null, 2)
+      } catch (error) {
+        return `试玩未执行:${describe(error)}`
+      }
+    },
+  })))
+
   return () => {
     for (const dispose of disposers) dispose()
+  }
+}
+
+/**
+ * 工具面的 `edit` → 接缝的 `SceneEdit`。
+ *
+ * 这是**参数搬运**(适配器的本职):认不出来的 kind 返回 null(工具给出"怎么给"的说明),
+ * 形状/行号/归属这些判断一律留给接缝 —— 那边才是唯一真相。
+ */
+function sceneEditOf(raw: unknown): SceneEdit | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const edit = raw as Record<string, unknown>
+  const line = Number(edit.line ?? 0)
+  switch (String(edit.kind ?? '')) {
+    case 'setDialogue':
+      return { kind: 'setDialogue', line, speaker: String(edit.speaker ?? '') === '' ? null : String(edit.speaker), text: String(edit.text ?? '') }
+    case 'setImage':
+      return {
+        kind: 'setImage',
+        line,
+        role: String(edit.role ?? 'show') as 'show' | 'scene' | 'hide',
+        tag: String(edit.tag ?? ''),
+        attributes: Array.isArray(edit.attributes) ? edit.attributes.map(String) : [],
+      }
+    case 'insertStatement':
+      return {
+        kind: 'insertStatement',
+        ...(edit.anchor === undefined ? {} : { anchor: String(edit.anchor) }),
+        ...(edit.after_line === undefined ? {} : { afterLine: Number(edit.after_line) }),
+        source: String(edit.source ?? ''),
+      }
+    case 'deleteStatement':
+      return { kind: 'deleteStatement', line }
+    case 'replaceSource':
+      return { kind: 'replaceSource', source: String(edit.source ?? '') }
+    default:
+      return null
   }
 }
 

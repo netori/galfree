@@ -122,6 +122,21 @@ describe('设定集工作周期(T9)', () => {
     expect(progress.problems.some((problem) => problem.code === 'outline-fingerprint-mismatch')).toBe(true)
   })
 
+  it('章节形状坏掉 → 如实拒绝(bible-invalid),不是一句内部 TypeError', async () => {
+    // 这条是 T20 的工具面揭出来的:agent(以及面板的 `/bible/patch`)可以把章节当自由 JSON 送进来,
+    // 而 `scenes` 缺了会让指纹计算抛 `chapter.scenes is not iterable` —— 那是**内部错误**,
+    // 人看到的是 500 与一句莫名其妙的话。写之前就该按形状拦下。
+    await expect(service.writeBible('bible', {
+      chapters: [{ id: 'c1', title: '缺 scenes' } as never],
+    }, { via: 'agent' })).rejects.toMatchObject({ code: 'bible-invalid' })
+    await expect(service.writeBible('bible', {
+      chapters: [{ id: 'c2', title: 'scenes 不是数组', scenes: 'start' } as never],
+    }, { via: 'agent' })).rejects.toMatchObject({ code: 'bible-invalid' })
+    await expect(service.writeBible('bible', {
+      chapters: [{ id: 'c3', scenes: [] } as never],
+    }, { via: 'agent' })).rejects.toMatchObject({ code: 'bible-invalid' })
+  })
+
   it('定稿戳:人盖 / 设定集改动清戳(待复审)/ agent 无权限', async () => {
     await service.writeBible('bible', { theme: '雨天的重逢', world: '现代都市。', chapters: [], characters: [] }, { via: 'agent' })
 

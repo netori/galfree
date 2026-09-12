@@ -378,6 +378,11 @@ export function apply(ctx: Context, config?: Config): void {
       () => registerGalfreeTools(
         toolCtx as unknown as Parameters<typeof registerGalfreeTools>[0],
         service,
+        {
+          // 新建项目要用父目录与 SDK 界面模板 —— 与面板经 `deps.config` / `deps.sdk` 拿的是同一份设置。
+          defaultProjectsRoot: () => current().defaultProjectsRoot,
+          sdkDir: () => sdkDir(),
+        },
       ),
       'dsh-galfree: agent tools',
     )
