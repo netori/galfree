@@ -70,7 +70,7 @@ export function BibleCard({ bibleStamp, api, hasProject, sceneLabels, onChanged,
   const chapters: BibleChapterView[] = doc?.chapters ?? []
 
   return (
-    <section className={s.card} aria-label="设定集">
+    <section className={s.card} id="gf-bible-card" aria-label="设定集">
       <div className={s.cardHead}>
         <span className={s.cardTitle}>设定集</span>
         <span className={s.cardCount}>

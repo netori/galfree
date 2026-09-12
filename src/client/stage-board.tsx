@@ -5,9 +5,12 @@
  * (`scene.marks` / `scene.stampable` / `slot.approvable`)。加一行显示逻辑可以,
  * 加一条领域规则不行 —— 那种规则要长在 src/service/progress.ts 里,agent 工具面
  * 才能看到同一份(ADR-0002:独占逻辑零 UI 化)。
+ *
+ * 「下一步」(T21)同理:文案 / actor / 跳转目标全是 `progress.nextActions` 给的,
+ * 面板只负责把它画出来、把点击翻译成"滚到那一格 / 打开那一场"。
  */
 import { useState } from 'react'
-import type { ProgressView, SceneProgressView, StampTarget } from './types.ts'
+import type { NextActionView, ProgressView, SceneProgressView, StampTarget } from './types.ts'
 import { stampKey } from './types.ts'
 import { Chip, Seal, Spinner, relativeTime } from './ui.tsx'
 import s from './panel.module.css'
@@ -22,7 +25,39 @@ function markTone(severity: string): 'warn' | 'bad' | 'none' {
   return MARK_TONE[severity] ?? 'none'
 }
 
-export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, onPlaytestFrom, onRelocate, onOpenScene, hasProject }: {
+/**
+ * 「下一步」那一行(T21):把推导出来的行动清单摆出来。
+ *
+ * 只画 `progress.nextActions` 给的东西 —— 文案、`actor`、`target` 全是接缝推导的
+ * (与 agent 工具面读同一份);这里唯一做的事是把 `target` 翻译成"滚到哪一格 / 打开哪一场"。
+ */
+function NextActions({ actions, onJump }: { actions: NextActionView[]; onJump: (target: NextActionView['target']) => void }) {
+  if (actions.length === 0) return null
+  return (
+    <div className={s.nextActions} aria-label="下一步">
+      <div className={s.nextActionsHead}>
+        <span className={s.cardTitle}>下一步</span>
+        <span className={s.cardCount}>推导出来的:顺序、谁能做、点得动</span>
+      </div>
+      {actions.map((action, index) => (
+        <div key={`${action.code}-${index}`} className={s.nextActionRow}>
+          <Chip tone={action.actor === 'human' ? 'warn' : 'ok'} title={action.actor === 'human' ? '要人来做的:主观判断 / 认可 / 拍板' : 'agent 能自己做的'}>
+            {action.actor === 'human' ? '请人' : 'agent'}
+          </Chip>
+          <span className={s.nextActionLabel}>{action.label}</span>
+          {action.detail !== undefined ? <span className={s.nextActionDetail}>{action.detail}</span> : null}
+          {action.target !== undefined ? (
+            <button type="button" className={`${s.button} ${s.ghost} ${s.tiny}`} onClick={() => onJump(action.target)}>
+              {action.target.kind === 'scene' ? '打开这一场' : action.target.kind === 'slot' ? '看这个槽' : '去处理'}
+            </button>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, onPlaytestFrom, onRelocate, onOpenScene, onJump, hasProject }: {
   progress: ProgressView | null
   /** 正在盖戳的目标 key(stampKey 的产物);null = 空闲。 */
   busyKey: string | null
@@ -35,6 +70,8 @@ export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, on
   onRelocate: (label: string) => void
   /** 打开场景编辑器定位到这一场(T11)。 */
   onOpenScene: (label: string) => void
+  /** 「下一步」那条上的跳转(T21):面板把它翻译成滚动 / 打开。 */
+  onJump: (target: NextActionView['target']) => void
   hasProject: boolean
 }) {
   const summary = progress?.summary ?? null
@@ -82,7 +119,7 @@ export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, on
                   {progress.completeness.orphans.length === 0 ? '全场景可达' : `${progress.completeness.orphans.length} 场孤立`}
                 </Chip>
               ) : null}
-              <button type="button" className={s.button} disabled={playing} onClick={onPlaytest}
+              <button type="button" className={s.button} id="gf-playtest-button" disabled={playing} onClick={onPlaytest}
                 title="用钉版 SDK 启动本项目;SDK 未就绪时先下载">
                 {playing ? <><Spinner /> 运行中…</> : '启动试玩'}
               </button>
@@ -101,6 +138,7 @@ export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, on
           </div>
         ) : (
           <>
+            <NextActions actions={progress.nextActions} onJump={onJump} />
             {summary !== null ? (
               <div className={s.chips} style={{ marginBottom: 10 }}>
                 <Chip tone={summary.missingDialogue === 0 ? 'ok' : 'warn'} num={summary.missingDialogue} dot>缺对白</Chip>

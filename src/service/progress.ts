@@ -115,6 +115,255 @@ export interface CompletenessView {
 }
 
 /**
+ * 「下一步」的动作码(T21)—— 稳定机器码,面板与 agent 都按它判别,不依赖中文文案。
+ *
+ * 命名分族:`*-missing` = 东西还没有;`*-needs-stamp` / `*-awaiting-review` = 等人;
+ * `*-errors` / `*-failed` = 坏了要先修;`publish-*` = 收尾那一下。
+ */
+export type NextActionCode =
+  | 'bible-missing'
+  | 'bible-needs-stamp'
+  | 'scenes-missing'
+  | 'lint-errors'
+  | 'missing-slots'
+  | 'missing-audio'
+  | 'playtest-not-run'
+  | 'playtest-failed'
+  | 'playtest-stale'
+  | 'scenes-awaiting-review'
+  | 'art-awaiting-review'
+  | 'publish-ready'
+  | 'publish-stale'
+
+/** 面板据此跳转(工作台上的锚点;agent 可以据此决定先动哪一场/哪个槽)。 */
+export type NextActionTarget =
+  | { kind: 'bible' }
+  | { kind: 'scene'; label: string }
+  | { kind: 'slot'; slot: string }
+  | { kind: 'audio'; scene: string; line: number }
+  | { kind: 'playtest' }
+  | { kind: 'publish' }
+
+/**
+ * 板上的一条「下一步」。
+ *
+ * 与 `problems` 的分工是刻意的:`problems` 说**哪里坏了**(定位到文件与行,是缺陷清单),
+ * `nextActions` 说**接着做什么**(带 actor 与跳转目标,是行动清单)。同一件事可以两边都出现
+ * (悬空跳转既是 problem 也是"谁去修"),但一个用来读、一个用来做。
+ */
+export interface NextAction {
+  code: NextActionCode
+  /** 面向人的一句话(面板与 agent 读**同一份**,不各自措辞)。 */
+  label: string
+  /** 谁能做这件事:要人主观判断的一律 `human`(盖戳 / 认可 / 发布拍板)。 */
+  actor: 'agent' | 'human'
+  /** 具体到槽名 / label / 引用(照着做就行)。 */
+  detail?: string
+  target?: NextActionTarget
+}
+
+/** detail 里罗列名字的上限(板上几十个槽时,别把一屏塞满)。 */
+const DETAIL_LIST_LIMIT = 12
+
+function listOf(names: readonly string[]): string {
+  if (names.length <= DETAIL_LIST_LIMIT) return names.join('、')
+  return `${names.slice(0, DETAIL_LIST_LIMIT).join('、')} …(共 ${names.length} 个)`
+}
+
+/**
+ * **下一步**(纯函数,T21):从同一份推导结果里排出"接着做什么"。
+ *
+ * 三条规矩:
+ *  1. **纯推导**:只读入参,不写、不缓存;同一份输入两次调用结果完全相同(顺序也相同)。
+ *  2. **阻塞在前、打磨在后**:先"没它就走不下去"(设定集 / 结构错 / 缺素材 / 悬空音频),
+ *     再"该看一眼了"(试玩),最后才是等人认可与收尾(盖戳 / 发布)。
+ *  3. **actor 是推导的一部分**:要人主观判断的一律 `human` —— 盖审读戳、认可、发布拍板;
+ *     生成 / 补素材 / 接线 / 跑试玩是 `agent` 能做的(它有没有入口由工具面决定,
+ *     这里只说"这件事归谁")。
+ *
+ * 板上没毛病时**给一条 `publish-ready`**(而不是空数组):让"可以做完了"有明确形态 ——
+ * 与 `deriveSceneMarks` 的 `clear/settled` 同一个态度。
+ */
+export function deriveNextActions(input: {
+  bible: BibleProgress
+  scenes: readonly SceneProgress[]
+  slots: readonly SlotProgress[]
+  audio: AudioPoolView
+  problems: readonly DialectProblem[]
+  lint: { ok: boolean; errors: number }
+  playtest: PlaytestView | null
+  publish: PublishView | null
+}): NextAction[] {
+  const actions: NextAction[] = []
+  const errors = input.problems.filter((problem) => problem.severity === 'error')
+
+  // ── 设定集:先有内容,再等人拍板 ────────────────────────────────────
+  const bibleEmpty = input.bible.chapters === 0 && !input.bible.hasOutline
+  if (bibleEmpty) {
+    actions.push({
+      code: 'bible-missing',
+      actor: 'agent',
+      label: '写设定集(世界观 / 角色 / 章节大纲)',
+      detail: '还没有设定集 —— 它是下游所有生成的唯一记忆源',
+      target: { kind: 'bible' },
+    })
+  } else if (input.bible.stamp !== 'approved') {
+    actions.push({
+      code: 'bible-needs-stamp',
+      actor: 'human',
+      label: input.bible.stamp === 'stale'
+        ? '请人重新审读设定集并盖「设定定稿」戳(改过之后戳失效了)'
+        : '请人审读设定集并盖「设定定稿」戳',
+      detail: '没盖章时逐场生成会被 bible-not-final 拒 —— 那不是故障,是"去请人盖戳"',
+      target: { kind: 'bible' },
+    })
+  }
+
+  // ── 剧本:还没有生成过任何场景 ──────────────────────────────────────
+  // 生成物固定落在 game/scenes/(一 label 一文件);一个都没有 = 还没开始逐场生成。
+  if (input.scenes.length === 0 || input.scenes.every((scene) => !scene.file.startsWith('scenes/'))) {
+    actions.push({
+      code: 'scenes-missing',
+      actor: 'agent',
+      label: '生成第一场戏',
+      detail: '还没有逐场生成过场景(生成物落在 game/scenes/<label>.rpy)',
+    })
+  }
+
+  // ── 结构错:先修再谈别的 ────────────────────────────────────────────
+  if (input.lint.errors > 0) {
+    const first = errors.find((problem) => problem.file !== '')
+    // 定位到**包含这一行的那一场**(同文件里起始行最大的那个仍 ≤ 问题行)——
+    // 取第一个匹配会把整份文件的问题都算到第一场上,面板跳过去就跳错了。
+    const candidates = first === undefined || first.line === undefined
+      ? []
+      : input.scenes.filter((candidate) => candidate.file === first.file && candidate.line <= first.line!)
+    const scene = candidates.length === 0
+      ? (first === undefined ? undefined : input.scenes.find((candidate) => candidate.file === first.file))
+      : candidates.reduce((best, candidate) => (candidate.line > best.line ? candidate : best))
+    actions.push({
+      code: 'lint-errors',
+      actor: 'agent',
+      label: `修结构问题(lint 有 ${input.lint.errors} 个 error)`,
+      detail: listOf(errors.slice(0, 6).map((problem) => `${problem.file}${problem.line === undefined ? '' : `:${problem.line}`} ${problem.message}`)),
+      ...(scene === undefined ? {} : { target: { kind: 'scene' as const, label: scene.label } }),
+    })
+  }
+
+  // ── 素材 / 音频:还没落地的引用 ─────────────────────────────────────
+  const missingSlots = input.slots.filter((slot) => !slot.filled)
+  if (missingSlots.length > 0) {
+    actions.push({
+      code: 'missing-slots',
+      actor: 'agent',
+      label: `补素材(${missingSlots.length} 个槽还没有图)`,
+      detail: listOf(missingSlots.map((slot) => slot.slot)),
+      target: { kind: 'slot', slot: missingSlots[0]!.slot },
+    })
+  }
+  if (input.audio.missing.length > 0) {
+    const first = input.audio.missing[0]!
+    actions.push({
+      code: 'missing-audio',
+      actor: 'agent',
+      label: `让音频引用落地(${input.audio.missing.length} 处悬空)`,
+      detail: `${listOf(input.audio.missing.map((reference) => `${reference.ref}(${reference.scene}:${reference.line})`))} —— 改成池里已有的路径,或请人把文件放进 game/`,
+      target: { kind: 'audio', scene: first.scene, line: first.line },
+    })
+  }
+
+  // ── 试玩:技术通过是推导,跑不跑是 agent 的活 ───────────────────────
+  if (input.playtest === null) {
+    actions.push({
+      code: 'playtest-not-run',
+      actor: 'agent',
+      label: '跑一次试玩(会用钉版 SDK 开真窗口)',
+      detail: '还没跑过:技术通过是推导(退出码 + 日志干净);认可才是人的事',
+      target: { kind: 'playtest' },
+    })
+  } else if (input.playtest.state === 'fail') {
+    actions.push({
+      code: 'playtest-failed',
+      actor: 'agent',
+      label: '照 traceback 修完再跑一次试玩',
+      detail: (input.playtest.traceback ?? `退出码 ${input.playtest.exitCode}`).split('\n').slice(0, 6).join('\n'),
+      target: { kind: 'playtest' },
+    })
+  } else if (input.playtest.state === 'stale') {
+    actions.push({
+      code: 'playtest-stale',
+      actor: 'agent',
+      label: '内容改过了,再跑一次试玩',
+      detail: '上次试玩之后内容又变了 —— 那一次的技术通过不再代表这一版',
+      target: { kind: 'playtest' },
+    })
+  }
+
+  // ── 等人:审读戳只有人能盖 ──────────────────────────────────────────
+  const unstampedScenes = input.scenes.filter((scene) => scene.stamp === 'none')
+  const staleScenes = input.scenes.filter((scene) => scene.stamp === 'stale')
+  if (staleScenes.length > 0) {
+    actions.push({
+      code: 'scenes-awaiting-review',
+      actor: 'human',
+      label: `请人复审改动过的场景(${staleScenes.length} 场戳失效了)`,
+      detail: listOf(staleScenes.map((scene) => scene.label)),
+      target: { kind: 'scene', label: staleScenes[0]!.label },
+    })
+  } else if (unstampedScenes.length > 0) {
+    actions.push({
+      code: 'scenes-awaiting-review',
+      actor: 'human',
+      label: `请人读一遍并盖场景戳(${unstampedScenes.length} 场还没定稿)`,
+      detail: listOf(unstampedScenes.map((scene) => scene.label)),
+      target: { kind: 'scene', label: unstampedScenes[0]!.label },
+    })
+  }
+  const unreviewed = input.slots.filter((slot) => slot.awaitingReview)
+  if (unreviewed.length > 0) {
+    actions.push({
+      code: 'art-awaiting-review',
+      actor: 'human',
+      label: `请人在素材板上盖槽戳(${unreviewed.length} 张待认可)`,
+      detail: listOf(unreviewed.map((slot) => slot.slot)),
+      target: { kind: 'slot', slot: unreviewed[0]!.slot },
+    })
+  }
+
+  // ── 收尾:板上没有拦路的东西了,才谈"发不发"(而那是人拍板)──────────
+  const boardClear = input.lint.ok && missingSlots.length === 0 && input.audio.missing.length === 0
+  if (boardClear) {
+    if (input.publish !== null && input.publish.stale) {
+      actions.push({
+        code: 'publish-stale',
+        actor: 'human',
+        label: '上次发布的产物已过期(内容又改了)—— 问人要不要重发',
+        detail: input.publish.destination,
+        target: { kind: 'publish' },
+      })
+    } else if (input.publish === null) {
+      actions.push({
+        code: 'publish-ready',
+        actor: 'human',
+        label: '板上齐了:问人要不要发第一版',
+        detail: '产物会落在项目源树之外;平台上传与在线分发不做',
+        target: { kind: 'publish' },
+      })
+    } else {
+      actions.push({
+        code: 'publish-ready',
+        actor: 'human',
+        label: '产物就是当前这一版 —— 问人还要不要发别的包',
+        detail: input.publish.destination,
+        target: { kind: 'publish' },
+      })
+    }
+  }
+
+  return actions
+}
+
+/**
  * 素材板上的一个槽:派生出来的槽(来自 `.rpy` 引用)+ 账本制作信息 + 推导出来的状态。
  *
  * `filled` / `stamp` / `approvable` 仍是**推导**(文件在不在 + 指纹比对 + 戳账本);
@@ -175,6 +424,11 @@ export interface ProgressSnapshot {
   lint: { ok: boolean; errors: number; warnings: number }
   /** 最近一次试玩事实的推导视图(无记录 = null)。 */
   playtest: PlaytestView | null
+  /**
+   * 「下一步」(T21):**纯推导**的行动清单(带 actor 与跳转目标)。
+   * 与 `problems` 分工:那个说哪里坏了(定位缺陷),这个说接着做什么(给动作)。
+   */
+  nextActions: NextAction[]
   summary: ProgressSummary
   degraded: boolean
 }
@@ -482,6 +736,18 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
     endingReachable: inputs.completeness?.endingReachable ?? true,
   }
 
+  // 「下一步」(T21):与上面同一份推导结果算出来的行动清单 —— 纯函数、无写、顺序固定。
+  const nextActions = deriveNextActions({
+    bible,
+    scenes: sceneProgress,
+    slots: [...uniqueSlots.values()],
+    audio: inputs.audio,
+    problems,
+    lint: { ok: lintErrors === 0, errors: lintErrors },
+    playtest,
+    publish: inputs.publish ?? null,
+  })
+
   const summary: ProgressSummary = {
     scenes: sceneProgress.length,
     missingDialogue: sceneProgress.filter((s) => s.missingDialogue).length,
@@ -507,6 +773,7 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
     problems,
     lint: { ok: lintErrors === 0, errors: lintErrors, warnings: lintWarnings },
     playtest,
+    nextActions,
     summary,
     degraded: summary.degraded > 0 || problems.length > 0,
   }

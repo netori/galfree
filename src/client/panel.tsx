@@ -62,8 +62,37 @@ export function WorkbenchPanel() {
     setNotices((current) => (current.some((n) => n.text === text) ? current : [...current, { id, tone, text }]))
   }, [])
 
-  const refresh = useCallback(async (options?: { quiet?: boolean }) => {
-    try {
+  /**
+   * 「下一步」上那颗按钮:把推导给的 `target` 翻译成"滚到哪一格 / 打开哪一场"(T21)。
+   *
+   * 面板**不判断该做什么**(那是 `nextActions` 的事),只负责把人带到他该看的地方:
+   * 场景 → 场景编辑器;槽 → 素材板;设定集 → 设定集卡;试玩 → 舞台板那颗按钮;
+   * 发布 → 发布卡。找不到锚点时静默不跳(界面改版不该变成一次报错)。
+   */
+  const jumpTo = useCallback((target: { kind: string; label?: string; scene?: string } | undefined) => {
+    if (target === undefined) return
+    if (target.kind === 'scene' && target.label !== undefined) {
+      setFocusScene(target.label)
+      document.getElementById('gf-scene-workbench')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      return
+    }
+    if (target.kind === 'audio' && target.scene !== undefined) {
+      setFocusScene(target.scene)
+      document.getElementById('gf-scene-workbench')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      return
+    }
+    const anchor = target.kind === 'slot' ? 'gf-asset-board'
+      : target.kind === 'bible' ? 'gf-bible-card'
+      : target.kind === 'publish' ? 'gf-publish-card'
+      : target.kind === 'playtest' ? 'gf-playtest-button'
+      : null
+    if (anchor === null) return
+    const element = document.getElementById(anchor)
+    element?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    if (element instanceof HTMLElement) element.focus({ preventScroll: true })
+  }, [])
+
+  const refresh = useCallback(async (options?: { quiet?: boolean }) => {    try {
       const next = await api.state()
       setState(next)
       if (next.activeId === null || next.activeMissing) {
@@ -331,6 +360,7 @@ export function WorkbenchPanel() {
           onPlaytestFrom={(label) => void runPlaytest(label)}
           onRelocate={(label) => void relocate(label)}
           onOpenScene={(label) => setFocusScene(label)}
+          onJump={(target) => jumpTo(target)}
           hasProject={hasProject}
         />
 

@@ -319,6 +319,16 @@ export interface CompletenessView {
   endingReachable: boolean
 }
 
+export interface NextActionView {
+  /** 稳定机器码(面板按它决定要不要跳转,不依赖中文文案)。 */
+  code: string
+  /** 面向人的一句话(与 agent 读的是同一份)。 */
+  label: string
+  actor: 'agent' | 'human'
+  detail?: string
+  target?: { kind: 'bible' | 'scene' | 'slot' | 'audio' | 'playtest' | 'publish'; label?: string; slot?: string; scene?: string; line?: number }
+}
+
 export interface ProgressView {
   scenes: SceneProgressView[]
   /** 素材板:`.rpy` 派生的槽清单(挂账本 + 推导状态)。 */
@@ -334,6 +344,8 @@ export interface ProgressView {
   problems: DialectProblemView[]
   lint: { ok: boolean; errors: number; warnings: number }
   playtest: { at: string; state: 'pass' | 'fail' | 'stale'; exitCode: number; technicalPass: boolean; traceback: string | null; from: string | null } | null
+  /** 「下一步」(T21):纯推导的行动清单(带 actor 与跳转目标)。 */
+  nextActions: NextActionView[]
   summary: { scenes: number; missingDialogue: number; missingSlots: number; lintErrors: number; awaitingReview: number; degraded: number; playtestFail: number; playtestNotRun: number }
   degraded: boolean
 }

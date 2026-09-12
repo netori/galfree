@@ -1041,8 +1041,6 @@ role 是不是三种之一)。**不行** —— 写进 `.rpy` 的每一行都要
 仓库里 1835 行的接缝与 921 行的路由是同一个尺度的先例。真要拆,按环节拆成几个文件是纯搬家,
 不是这一票要解决的问题 —— 记在这里,免得下一个人以为它是"没人注意到"。
 
-## 模板的界面层(T7 之后补齐的一块,实测换来的)
-
 ### AC3 的红线:两道守卫
 
 审读戳**没有、也不会有** agent 入口,这一点由**两道**一起守:
@@ -1060,6 +1058,71 @@ role 是不是三种之一)。**不行** —— 写进 `.rpy` 的每一行都要
 `GALFREE_WORKFLOW` 里每一环挂的工具名是**意图**(可以超前于实现),渲染时只露真的注册了的。
 T20 补齐之后,指引里"目前没有 agent 入口"那句**自动消失**(有一条守卫断言它确实消失了:
 `playbook.test.ts` 的"七个环节里每一环都真的有 agent 入口了")。
+
+## 板上的「下一步」(T21 / #29 之后追加)
+
+`galfree_project_status` 与舞台板回答的是**"现在到哪了"**;**不回答"接着做什么"** —— 于是每个会话
+都要自己从 `problems` + `summary` 里推顺序(推法本该只有一份)。T21 把这份推法长在
+推导引擎里:`progress.nextActions[]`。
+
+### 形状
+
+```ts
+interface NextAction {
+  code: NextActionCode        // 机器码:见下面那张表
+  label: string               // 面向人的一句话(面板与 agent 读同一份,不各自措辞)
+  actor: 'agent' | 'human'    // 谁能做:要人主观判断的一律 human
+  detail?: string             // 具体到槽名 / label / 引用(照着做就行)
+  target?: NextActionTarget   // 面板据此跳转:{bible|scene|slot|audio|playtest|publish}
+}
+```
+
+### 三条规矩
+
+1. **纯推导**:只读入参,不写、不缓存;同一份输入两次调用结果完全相同(**顺序也相同**)。
+   守卫比对两次调用的结果,并断言**网关写日志与 git 历史一个字节都没动**。
+2. **阻塞在前、打磨在后**:设定集 → 结构错 → 缺素材 → 悬空音频 → 试玩 → 等人认可 → 发布。
+3. **actor 是推导的一部分**:盖审读戳 / 认可 / 发布拍板 = `human`;
+   生成 / 补素材 / 接线 / 跑试玩 = `agent`(它有没有入口由工具面决定,这里只说"这件事归谁")。
+
+> **与 `problems` 的分工**是刻意的:`problems` 说**哪里坏了**(定位到文件与行,是缺陷清单);
+> `nextActions` 说**接着做什么**(带 actor 与跳转目标,是行动清单)。同一件事可以两边都出现
+> (悬空跳转既是 problem 也是"谁去修"),但一个用来读、一个用来做 —— 不是把同一个数组抄两遍。
+
+### 现在会推出的动作
+
+| code | actor | 什么时候出现 |
+|---|---|---|
+| `bible-missing` | agent | 设定集还没有内容(没章节也没导入原文)。**有内容缺戳时不会再推它** —— 催人盖一个空设定集是废话 |
+| `bible-needs-stamp` | human | 有内容但戳不是 `approved`(没盖 / 盖过又改了) |
+| `scenes-missing` | agent | 还没有逐场生成过场景(一个都不在 `game/scenes/` 下) |
+| `lint-errors` | agent | 板上有 error;`target` 指向**包含那一行**的场景(不是文件里第一场) |
+| `missing-slots` | agent | 有槽没有图;`detail` 列槽名,`target` 指向第一个 |
+| `missing-audio` | agent | 音频引用悬空;`target` 指向 `{scene, line}` |
+| `playtest-not-run` / `-failed` / `-stale` | agent | 没跑过 / 跑失败(traceback 进 detail)/ 跑过但内容又变了 |
+| `scenes-awaiting-review` | human | 场景戳 `none`(还没定稿)或 `stale`(盖过又改了) |
+| `art-awaiting-review` | human | 槽有图但没人认可 |
+| `publish-ready` | human | 板上没有拦路的东西(lint 过 / 素材齐 / 音频不悬空)—— **给一条而不是空数组**,让"可以做完了"有明确形态 |
+| `publish-stale` | human | 上次发布的产物被之后的内容改动顶掉了 |
+
+**试玩那一格的 actor 是 agent**(不是 human):T20 之后 agent 有 `galfree_playtest`,跑一次是它的活;
+人的那一份是**认可**("玩过了、行"),也就是 `scenes-awaiting-review` 那条。票面把"试玩"列在人的
+一边,说的是点按钮的那个人 —— 两者不冲突,这里按"谁的活"分。
+
+### 两个消费面(同一份推导)
+
+- **面板**:舞台板正文最上面一行「下一步」(人打开面板第一眼看到的是"接着做什么",不是一堆徽标)。
+  每条带 `human`/`agent` 徽标与一颗跳转按钮 —— 跳转是**面板翻译** `target`(场景 → 打开场景编辑器;
+  槽 → 素材板;设定集 → 设定集卡;试玩 → 那颗按钮;发布 → 发布卡),面板自己**不判断该做什么**。
+- **agent**:`galfree_project_status` 带回同一份 `nextActions`(同一份推导,不是工具自己又算一遍);
+  工具描述里明说"**不要自己从 problems 里推顺序**"。
+
+### 可红的守卫
+
+`src/service/next-actions.test.ts`:把一个已知缺陷摆上去 → 该动作必须出现;修好 → 必须消失。
+两条:(a) 改设定集让定稿戳失效 → `bible-needs-stamp` 出现;(b) 把 `jump prologue` 改成
+`jump nowhere` → `lint-errors` 出现且 `publish-ready` 消失。**推导没跟着戳走就会红** ——
+这是这两条存在的理由。
 
 ## 模板的界面层(T7 之后补齐的一块,实测换来的)
 **新建项目必须整份带上 SDK 的 GUI 模板**(`screens.rpy` / `gui.rpy` / `guisupport.rpy` / `testcases.rpy`),

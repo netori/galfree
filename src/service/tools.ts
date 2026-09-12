@@ -111,6 +111,9 @@ export function registerGalfreeTools(
     description: [
       '读 GALFree 项目的推导状态:场景(含戳状态)、素材槽、角色、设定集处境、音频池与引用处境、',
       'lint 与试玩。与工作台阶段板**同源**(都是推导出来的),用于回答"这个项目到哪一步了 / 还缺什么"。',
+      '**`nextActions` 是"接着做什么"**:纯推导的行动清单,每条带 `actor`(human = 只有人能做的:',
+      '盖审读戳 / 认可 / 发布拍板;agent = 你能自己做的)与 `target`(该动哪一场 / 哪个槽)。',
+      '**不要自己从 problems 里推顺序** —— 就用这份(与面板上那行「下一步」同源)。',
     ].join(' '),
     parameters: {
       project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
@@ -147,6 +150,9 @@ export function registerGalfreeTools(
           },
           lint: progress.lint,
           playtest: progress.playtest,
+          // 「下一步」(T21):与面板那行「下一步」读的是**同一份推导** —— agent 不必自己从
+          // problems 里推顺序(推法只有一份,长在 progress.ts 里)。
+          nextActions: progress.nextActions,
           summary: progress.summary,
           problems: progress.problems.slice(0, 20),
         }, null, 2)

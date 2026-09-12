@@ -835,6 +835,11 @@ describe('路由适配层(/api/galfree)', () => {
     expect(panelView.body.bible.world).toBe('工具写的世界观。')
     const progress = await req(`/api/galfree/progress?project=${project.id}`)
     expect(progress.body.bible.stamp).toBe('none')
+    // 「下一步」(T21)也走这条:面板那行「下一步」读的就是 `/progress` 里的这份推导
+    // (带 actor 与跳转目标),不是前端自己算的。
+    expect(Array.isArray(progress.body.nextActions)).toBe(true)
+    expect(progress.body.nextActions.length).toBeGreaterThan(0)
+    expect(['agent', 'human']).toContain(progress.body.nextActions[0].actor)
     // ④ 快照也同一份:两条路各留下一条,作者都是 GALFree(一次写批一条)。
     const history = await tool('galfree_snapshot').execute({ project: project.id, action: 'history', path: '.studio/bible/bible.json' })
     const entries = (JSON.parse(history) as { entries: Array<{ author: string; subject: string }> }).entries

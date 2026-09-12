@@ -73,6 +73,36 @@
 .ghost:hover:not(:disabled) { background: var(--gf-hover); color: var(--gf-text); }
 .tiny { padding: 3px 10px; font-size: 11px; border-radius: 999px; }
 
+/* 「下一步」(T21):推导出来的行动清单。它排在舞台板正文最上面 ——
+   人打开面板第一眼要看到的是"接着做什么",而不是一堆状态徽标。 */
+.nextActions {
+  border: 1px solid var(--gf-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: var(--gf-hover);
+}
+.nextActionsHead {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.nextActionRow {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12.5px;
+}
+.nextActionLabel { color: var(--gf-text); }
+.nextActionDetail {
+  color: var(--gf-text-3);
+  font-size: 11.5px;
+  font-family: ui-monospace, monospace;
+}
+
 .input {
   padding: 9px 12px;
   border: none;

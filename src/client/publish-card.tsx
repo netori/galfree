@@ -69,7 +69,7 @@ export function PublishCard({ api, hasProject, onChanged, onNotice }: {
   const last = readiness?.last ?? null
 
   return (
-    <section className={s.card} aria-label="发布">
+    <section className={s.card} id="gf-publish-card" aria-label="发布">
       <div className={s.cardHead}>
         <span className={s.cardTitle}>发布</span>
         <span className={s.cardCount}>

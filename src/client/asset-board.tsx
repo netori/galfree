@@ -100,7 +100,7 @@ export function AssetBoard({ characters, slots, api, hasProject, onChanged, onNo
   const taskFor = (slot: string): GenerationTaskView | undefined => tasks.find((task) => task.slot === slot)
 
   return (
-    <section className={s.card} aria-label="素材板">
+    <section className={s.card} id="gf-asset-board" aria-label="素材板">
       <div className={s.cardHead}>
         <span className={s.cardTitle}>素材板</span>
         <span className={s.cardCount}>
