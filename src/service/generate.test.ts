@@ -177,6 +177,39 @@ describe('逐场剧本生成(T10)', () => {
     expect(files).toEqual(['scene_one.rpy'])
   })
 
+  it('生成器不越界:路径逃逸与非法内容被拒,项目根一步不动', async () => {
+    // 1) 路径逃逸:targetPath 只接受规范路径(不能借它写到项目外)。
+    for (const escape of ['game/../../outside.rpy', '/etc/passwd.rpy', 'game/scenes/../escape.rpy', 'C:/windows/x.rpy']) {
+      await expect(service.generateScene('gen', {
+        label: 'scene_one', source: START_SCENE, outline: undefined, targetPath: escape,
+      })).rejects.toThrow(/scenes\//)
+    }
+
+    // 2) label 必须是标识符(它进文件名)。
+    for (const bad of ['../escape', 'a/b', 'a b', '', '1abc']) {
+      await expect(service.generateScene('gen', {
+        label: bad, source: START_SCENE, outline: undefined,
+      })).rejects.toThrow(/label/)
+    }
+
+    // 3) 内容与 label 不符 / 空内容:拒绝落盘(否则会写出一个"没有这一场"的文件)。
+    await expect(service.generateScene('gen', {
+      label: 'scene_one', source: 'label other:\n    "x"\n', outline: undefined,
+    })).rejects.toThrow(/label scene_one/)
+    await expect(service.generateScene('gen', {
+      label: 'scene_one', source: '   \n', outline: undefined,
+    })).rejects.toThrow(/不能为空/)
+
+    // 4) 续接目标不存在 → 拒绝(不写出一个跳不出去的断头戏)。
+    await expect(service.generateScene('gen', {
+      label: 'scene_one', source: START_SCENE, outline: undefined, nextLabel: 'nowhere',
+    })).rejects.toThrow(/续接目标/)
+
+    // 项目根没被碰过:一个文件都没多出来。
+    const project = await service.getActiveProject()
+    expect(await readdir(join(project!.root, 'game'))).toEqual(expect.arrayContaining(['script.rpy', 'options.rpy']))
+  })
+
   it('搬家:把 script.rpy 里的段原样搬进生成目录,内容逐字不变,且是一次写批', async () => {
     const project = await service.getActiveProject()
     // 模板的 start 住在 script.rpy;先确认生成器拒绝抢它(上一条测试已经验过)。
