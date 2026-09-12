@@ -394,6 +394,25 @@ generateScene(ref,{label,source,nextLabel?,requireContext?}) → {
 接缝的 `imageChannel()` 只回报 `apiKeyConfigured` 布尔,不回传密钥本身。
 没填端点 = 没渠道 → 出图动作在接缝上抛 **`no-image-channel`**(路由 503),绝不假装能出图。
 
+**设置命名空间 ≠ 设置有界面(实测,别踩第二遍)。** Host 半 `ctx.settings.register(ns, schema)`
+只让设置**可读写**;宿主「设置 → 插件」页的「插件配置」标签页是**按命名空间分发卡片**的
+(`settings.plugin.item`,keyed by ns),而那张卡要**插件自己的 Client 半**贡献:
+
+```
+ctx.slots.inject('settings.plugin.item', () => ctx.slots.register(
+  { name: 'settings.plugin.item', key: 'dsh-galfree' }, ChannelSettingsCard))
+```
+
+写入走宿主既有的一套:读 `ctx.settingsScope.describe()` 的共享镜像拿「当前值 + revision」,
+保存时提交 `ctx.remote.settings.mutate(ns, ops, revision)`(`ops` = `{op:'set',path:[field],value}`
+或 `{op:'unset',path:[field]}`;revision 围栏保证并发改动被拒而不是被静默覆盖),成功后
+`describe.acceptView(response.value)` 把应答折回镜像。卡片**长在设置页里,不在工作台面板里**
+—— 面板里再开一处渠道配置面就是第二真相面(不做)。
+
+**镜像是宿主持有的,读它得到的对象身份不保证稳定。** 卡片把镜像同步进 React 状态时
+必须**按内容比对**(内容没变就返回原 state),否则「渲染 → setState → 渲染」会自锁成死循环:
+页面看着还在,按钮点不动(靠渲染回路里的点击超时才发现的那个 bug)。
+
 **能力声明是"协议不合要如实降级"的唯一依据**:
 
 ```

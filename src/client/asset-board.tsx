@@ -44,7 +44,8 @@ function ChannelStatus({ api, hasProject }: { api: GalfreeApi; hasProject: boole
   if (!channel.configured) {
     return (
       <div className={s.emptyHint} style={{ marginBottom: 10 }}>
-        还没配置图像渠道 —— 到「设置 → 插件 → GALFree」填端点、密钥与模型目录,才谈得上出图(缺的会如实报,不会假装能出)。
+        还没配置图像渠道 —— 到「设置 → 插件 → 插件配置」里的 GALFree 卡填端点、密钥与模型目录。
+        缺渠道时出图动作会如实拒绝,不会假装能出。
       </div>
     )
   }
@@ -57,7 +58,8 @@ function ChannelStatus({ api, hasProject }: { api: GalfreeApi; hasProject: boole
   )
 }
 
-export function AssetBoard({ characters, slots, api, hasProject, onChanged, onNotice }: {  characters: CharacterBoardEntry[]
+export function AssetBoard({ characters, slots, api, hasProject, onChanged, onNotice }: {
+  characters: CharacterBoardEntry[]
   slots: SlotBoardEntry[]
   api: GalfreeApi
   hasProject: boolean
