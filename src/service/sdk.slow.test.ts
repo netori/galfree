@@ -187,8 +187,10 @@ describe('真钉版 SDK 慢带(T5)', () => {
       dataDir,
       validator: createCompositeValidator({ pinnedSdkDir: sdkDir, overrideSdkPath: () => '' }),
     })
+    // 建出来的项目在 projectsRoot/<name> 下(createProject 自己 scaffold,不用手搭)。
+    const genRoot = join(projectRoot, 'genproj')
     try {
-      await service.createProject({ projectsRoot: projectRoot, name: 'genproj', title: '生成闭环' })
+      await service.createProject({ projectsRoot: projectRoot, name: 'genproj', title: '生成闭环', sdkDir })
 
       const generated = await service.generateScene('genproj', {
         label: 'scene_one',
@@ -219,8 +221,8 @@ describe('真钉版 SDK 慢带(T5)', () => {
 
     // 生成之后项目真能启动(引擎加载 game/scenes/ 下新写的文件)。
     const { spawn } = await import('node:child_process')
-    const child = spawn(launcher!, [projectRoot], {
-      cwd: projectRoot,
+    const child = spawn(launcher!, [genRoot], {
+      cwd: genRoot,
       env: { ...process.env, RENPY_DISABLE_SOUND: '1', RENPY_LESS_UPDATES: '1' },
       stdio: 'ignore',
       windowsHide: false,
@@ -270,7 +272,7 @@ describe('真钉版 SDK 慢带(T5)', () => {
       playtest: { resolveLauncher: async () => launcher, spawn: realSpawn },
     })
     try {
-      await service.createProject({ projectsRoot: projectRoot, name: 'fromscene', title: '整线' })
+      await service.createProject({ projectsRoot: projectRoot, name: 'fromscene', title: '整线', sdkDir })
       const snap = await service.readProjectFile('fromscene', 'game/script.rpy')
       await service.writeProjectFiles('fromscene', [{
         path: 'game/script.rpy',

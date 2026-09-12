@@ -9,5 +9,7 @@ export default defineConfig({
     environment: 'node',
     testTimeout: 600_000,
     hookTimeout: 600_000,
+    // 串行:几条慢带都会真起 Ren'Py(抢 SDK 与游戏窗口),并行会互相拖到超时。
+    fileParallelism: false,
   },
 })

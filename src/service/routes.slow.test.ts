@@ -22,6 +22,7 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { makeRoutes } from '../routes.ts'
 import { createProjectService, type ProjectService } from './project-service.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 
 const SCRIPT = [
   'label start:',
@@ -39,6 +40,7 @@ const SCRIPT = [
 let server: Server
 let base: string
 let service: ProjectService
+  let sdkDir: string
 let dataDir: string
 let projectsRoot: string
 let seq = 0
@@ -86,7 +88,8 @@ async function freshProject(): Promise<{ id: string; root: string; name: string 
 beforeAll(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'galfree-route-'))
   projectsRoot = await mkdtemp(join(tmpdir(), 'galfree-route-proj-'))
-  service = createProjectService({ dataDir })
+  sdkDir = await makeFakeSdk()
+    service = createProjectService({ dataDir, uiTemplate: fakeUiTemplate(sdkDir) })
   const routes = makeRoutes({
     service,
     config: () => ({ enabled: true, defaultProjectsRoot: projectsRoot }),
@@ -399,7 +402,7 @@ describe('路由适配层(/api/galfree)', () => {
   it('宿主没有选择器后端时:浏览器仍可用(插件自带底座兜底),系统对话框如实报不可用', async () => {
     // 真实故障形态:dsh-host-directory-picker-auto 用运行时 Loader 动态装后端,
     // 那一步失败是静默的 → ctx.directoryPicker 根本不存在。
-    const bare = createProjectService({ dataDir: join(dataDir, 'nopicker') })
+    const bare = createProjectService({ dataDir: join(dataDir, 'nopicker'), uiTemplate: fakeUiTemplate(sdkDir) })
     const routes = makeRoutes({ service: bare, config: () => ({ enabled: true, defaultProjectsRoot: '' }) })
     const s = createServer((request, response) => { void routes[0]!.handler(request, response) })
     await new Promise<void>((resolve) => s.listen(0, '127.0.0.1', resolve))
@@ -642,7 +645,7 @@ describe('路由适配层(/api/galfree)', () => {
   })
 
   it('停用开关:仅 /state 可读,其余 503', async () => {
-    const offline = createProjectService({ dataDir: join(dataDir, 'disabled') })
+    const offline = createProjectService({ dataDir: join(dataDir, 'disabled'), uiTemplate: fakeUiTemplate(sdkDir) })
     const routes = makeRoutes({ service: offline, config: () => ({ enabled: false, defaultProjectsRoot: '' }) })
     const s = createServer((request, response) => { void routes[0]!.handler(request, response) })
     await new Promise<void>((resolve) => s.listen(0, '127.0.0.1', resolve))
