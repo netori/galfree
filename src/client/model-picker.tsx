@@ -29,7 +29,24 @@ export type CapabilityKey = 'textToImage' | 'imageToImage' | 'referenceChain' | 
 
 export type CapabilitySet = Record<CapabilityKey, boolean>
 
-/** 清单里的一行:上游拉到的(或手输的)+ 是否勾上 + 它的能力。 */
+/** 上游协议:同步(OpenAI 兼容)还是异步任务制。 */
+export type AdapterChoice = 'openai-compatible' | 'async-task'
+
+/** 协议的中文名(面板显示;提交路径随协议变,一并写在这里免得两处不一致)。 */
+export const ADAPTER_INFO: Record<AdapterChoice, { label: string; submitPath: string; hint: string }> = {
+  'openai-compatible': {
+    label: '同步(OpenAI 兼容)',
+    submitPath: '/images/generations',
+    hint: 'OpenAI 那种:**复数** `images`,一次调用直接回图片(b64_json)。',
+  },
+  'async-task': {
+    label: '异步任务制(提交后轮询)',
+    submitPath: '/image/generations',
+    hint: 'one-api / new-api 系网关:**单数** `image`,提交后回任务 id,要轮询到终态再取 `result_url`。',
+  },
+}
+
+/** 清单里的一行:上游拉到的(或手输的)+ 是否勾上 + 它的能力 + 协议。 */
 export interface ModelRow {
   id: string
   label?: string
@@ -42,6 +59,8 @@ export interface ModelRow {
   imageLikely: boolean
   /** 手输进来的(上游没列)。 */
   manual?: boolean
+  /** 这个模型走哪个上游协议。 */
+  adapter: AdapterChoice
 }
 
 export interface DiscoveredModelView {
@@ -66,6 +85,7 @@ export function rowFrom(model: DiscoveredModelView): ModelRow {
     needsConfirmation: model.inference.needsConfirmation,
     basis: model.inference.basis,
     imageLikely: model.imageLikely,
+    adapter: 'openai-compatible',
   }
 }
 
@@ -87,19 +107,32 @@ export function rowsFromCatalog(text: string): ModelRow[] {
         needsConfirmation: false,
         basis: '已保存的目录',
         imageLikely: true,
+        adapter: entry.adapter === 'async-task' ? 'async-task' as const : 'openai-compatible' as const,
       }))
   } catch {
     return []
   }
 }
 
-/** 清单行 → 目录 JSON(**只写勾上的**)。 */
+/** 清单行 → 目录 JSON(**只写勾上的**;协议非默认时才写 adapter/paths)。 */
 export function catalogFromRows(rows: ModelRow[]): string {
   return JSON.stringify(rows.filter((row) => row.selected).map((row) => ({
     id: row.id,
     ...(row.label === undefined || row.label === '' ? {} : { label: row.label }),
     ...(row.note === undefined || row.note === '' ? {} : { note: row.note }),
     capabilities: { ...row.capabilities },
+    ...(row.adapter === 'openai-compatible' ? {} : {
+      // 协议与它的默认路径一起写死:换协议时路径必须跟着换(单数 vs 复数),
+      // 让人只勾一次、不用再去记路径 —— "声明而不是猜"这条也适用于路径。
+      adapter: row.adapter,
+      paths: { submit: ADAPTER_INFO[row.adapter].submitPath },
+      async: {
+        submitPath: ADAPTER_INFO[row.adapter].submitPath,
+        pollPath: `${ADAPTER_INFO[row.adapter].submitPath}/{taskId}`,
+        pollIntervalMs: 3000,
+        pollMaxAttempts: 60,
+      },
+    }),
   })), null, 2)
 }
 
@@ -115,7 +148,7 @@ export function sameRows(a: ModelRow[], b: ModelRow[]): boolean {
   for (let i = 0; i < a.length; i += 1) {
     const x = a[i]!
     const y = b[i]!
-    if (x.id !== y.id || x.selected !== y.selected || x.label !== y.label || x.note !== y.note) return false
+    if (x.id !== y.id || x.selected !== y.selected || x.label !== y.label || x.note !== y.note || x.adapter !== y.adapter) return false
     for (const key of Object.keys(EMPTY_CAPS) as CapabilityKey[]) {
       if (x.capabilities[key] !== y.capabilities[key]) return false
     }
@@ -185,6 +218,11 @@ export function ModelPicker({
       : row)))
   }
 
+  /** 换协议:路径与轮询参数由 `catalogFromRows` 跟着一起写,人不用记路径。 */
+  const setAdapter = (id: string, adapter: AdapterChoice): void => {
+    commit(rows.map((row) => (row.id === id ? { ...row, adapter } : row)))
+  }
+
   const addManual = (): void => {
     const id = extra.trim()
     if (id === '') return
@@ -197,6 +235,7 @@ export function ModelPicker({
       basis: '手动添加:能力按最保守的口径填,请勾准它真实支持的',
       imageLikely: true,
       manual: true,
+      adapter: 'openai-compatible',
     }])
     setExtra('')
   }
@@ -240,6 +279,23 @@ export function ModelPicker({
               {row.selected ? (
                 <>
                   <div className={s.caps}>
+                    <label className={s.capItem} title={ADAPTER_INFO[row.adapter].hint}>
+                      <span>协议</span>
+                      <select
+                        className={s.input}
+                        style={{ maxWidth: 220 }}
+                        value={row.adapter}
+                        disabled={disabled}
+                        onChange={(event) => setAdapter(row.id, event.target.value as AdapterChoice)}
+                        aria-label={`${row.id} 的上游协议`}
+                      >
+                        {(Object.keys(ADAPTER_INFO) as AdapterChoice[]).map((key) => (
+                          <option key={key} value={key}>{ADAPTER_INFO[key].label}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  <div className={s.caps}>
                     {CAPABILITY_FIELDS.map((field) => (
                       <label key={field.key} className={s.capItem} title={field.hint}>
                         <input
@@ -253,7 +309,10 @@ export function ModelPicker({
                       </label>
                     ))}
                   </div>
-                  <span className={s.hint}>{row.basis}</span>
+                  <span className={s.hint}>
+                    {row.basis}
+                    {row.adapter === 'async-task' ? ` · 走 ${ADAPTER_INFO[row.adapter].submitPath}(提交后轮询)` : ''}
+                  </span>
                 </>
               ) : null}
             </li>

@@ -116,7 +116,11 @@ describe('渠道自动化:拉模型 + 推能力(T14 续)', () => {
 
   it('失败如实报:端点不是 OpenAI 兼容形状时点明(而不是"拉取失败")', async () => {
     upstream.status = 200
-    await expect(discoverModels({ send: async () => ({ status: 200, text: '{"models":[]}' }) }, { baseUrl }))
+    const http = {
+      send: async () => ({ status: 200, text: '{"models":[]}' }),
+      download: async () => ({ status: 200, bytes: new Uint8Array(), contentType: '' }),
+    }
+    await expect(discoverModels(http, { baseUrl }))
       .rejects.toThrow(/没有 data 数组/)
   })
 

@@ -154,16 +154,34 @@ export function parseModelCatalog(text: string): ImageModelDescriptor[] {
       label?: unknown
       note?: unknown
       sizes?: unknown
+      adapter?: unknown
+      paths?: { submit?: unknown }
+      async?: Record<string, unknown>
       capabilities?: Record<string, unknown>
     }
     if (typeof candidate.id !== 'string' || candidate.id === '') continue
     const caps = candidate.capabilities ?? {}
+    // 协议按目录声明分流(默认同步 OpenAI 兼容)。**认不出来的值一律退回默认**并留在
+    // 目录里 —— 但那样出图会按默认协议发,所以下面的能力里也不写"urlResult"之类的许诺。
+    const adapter: ImageModelDescriptor['adapter'] = candidate.adapter === 'async-task' ? 'async-task' : 'openai-compatible'
+    const paths = typeof candidate.paths?.submit === 'string' && candidate.paths.submit !== ''
+      ? { submit: candidate.paths.submit }
+      : undefined
+    const async = candidate.async === undefined || candidate.async === null
+      ? undefined
+      : {
+          ...(typeof candidate.async.submitPath === 'string' ? { submitPath: candidate.async.submitPath } : {}),
+          ...(typeof candidate.async.pollPath === 'string' ? { pollPath: candidate.async.pollPath } : {}),
+          ...(typeof candidate.async.pollIntervalMs === 'number' && candidate.async.pollIntervalMs >= 0 ? { pollIntervalMs: candidate.async.pollIntervalMs } : {}),
+          ...(typeof candidate.async.pollMaxAttempts === 'number' && candidate.async.pollMaxAttempts > 0 ? { pollMaxAttempts: candidate.async.pollMaxAttempts } : {}),
+          ...(Array.isArray(candidate.async.successStatuses) ? { successStatuses: candidate.async.successStatuses.filter((s): s is string => typeof s === 'string') } : {}),
+          ...(Array.isArray(candidate.async.failureStatuses) ? { failureStatuses: candidate.async.failureStatuses.filter((s): s is string => typeof s === 'string') } : {}),
+        }
     models.push({
       id: candidate.id,
       ...(typeof candidate.label === 'string' ? { label: candidate.label } : {}),
       ...(typeof candidate.note === 'string' ? { note: candidate.note } : {}),
-      // v1 只有这一个适配器;将来加协议时这里按目录里的 adapter 字段分流。
-      adapter: 'openai-compatible',
+      adapter,
       capabilities: {
         // 缺省口径:v1 的目录绝大多数是 OpenAI 兼容的文生图端点 ——
         // 所以"文生图/尺寸参数/b64"缺省为真,"参考链/图生图"缺省为假
@@ -173,7 +191,10 @@ export function parseModelCatalog(text: string): ImageModelDescriptor[] {
         referenceChain: caps.referenceChain === true,
         aspectRatioParam: caps.aspectRatioParam !== false,
         b64Json: caps.b64Json !== false,
+        ...(caps.urlResult === true ? { urlResult: true } : {}),
       },
+      ...(paths === undefined ? {} : { paths }),
+      ...(async === undefined ? {} : { async }),
       ...(Array.isArray(candidate.sizes) ? { sizes: candidate.sizes.filter((size): size is string => typeof size === 'string') } : {}),
     })
   }

@@ -40,8 +40,8 @@ import { composeSceneFile, extractSceneBlock, gatewayPathOf, scenesPathOf } from
 import { applySceneEdit, buildSceneForm, type SceneEdit, type SceneFormModel } from './scene-form.ts'
 import { contentFingerprint, launchPlaytest, playtestDocument, readPlaytest, PLAYTEST_FILE, type PlaytestPorts, type PlaytestRun } from './playtest.ts'
 import {
-  IMAGE_TASKS_FILE, adapterFor, degradeInput, emptyTasksDocument, findTask, imageModels, parseTasksDocument,
-  tasksDocument, upsertTask,
+  IMAGE_TASKS_FILE, adapterFor, degradeInput, downloadResultImage, emptyTasksDocument, findTask, imageModels,
+  parseTasksDocument, tasksDocument, upsertTask,
   type CreateGenerationTaskInput, type GenerationTask, type GenerationAttempt, type ImageChannelSettings,
   type ImageHttpClient,
 } from './images.ts'
@@ -1052,10 +1052,17 @@ export class ProjectService {
     })
 
     // 2) 出网。失败如实记账(上游原话进历史)。
+    //    同步适配器一次就拿到字节;异步任务制只拿到 task id,要轮询到终态再取图。
     let bytes: Uint8Array
     try {
-      const response = await this.#imagePorts!.http.send(plan.request)
-      bytes = adapter.parseResponse(response, model)
+      const http = this.#imagePorts!.http
+      const response = await http.send(plan.request)
+      const submission = adapter.onSubmit(response, model)
+      if (submission.kind === 'bytes') {
+        bytes = submission.bytes
+      } else {
+        bytes = await this.#awaitAsyncResult({ http, adapter, model, channel, taskId: submission.taskId })
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       return await this.#mutateTasks(projectRef, (document, writers) => {
@@ -1103,6 +1110,51 @@ export class ProjectService {
       writers.push(done)
       return Promise.resolve(done)
     })
+  }
+
+  /**
+   * 异步任务制:轮询到终态再取图。
+   *
+   * 三件事都**如实报**,不静默:
+   *  - 上游明说失败 → 把 `fail_reason` 带回去;
+   *  - 轮询到上限还没终态 → 说清"上游没在时限内给结果"(附最后一次状态);
+   *  - 终态给了 URL → 再取一次二进制,取不到也算失败。
+   */
+  async #awaitAsyncResult(input: {
+    http: ImageHttpClient
+    adapter: ReturnType<typeof adapterFor>
+    model: ReturnType<typeof imageModels>[number]
+    channel: ImageChannelSettings
+    taskId: string
+  }): Promise<Uint8Array> {
+    const { http, adapter, model, channel, taskId } = input
+    if (adapter.pollOnce === undefined) {
+      throw new Error(`适配器 ${adapter.id} 回了一个要轮询的任务,但它没有实现轮询(配置与协议不匹配)`)
+    }
+    const poll = adapter.pollConfig?.(model) ?? { intervalMs: 3000, maxAttempts: 60 }
+    const headers: Record<string, string> = { 'content-type': 'application/json' }
+    if (channel.apiKey !== undefined && channel.apiKey !== '') headers.authorization = `Bearer ${channel.apiKey}`
+
+    let lastNote = '未知'
+    for (let attempt = 0; attempt < poll.maxAttempts; attempt += 1) {
+      const step = await adapter.pollOnce({ model, baseUrl: channel.baseUrl, taskId, http, headers })
+      if (step.kind === 'failed') throw new Error(step.error)
+      if (step.kind === 'done') {
+        if (step.bytes !== undefined) return step.bytes
+        if (step.url === undefined) throw new Error('上游说成功了但既没给字节也没给地址')
+        // 结果图通常是公开 URL;带上密钥也无妨(取不到会被如实报)。
+        const image = await downloadResultImage(http, step.url, {})
+        if (image.format !== 'png') {
+          // 约定路径是 .png;上游给别的格式时如实说明,但仍按原字节落盘(不转码,免得掉质量)。
+          lastNote = `上游返回 ${image.format}(按 png 路径落盘)`
+        }
+        void lastNote
+        return image.bytes
+      }
+      lastNote = step.note
+      if (poll.intervalMs > 0) await new Promise((resolve) => setTimeout(resolve, poll.intervalMs))
+    }
+    throw new Error(`上游没在时限内给结果(轮询 ${poll.maxAttempts} 次,最后一次状态:${lastNote})`)
   }
 
   #attempt(

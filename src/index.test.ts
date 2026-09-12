@@ -59,4 +59,33 @@ describe('图像渠道设置(T14)', () => {
     const channel = channelFromSettings(settings())
     expect(channel?.apiKey).toBe('sk-plaintext-in-settings')
   })
+
+  it('协议按目录声明分流:adapter/paths/async 都解析得出来(默认同步)', () => {
+    const models = parseModelCatalog(JSON.stringify([
+      { id: 'sync-model' },
+      {
+        id: 'async-model',
+        adapter: 'async-task',
+        paths: { submit: '/image/generations' },
+        async: { submitPath: '/image/generations', pollPath: '/image/generations/{taskId}', pollIntervalMs: 1500, pollMaxAttempts: 30 },
+        capabilities: { urlResult: true },
+      },
+    ]))
+    // 没声明的走默认(同步 OpenAI 兼容)。
+    expect(models[0]!.adapter).toBe('openai-compatible')
+    expect(models[0]!.paths).toBeUndefined()
+    expect(models[0]!.async).toBeUndefined()
+
+    // 声明的按声明走:单数路径 + 轮询参数 + "结果是 URL"。
+    const async = models[1]!
+    expect(async.adapter).toBe('async-task')
+    expect(async.paths?.submit).toBe('/image/generations')
+    expect(async.async).toMatchObject({ submitPath: '/image/generations', pollPath: '/image/generations/{taskId}', pollIntervalMs: 1500, pollMaxAttempts: 30 })
+    expect(async.capabilities.urlResult).toBe(true)
+  })
+
+  it('认不出来的 adapter 值退回默认(不静默用一个不存在的协议)', () => {
+    const models = parseModelCatalog(JSON.stringify([{ id: 'x', adapter: '不认识的协议' }]))
+    expect(models[0]!.adapter).toBe('openai-compatible')
+  })
 })

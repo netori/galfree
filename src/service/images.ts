@@ -17,8 +17,8 @@
 
 // ─── 渠道与模型目录 ────────────────────────────────────────────────────
 
-/** 上游协议适配器 id。v1 只做 OpenAI 兼容;别的协议按需再加,不改这里。 */
-export type ImageAdapterId = 'openai-compatible'
+/** 上游协议适配器 id。 */
+export type ImageAdapterId = 'openai-compatible' | 'async-task'
 
 /**
  * **模型能力声明**。这是"协议不合要如实降级"的唯一依据:
@@ -35,6 +35,36 @@ export interface ImageModelCapabilities {
   aspectRatioParam: boolean
   /** 能用返回的 b64_json(否则只能用 url 拉回来)。 */
   b64Json: boolean
+  /** 返回的是**图片 URL**(异步任务制常见:终态里给 result_url)。 */
+  urlResult?: boolean
+}
+
+/**
+ * **异步任务制**上游的参数(适配器 `async-task`)。
+ *
+ * 这类网关(one-api / new-api 系)与 OpenAI 的同步接口不是一回事:提交后**先回一个任务**,
+ * 要按 id 轮询到终态,完成后给的是**图片 URL** 而不是 b64。
+ * 实测样本:提交 `POST /v1/image/generations`(**单数 image**)→ `{task_id, status:'queued'}`;
+ * 轮询 `GET /v1/image/generations/{task_id}` → `data.status==='SUCCESS'` + `data.result_url`。
+ */
+export interface ImageAsyncOptions {
+  /** 提交路径(默认 `/image/generations`)。 */
+  submitPath?: string
+  /** 轮询路径模板,`{taskId}` 会被替换(默认 `/image/generations/{taskId}`)。 */
+  pollPath?: string
+  /** 轮询间隔(毫秒)。快带设 0(立刻);生产默认 3000。 */
+  pollIntervalMs?: number
+  /** 最多轮询几次(默认 60;到顶如实报"上游没在时限内给结果")。 */
+  pollMaxAttempts?: number
+  /** 终态判定用的状态串(默认这一套;大小写不敏感)。 */
+  successStatuses?: string[]
+  failureStatuses?: string[]
+}
+
+/** 模型目录里声明的端点路径(默认为 OpenAI 兼容口径)。 */
+export interface ImageModelPaths {
+  /** 提交路径;默认 `/images/generations`(OpenAI 是**复数**)。 */
+  submit?: string
 }
 
 export interface ImageModelDescriptor {
@@ -48,6 +78,10 @@ export interface ImageModelDescriptor {
   sizes?: string[]
   /** 备注(给人看的,比如"不支持参考图,差分靠 prompt")。 */
   note?: string
+  /** 端点路径覆盖(路径口径不同的网关靠它对齐,例如单数 `/image/generations`)。 */
+  paths?: ImageModelPaths
+  /** 异步任务制的轮询参数(仅 `adapter: 'async-task'` 用)。 */
+  async?: ImageAsyncOptions
 }
 
 /**
@@ -186,12 +220,23 @@ export interface HttpResponse {
   text: string
 }
 
+/** 二进制下载的应答(异步任务制:终态给的是图片 URL,得再取一次)。 */
+export interface HttpDownload {
+  status: number
+  bytes: Uint8Array
+  /** 上游给的 content-type(判格式用,拿不到就是空串)。 */
+  contentType: string
+}
+
 /**
  * **出网端口**。生产 = 真 fetch;快带 = 打到本地假上游的真 HTTP 实现。
  * 两者是同一个端口的两个实现 —— 协议形状不因测试而变。
+ *
+ * 两个方法:`send` 走 JSON 接口(提交/轮询),`download` 取二进制(结果图)。
  */
 export interface ImageHttpClient {
   send: (request: HttpRequest) => Promise<HttpResponse>
+  download: (request: { url: string; headers: Record<string, string> }) => Promise<HttpDownload>
 }
 
 /** 生产实现:node 原生 fetch;非 2xx 也**照常返回**(错误正文要留给人看)。 */
@@ -205,16 +250,36 @@ export function createNodeHttpClient(): ImageHttpClient {
       })
       return { status: response.status, text: await response.text() }
     },
+    download: async (request) => {
+      const response = await fetch(request.url, { headers: request.headers })
+      const buffer = await response.arrayBuffer()
+      return {
+        status: response.status,
+        bytes: new Uint8Array(buffer),
+        contentType: response.headers.get('content-type') ?? '',
+      }
+    },
   }
 }
 
-// ─── 适配器:任务参数 ⇄ 一次 HTTP 调用 ───────────────────────────────
+// ─── 适配器:任务参数 ⇄ 上游调用 ─────────────────────────────────────
 
 export interface ImageRequestPlan {
   request: HttpRequest
   /** 这次调用用的适配器(进任务历史的诊断信息)。 */
   adapter: ImageAdapterId
 }
+
+/** 一次提交的结果:要么直接拿到字节(同步),要么拿到一个要轮询的任务(异步)。 */
+export type SubmissionResult =
+  | { kind: 'bytes'; bytes: Uint8Array }
+  | { kind: 'pending'; taskId: string }
+
+/** 轮询一步的结果:还在跑 / 已成功(给图片 URL 或字节)/ 上游明说失败。 */
+export type PollStep =
+  | { kind: 'running'; note: string }
+  | { kind: 'done'; url?: string; bytes?: Uint8Array }
+  | { kind: 'failed'; error: string }
 
 export interface ImageAdapter {
   id: ImageAdapterId
@@ -227,8 +292,19 @@ export interface ImageAdapter {
     /** 非空 = 走图生图端点(上游支持时才有值)。 */
     referenceImages: Array<{ path: string }>
   }) => ImageRequestPlan
-  /** 从响应里取出图片字节;取不到就抛(错误信息带上游原话)。 */
-  parseResponse: (response: HttpResponse, model: ImageModelDescriptor) => Uint8Array
+  /** 提交后的处理:同步适配器在这里就解码出字节;异步适配器只取 task id。 */
+  onSubmit: (response: HttpResponse, model: ImageModelDescriptor) => SubmissionResult
+  /** 异步适配器:轮询一步(同步适配器不实现 —— 它一次就拿到了)。 */
+  pollOnce?: (input: {
+    model: ImageModelDescriptor
+    /** 渠道基址(轮询 URL 由基址 + 路径模板拼)。 */
+    baseUrl: string
+    taskId: string
+    http: ImageHttpClient
+    headers: Record<string, string>
+  }) => Promise<PollStep>
+  /** 轮询参数(间隔/上限)。缺省 = 不需要轮询。 */
+  pollConfig?: (model: ImageModelDescriptor) => { intervalMs: number; maxAttempts: number }
 }
 
 const openAiCompatible: ImageAdapter = {
@@ -247,10 +323,78 @@ const openAiCompatible: ImageAdapter = {
     if (referenceImages.length > 0 && model.capabilities.imageToImage) {
       body.image = referenceImages.map((reference) => ({ image_url: reference.path }))
     }
-    return { request: { method: 'POST', url: `${base}/images/generations`, headers, body }, adapter: 'openai-compatible' }
+    return { request: { method: 'POST', url: `${base}${model.paths?.submit ?? '/images/generations'}`, headers, body }, adapter: 'openai-compatible' }
   },
 
-  parseResponse: (response, model) => {
+  onSubmit: (response, model) => {
+    if (response.status < 200 || response.status >= 300) {
+      // 404 是"这条路走不通"的强信号:多数异步任务制网关的提交路径是**单数**
+      // `/image/generations`。如实指出来,别让人对着一个 404 猜。
+      const hint = response.status === 404
+        ? '(注意:异步任务制网关的提交路径常是单数 `/image/generations`,不是 OpenAI 的复数;'
+          + '若上游是那种网关,请把该模型 adapter 改成 async-task 并配 paths/async)'
+        : ''
+      throw new Error(`上游返回 ${response.status}:${summarize(response.text)}${hint}`)
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(response.text)
+    } catch {
+      throw new Error(`上游返回的不是 JSON:${summarize(response.text)}`)
+    }
+    const data = (parsed as { data?: unknown }).data
+    if (!Array.isArray(data) || data.length === 0) {
+      // 异步任务制网关的提交应答长这样:`{id, task_id, status:'queued'}` —— 没有 data 数组。
+      // 这不是"上游坏了",是**协议不对**:如实指出来,别让人对着它猜。
+      const looksAsync = typeof (parsed as { task_id?: unknown }).task_id === 'string'
+        || typeof (parsed as { status?: unknown }).status === 'string'
+      throw new Error(
+        looksAsync
+          ? `上游回的是**任务**(异步任务制),不是图片:请把该模型的 adapter 改成 async-task 并按上游文档配 paths/async。上游原话:${summarize(response.text)}`
+          : `上游没有返回图片:${summarize(response.text)}`,
+      )
+    }
+    const first = data[0] as { b64_json?: unknown; url?: unknown }
+    if (typeof first.b64_json === 'string' && first.b64_json !== '') {
+      if (!model.capabilities.b64Json) throw new Error(`模型声明不支持 b64_json,却只给了内联图片:${summarize(response.text)}`)
+      return { kind: 'bytes', bytes: Buffer.from(first.b64_json, 'base64') }
+    }
+    throw new Error(
+      `上游没有给内联图片${typeof first.url === 'string' ? '(只给了 url)' : ''}:若这是"异步任务制"网关,`
+      + '请把该模型的 adapter 改成 async-task 并按上游文档填 paths/async;当前适配器不会去猜协议。'
+      + `上游原话:${summarize(response.text)}`,
+    )
+  },
+}
+
+/**
+ * **异步任务制**适配器(one-api / new-api 系的图像网关)。
+ *
+ * 与 OpenAI 的差别有三处,都由**模型目录声明**决定,不靠猜:
+ *  1. 路径:提交 `/image/generations`(**单数**),轮询 `/image/generations/{taskId}`;
+ *  2. 提交只回任务 id(`{task_id, status:'queued'}`),不是图片;
+ *  3. 终态给 `result_url`(图片 URL),要再取一次二进制。
+ */
+const asyncTask: ImageAdapter = {
+  id: 'async-task',
+
+  buildRequest: ({ channel, model, prompt, size, referenceImages }) => {
+    const base = channel.baseUrl.replace(/\/+$/, '')
+    const headers: Record<string, string> = { 'content-type': 'application/json' }
+    if (channel.apiKey !== undefined && channel.apiKey !== '') headers.authorization = `Bearer ${channel.apiKey}`
+
+    const body: Record<string, unknown> = { model: model.id, prompt, n: 1 }
+    if (size !== undefined && model.capabilities.aspectRatioParam) body.size = size
+    if (referenceImages.length > 0 && model.capabilities.imageToImage) {
+      body.image = referenceImages.map((reference) => ({ image_url: reference.path }))
+    }
+    return {
+      request: { method: 'POST', url: `${base}${model.async?.submitPath ?? '/image/generations'}`, headers, body },
+      adapter: 'async-task',
+    }
+  },
+
+  onSubmit: (response) => {
     if (response.status < 200 || response.status >= 300) {
       throw new Error(`上游返回 ${response.status}:${summarize(response.text)}`)
     }
@@ -260,25 +404,98 @@ const openAiCompatible: ImageAdapter = {
     } catch {
       throw new Error(`上游返回的不是 JSON:${summarize(response.text)}`)
     }
-    const data = (parsed as { data?: unknown }).data
-    if (!Array.isArray(data) || data.length === 0) throw new Error(`上游没有返回图片:${summarize(response.text)}`)
-    const first = data[0] as { b64_json?: unknown; url?: unknown }
-    if (typeof first.b64_json === 'string' && first.b64_json !== '') {
-      if (!model.capabilities.b64Json) throw new Error(`模型声明不支持 b64_json,却只给了内联图片:${summarize(response.text)}`)
-      return Buffer.from(first.b64_json, 'base64')
+    const shape = parsed as { task_id?: unknown; id?: unknown; data?: { task_id?: unknown } }
+    // 任务 id 可能在顶层、也可能是 `id`,或在 `data.task_id`(各家写法不一,都认)。
+    const taskId = [shape.task_id, shape.data?.task_id, shape.id].find((value): value is string => typeof value === 'string' && value !== '')
+    if (taskId === undefined) {
+      throw new Error(`上游没给任务 id(不是异步任务制的形状):${summarize(response.text)}`)
     }
-    throw new Error(`上游只给了 url,当前适配器不会去取(如实报告):${summarize(response.text)}`)
+    return { kind: 'pending', taskId }
   },
+
+  pollOnce: async ({ model, baseUrl, taskId, http, headers }) => {
+    const base = baseUrl.replace(/\/+$/, '')
+    const template = model.async?.pollPath ?? '/image/generations/{taskId}'
+    const pollUrl = `${base}${template.replace('{taskId}', encodeURIComponent(taskId))}`
+    const response = await http.send({ method: 'GET', url: pollUrl, headers })
+    if (response.status < 200 || response.status >= 300) {
+      return { kind: 'failed', error: `轮询失败:GET ${pollUrl} 返回 ${response.status} —— ${summarize(response.text)}` }
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(response.text)
+    } catch {
+      return { kind: 'failed', error: `轮询返回的不是 JSON:${summarize(response.text)}` }
+    }
+    const data = ((parsed as { data?: unknown }).data ?? parsed) as {
+      status?: unknown; progress?: unknown; fail_reason?: unknown; result_url?: unknown
+      data?: { content?: { image_url?: unknown } }
+    }
+    const status = typeof data.status === 'string' ? data.status.toUpperCase() : ''
+    const success = (model.async?.successStatuses ?? ['SUCCESS', 'SUCCEEDED', 'SUCCESSFUL']).map((s) => s.toUpperCase())
+    const failure = (model.async?.failureStatuses ?? ['FAILURE', 'FAILED', 'ERROR', 'REVOKED']).map((s) => s.toUpperCase())
+
+    if (failure.includes(status)) {
+      const reason = typeof data.fail_reason === 'string' && data.fail_reason !== '' ? data.fail_reason : status
+      return { kind: 'failed', error: `上游报失败:${reason}(${summarize(response.text, 200)})` }
+    }
+    if (!success.includes(status)) {
+      const progress = typeof data.progress === 'string' ? data.progress : ''
+      return { kind: 'running', note: `${status}${progress === '' ? '' : ` ${progress}`}` }
+    }
+    // 终态:优先 result_url,其次 data.data.content.image_url(实测两种都出现过)。
+    const nested = typeof data.data?.content?.image_url === 'string' ? data.data.content.image_url : undefined
+    const resultUrl = typeof data.result_url === 'string' && data.result_url !== '' ? data.result_url : nested
+    if (resultUrl === undefined) {
+      return { kind: 'failed', error: `上游说成功了但没给图片地址:${summarize(response.text)}` }
+    }
+    return { kind: 'done', url: resultUrl }
+  },
+
+  pollConfig: (model) => ({
+    intervalMs: model.async?.pollIntervalMs ?? 3000,
+    maxAttempts: model.async?.pollMaxAttempts ?? 60,
+  }),
 }
 
 const ADAPTERS: Record<ImageAdapterId, ImageAdapter> = {
   'openai-compatible': openAiCompatible,
+  'async-task': asyncTask,
 }
 
 export function adapterFor(id: ImageAdapterId): ImageAdapter {
   const adapter = ADAPTERS[id]
   if (adapter === undefined) throw new Error(`未知的图像协议适配器:${id}`)
   return adapter
+}
+
+/**
+ * 下载结果图。**非 2xx 与空体都如实报**,不产半成品。
+ * 格式由调用方按 content-type / 扩展名定(落盘要用对后缀)。
+ */
+export async function downloadResultImage(
+  http: ImageHttpClient,
+  url: string,
+  headers: Record<string, string>,
+): Promise<{ bytes: Uint8Array; format: string }> {
+  const response = await http.download({ url, headers })
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`取图失败:${url} 返回 ${response.status}`)
+  }
+  if (response.bytes.byteLength === 0) throw new Error(`取图失败:${url} 返回了空内容`)
+  return { bytes: response.bytes, format: imageFormatOf(response.contentType, url) }
+}
+
+/** 从 content-type / 扩展名判图片格式(判不出就按 png)。 */
+export function imageFormatOf(contentType: string, url: string): string {
+  const type = contentType.toLowerCase()
+  if (type.includes('jpeg') || type.includes('jpg')) return 'jpg'
+  if (type.includes('webp')) return 'webp'
+  if (type.includes('gif')) return 'gif'
+  if (type.includes('png')) return 'png'
+  const ext = /\.([a-z0-9]+)(?:\?|$)/i.exec(url)?.[1]?.toLowerCase()
+  if (ext !== undefined && ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) return ext === 'jpeg' ? 'jpg' : ext
+  return 'png'
 }
 
 function summarize(text: string, limit = 300): string {

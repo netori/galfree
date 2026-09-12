@@ -453,6 +453,37 @@ capabilities: { textToImage, imageToImage, referenceChain, aspectRatioParam, b64
 (**界面看着在,按钮点不动**)。凡"外部状态 ↔ React 状态"双向同步,都要**按内容比对**,
 内容没变就返回旧引用(`sameRows` / `sameScope`)。
 
+### 两种上游协议(实测后补的第二种)
+
+模型目录里的 `adapter` 决定走哪种协议 —— **声明而不是猜**:
+
+| adapter | 形状 | 端点 |
+|---|---|---|
+| `openai-compatible`(**默认**) | 同步:一次调用直接回图片(`data[0].b64_json`) | `POST {base}/images/generations`(**复数**) |
+| `async-task` | **异步任务制**:提交回 `{task_id,status:'queued'}` → 轮询到终态 → 终态给 `result_url` → 再取二进制 | `POST {base}/image/generations`(**单数**) |
+
+`async-task` 的可选字段(都有默认值;面板写目录时会把路径一并写死,免得人记):
+
+```
+adapter: "async-task",
+paths:  { submit: "/image/generations" },
+async:  { submitPath, pollPath: ".../{taskId}", pollIntervalMs: 3000, pollMaxAttempts: 60,
+          successStatuses: ["SUCCESS", ...], failureStatuses: ["FAILURE", ...] }
+```
+
+三条**如实报**的硬规矩(都在 seam 测试里钉住):
+1. 上游明说失败 → `fail_reason` 原话进任务历史;
+2. 轮询到上限还没终态 → "上游没在时限内给结果",**附最后一次状态**(不是干说"超时");
+3. 终态给了 URL 但图取不到 → 算失败并说清,**不落空文件**。
+
+**协议错配要给可执行的指引,不能只说"失败了"**:同步适配器撞上 404 会提示
+"提交路径可能是单数 / 该换成 async-task";同步适配器收到"任务形状"的应答会直说
+"上游回的是任务,请把 adapter 改成 async-task"。这两条都是被真实的 404 教出来的。
+
+**写网关的二进制结论在这里又一次兑现**:异步终态给的是 URL,取回来的字节与同步适配器
+的 b64 走**同一条落盘路**(`WriteOp.content: Uint8Array`),同一个写批、同一份快照 ——
+协议不同不影响"产物一律经网关"这条铁律。
+
 ### 任务 = 一级结构化对象
 
 落 `.studio/image-tasks.json`(经网关 → 自动快照)。字段:`id` / `slot` / `outputPath` /
