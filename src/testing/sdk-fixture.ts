@@ -35,6 +35,13 @@ export async function makeFakeSdk(overrides: Record<string, string> = {}): Promi
   // 中文字体(SDK 的 sdk-fonts/ 下):假一份极小内容,只为验"拷进项目了"。
   await mkdir(join(dir, 'sdk-fonts'), { recursive: true })
   await writeFile(join(dir, 'sdk-fonts', 'SourceHanSansLite.ttf'), Buffer.from([0x00, 0x01, 0x00, 0x00]))
+  // 界面图(SDK 的 gui/game/gui/ 下):生产模板会把这些拷进项目(T18),
+  // 其中 textbox.png 还是发布前置检查的哨兵 —— 假 SDK 少了它,快带建出来的项目
+  // 就会永远被"界面图还没生成"拦着,测的就不是产品行为了。
+  await mkdir(join(dir, 'gui', 'game', 'gui'), { recursive: true })
+  for (const name of ['textbox.png', 'main_menu.png', 'bubble.png']) {
+    await writeFile(join(dir, 'gui', 'game', 'gui', name), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+  }
   return dir
 }
 
@@ -47,7 +54,7 @@ export async function makeFakeSdk(overrides: Record<string, string> = {}): Promi
  * 失败行为与生产实现**一致**:缺文件时报同一个业务码 `sdk-ui-missing` ——
  * 夹具若只抛 ENOENT,测出来的就不是产品行为(上一版正是这么错的)。
  */
-export function fakeUiTemplate(sdkDir: string): (requested: string | undefined) => Promise<{ files: Array<{ path: string; content: string }>; fontFiles: Array<{ path: string; content: Uint8Array }> }> {
+export function fakeUiTemplate(sdkDir: string): (requested: string | undefined) => Promise<{ files: Array<{ path: string; content: string }>; binaryFiles: Array<{ path: string; content: Uint8Array }> }> {
   return async (requested) => {
     const dir = requested !== undefined && requested !== '' ? requested : sdkDir
     const files: Array<{ path: string; content: string }> = []
@@ -61,11 +68,18 @@ export function fakeUiTemplate(sdkDir: string): (requested: string | undefined) 
         )
       }
     }
-    const fontFiles: Array<{ path: string; content: Uint8Array }> = []
-    fontFiles.push({
+    const binaryFiles: Array<{ path: string; content: Uint8Array }> = []
+    binaryFiles.push({
       path: `game/${TEMPLATE_CJK_FONT.target}`,
       content: await readFile(join(dir, 'sdk-fonts', TEMPLATE_CJK_FONT.source)),
     })
-    return { files, fontFiles }
+    // 界面图:生产模板也拷它们(缺了不阻断,但快带要能测到"拷过去了")。
+    for (const name of ['textbox.png', 'main_menu.png', 'bubble.png']) {
+      binaryFiles.push({
+        path: `game/gui/${name}`,
+        content: await readFile(join(dir, 'gui', 'game', 'gui', name)),
+      })
+    }
+    return { files, binaryFiles }
   }
 }

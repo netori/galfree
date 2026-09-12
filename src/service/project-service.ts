@@ -9,12 +9,12 @@
 import { access, mkdir, readdir, readFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { GalfreeError } from './error.ts'
 import { runGit } from './git.ts'
 import { ProjectRegistry, type RegistryEntry } from './registry.ts'
 import { commitSnapshot, fileDiff, fileHistory, rollbackFile, type SnapshotEntry } from './snapshot.ts'
-import { PROJECT_NAME_RE, TEMPLATE_CJK_FONT, TEMPLATE_UI_FILES, renderTemplateFiles, renderUiPatch, templateKeepFiles } from './template.ts'
+import { PROJECT_NAME_RE, TEMPLATE_CJK_FONT, TEMPLATE_UI_FILES, TEMPLATE_UI_IMAGE_DIR, renderTemplateFiles, renderUiPatch, templateKeepFiles } from './template.ts'
 import { FakeValidator } from './validation/template-validator.ts'
 import { deriveGraph, parseRpy } from './rpy/parse.ts'
 import { readRpyFiles } from './rpy/files.ts'
@@ -43,13 +43,20 @@ import { composeSceneFile, extractSceneBlock, gatewayPathOf, scenesPathOf } from
 import { applySceneEdit, buildSceneForm, type SceneEdit, type SceneFormModel } from './scene-form.ts'
 import { contentFingerprint, launchPlaytest, playtestDocument, readPlaytest, PLAYTEST_FILE, type PlaytestPorts, type PlaytestRun } from './playtest.ts'
 import {
+  DEFAULT_PACKAGES, GUI_IMAGES_SENTINEL, PUBLISH_FILE, assertDestinationOutsideProject, buildIdentityBlockers,
+  collectArtifacts, guiImagesBlockers, logTailOf,
+  publishBlockers, publishDocument, publishView, readPublish, snapshotDir,
+  type PublishArtifact, type PublishBlocker, type PublishDocument, type PublishPorts, type PublishReadiness,
+  type PublishReport, type PublishRun, type PublishView,
+} from './publish.ts'
+import {
   IMAGE_TASKS_FILE, MAX_REJECTION_NOTE_CHARS, adapterFor, dataUrlOf, degradeInput, downloadResultImage,
   emptyTasksDocument, findTask, imageModels,
   parseTasksDocument, tasksDocument, upsertTask,
   type CreateGenerationTaskInput, type GenerationTask, type GenerationAttempt, type GenerationRejection,
   type ImageChannelSettings, type ImageHttpClient,
 } from './images.ts'
-import { ABSENT, fileFingerprint, fingerprint } from './hash.ts'
+import { ABSENT, fileFingerprint, fingerprint, pathExists } from './hash.ts'
 import { WriteGateway, type ChangeEvent, type FileSnapshot, type GatewayError, type WriteLogEntry, type WriteOp, type WriteResult } from './write-gateway.ts'
 import type { WriteBatchReason } from './write-gateway.ts'
 import type { ValidationReport } from './validation/contract.ts'
@@ -166,7 +173,18 @@ export interface ProjectServiceOptions {
    * 缺省实现按 `CreateProjectInput.sdkDir` 现取 —— 两个入口最终都落到
    * "读 SDK 的 GUI 模板",没有第二套界面来源。
    */
-  uiTemplate?: (sdkDir: string | undefined) => Promise<{ files: Array<{ path: string; content: string }>; fontFiles: Array<{ path: string; content: Uint8Array }> }>
+  uiTemplate?: (sdkDir: string | undefined) => Promise<{ files: Array<{ path: string; content: string }>; binaryFiles: Array<{ path: string; content: Uint8Array }> }>
+  /**
+   * 发布端口(T18):构建器 + 输出目录。
+   *
+   * **缺省 = 没装配** → 发布这条路如实报 `publish-unavailable`(与"没配渠道"同一种态度),
+   * 不假装能出片。生产注入真 spawn 的钉版 SDK;快带注入假构建(把假产物写进输出目录)。
+   */
+  publish?: {
+    ports: PublishPorts
+    /** 这个项目的输出目录(绝对路径;生产 = 设置里的目录 / 数据目录下的默认位置)。 */
+    destination: (project: ProjectInfo) => string
+  }
 }
 
 /** 图像子系统的注入端口(T14)。 */
@@ -182,16 +200,20 @@ export class ProjectService {
   #validator: ValidatorPort
   #playtestPorts: PlaytestPorts
   #imagePorts: ImagePorts | null
-  #uiTemplate: (sdkDir: string | undefined) => Promise<{ files: Array<{ path: string; content: string }>; fontFiles: Array<{ path: string; content: Uint8Array }> }>
+  #publishPorts: NonNullable<ProjectServiceOptions['publish']> | null
+  #uiTemplate: (sdkDir: string | undefined) => Promise<{ files: Array<{ path: string; content: string }>; binaryFiles: Array<{ path: string; content: Uint8Array }> }>
   #gateways = new Map<string, Promise<WriteGateway>>()
   /** 图像任务账本的写串行(与网关的串行合起来构成"读-改-写"原子性)。 */
   #taskQueue: Promise<unknown> = Promise.resolve()
+  /** 发布的串行:构建很重,同时跑两个没有意义(而且会互相踩输出目录)。 */
+  #publishQueue: Promise<unknown> = Promise.resolve()
 
   constructor(options: ProjectServiceOptions) {
     this.#registry = new ProjectRegistry(join(options.dataDir, 'registry.json'))
     this.#validator = options.validator ?? (async (project) => new FakeValidator().validate(join(project.root, 'game')))
     this.#playtestPorts = options.playtest ?? { resolveLauncher: async () => null, spawn: async () => ({ code: 0, log: '' }) }
     this.#imagePorts = options.images ?? null
+    this.#publishPorts = options.publish ?? null
     this.#uiTemplate = options.uiTemplate ?? ((sdkDir) => this.#uiFilesFrom(sdkDir))
   }
 
@@ -224,10 +246,11 @@ export class ProjectService {
     const files = [
       ...renderTemplateFiles({ name: input.name, title, id }),
       ...templateKeepFiles(),
-      // 中文字体:拷进项目(相对路径引用才有效;绝对路径会被静默回退)。
-      ...ui.fontFiles,
-      // 中文字体/界面变量补丁。
-      renderUiPatch(ui.fontFiles.length > 0),
+      // 中文字体与界面图片:拷进项目(**相对路径才有效**;绝对路径会被静默回退)。
+      ...ui.binaryFiles,
+      // 中文字体/界面变量补丁(`hasFont` 由"到底拷到字体没有"决定);
+      // 里面还带着"发行版排除 guisupport.rpy + 自带 gui.scale"那一段(T18 的实测修复)。
+      renderUiPatch(ui.binaryFiles.some((file) => file.path.includes('SourceHanSans'))),
       // 界面文件从**钉版 SDK 的 GUI 模板**整份拷(见 template.ts 的说明:少了 screens.rpy,
       // 连关窗确认都会崩)。取不到 → 如实抛 sdk-ui-missing,不静默拼凑。
       ...ui.files,
@@ -390,6 +413,8 @@ export class ProjectService {
     const completeness = deriveCompleteness(graph)
     // 音频引用(T17):池是派生的(扫 game/ 下的音频文件),悬空引用 = error 上板。
     const audio = await this.#deriveAudio(graph.scenes, entry.path)
+    // 发布处境(T18):上次发布的产物在哪、还新不新(纯推导;没发布过 = null)。
+    const publishLedger = await readPublish(entry.path)
     return computeProgress(entry.path, {
       scenes: graph.scenes,
       problems: [...graph.problems, ...completeness.problems, ...derived.problems, ...audio.problems],
@@ -402,6 +427,7 @@ export class ProjectService {
         endingReachable: completeness.endingReachable,
       },
       audio: poolViewOf(audio),
+      publish: publishView(publishLedger, contentFingerprint(graph)),
       bible: {
         fingerprint: bibleFingerprint(bible),
         chapters: bible.chapters.length,
@@ -454,11 +480,7 @@ export class ProjectService {
     const run = await launchPlaytest(this.#playtestPorts, entry.path, contentFingerprint(graph), fromLabel)
     const ledger = (await readPlaytest(entry.path)) ?? { schemaVersion: 1 as const, last: null, history: [] }
     const next = { schemaVersion: 1 as const, last: run, history: [...ledger.history, run] }
-    const current = await gateway.read(PLAYTEST_FILE)
-    await gateway.writeBatch(
-      [{ path: PLAYTEST_FILE, content: playtestDocument(next), expectVersion: current.version }],
-      { origin: 'workbench', reason: 'playtest' },
-    )
+    await this.#recordLedger(entry.id, PLAYTEST_FILE, playtestDocument(next), 'playtest')
     return run
   }
 
@@ -469,6 +491,119 @@ export class ProjectService {
   async completeness(projectRef: string): Promise<CompletenessReport> {
     const graph = await this.branchGraph(projectRef)
     return deriveCompleteness(graph)
+  }
+
+  // ─── 本地发布(T18)───────────────────────────────────────────────────
+
+  /**
+   * 发布前置检查(**读**):能不能发、缺什么、会用到哪个输出目录、上次发的是什么。
+   *
+   * 判断全部来自**同一份推导板**(`progress()`),不另算一套 lint/素材 ——
+   * 否则板上说缺、发布说能出,两边迟早分叉。面板在点按钮之前就能显示这一份。
+   */
+  async publishReadiness(projectRef: string, options: { outputDir?: string; packages?: string[] } = {}): Promise<PublishReadiness> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const project = await this.#toInfo(entry.id)
+    const progress = await this.progress(project.id)
+    const publishPorts = this.#publishPorts
+    const launcher = publishPorts === null ? null : await publishPorts.ports.resolveLauncher()
+    const blockers = publishBlockers(progress, {
+      sdkReady: launcher !== null,
+      publishConfigured: publishPorts !== null,
+    })
+    const packages = options.packages ?? [...DEFAULT_PACKAGES]
+
+    let destination: string | null = null
+    if (publishPorts !== null) {
+      destination = options.outputDir ?? publishPorts.destination(project)
+      // 输出目录在源树里 = 会污染项目(AC4)→ 也是阻塞项,在**构建之前**说清楚。
+      try {
+        assertDestinationOutsideProject(destination, project.root)
+      } catch (error) {
+        blockers.push({ code: 'destination-in-project', label: error instanceof Error ? error.message : String(error) })
+      }
+      // 构建标识(实测:没有 build.name 会打出 `-pc/` 与 `.exe` 这种空名字的包)。
+      const optionsRpy = await readFile(join(project.root, 'game', 'options.rpy'), 'utf8').catch(() => null)
+      blockers.push(...buildIdentityBlockers(optionsRpy))
+      // 界面图(Ren'Py 在**首次运行时**把它们生成进项目;发行版里没有那个生成器)。
+      blockers.push(...guiImagesBlockers(await pathExists(join(project.root, 'game', 'gui', GUI_IMAGES_SENTINEL))))
+    }
+    return { ready: blockers.length === 0, blockers, destination, packages, last: progress.publish }
+  }
+
+  /**
+   * **一键发布**(T18):钉版 SDK 的 `build_dists` 产出可发行物,落在**项目源树之外**。
+   *
+   * 两条硬规矩:
+   *  - 前置没过就**不构建**(如实阻止并列缺项,不产半成品);
+   *  - 产物只在输出目录里,项目里**一个字节都不多**(源树是唯一真相,不是构建垃圾场)。
+   *
+   * 事实记 `.studio/publish.json`(经网关 → 快照):板据此说"上次发布什么时候、产物在哪、
+   * 还新不新"。平台上传与在线分发**不做**(spec Out of Scope)。
+   */
+  async publish(projectRef: string, options: { packages?: string[]; outputDir?: string } = {}): Promise<PublishReport> {
+    const readiness = await this.publishReadiness(projectRef, {
+      ...(options.outputDir === undefined ? {} : { outputDir: options.outputDir }),
+      ...(options.packages === undefined ? {} : { packages: options.packages }),
+    })
+    const publishPorts = this.#publishPorts
+    // 前置没过(含"这台宿主没装配")→ 不构建,把缺项原样交回。
+    if (!readiness.ready || publishPorts === null || readiness.destination === null) {
+      return { ...readiness, ok: false }
+    }
+
+    // 构建串行:两个构建同时写同一个输出目录只会互相踩。
+    const previous = this.#publishQueue
+    let release!: () => void
+    this.#publishQueue = new Promise<void>((resolve) => { release = resolve })
+    await previous.catch(() => {})
+
+    try {
+      const entry = await this.#resolve(projectRef)
+      const launcher = await publishPorts.ports.resolveLauncher()
+      if (launcher === null) throw new GalfreeError('sdk-not-ready', '钉版 SDK 尚未就绪,无法发布')
+      const destination = readiness.destination
+      const before = await snapshotDir(destination)
+      const result = await publishPorts.ports.run({
+        launcher,
+        // distribute 命令由 **launcher 项目**注册(见 publish.ts 顶部):SDK 根目录下的 launcher/。
+        launcherProject: join(dirname(launcher), 'launcher'),
+        projectRoot: entry.path,
+        destination,
+        packages: readiness.packages,
+      })
+      const artifacts: PublishArtifact[] = result.code === 0 ? await collectArtifacts(destination, before) : []
+      const graph = await this.branchGraph(entry.id)
+      const run: PublishRun = {
+        at: new Date().toISOString(),
+        ok: result.code === 0,
+        packages: readiness.packages,
+        destination,
+        artifacts,
+        exitCode: result.code,
+        logTail: logTailOf(result.log),
+        fingerprint: contentFingerprint(graph),
+      }
+      await this.#recordLedger(entry.id, PUBLISH_FILE, publishDocument({
+        schemaVersion: 1,
+        last: run,
+        history: [...((await readPublish(entry.path))?.history ?? []), run],
+      }), 'publish')
+      return { ...readiness, ok: run.ok, run }
+    } finally {
+      release()
+    }
+  }
+
+  /**
+   * 事实账本的"读-改-写"(试玩 / 发布共用):现读版本戳 → 经网关写 → 自动快照。
+   * 与别的写一样只有这一条路 —— 账本也是项目文件。
+   */
+  async #recordLedger(projectRef: string, relPath: string, content: string, reason: string): Promise<void> {
+    const gateway = await this.#gatewayFor(projectRef)
+    const current = await gateway.read(relPath)
+    await gateway.writeBatch([{ path: relPath, content, expectVersion: current.version }], { origin: 'workbench', reason })
   }
 
   /** 审读戳账本(历史记录,含失效者)。 */
@@ -1623,7 +1758,7 @@ export class ProjectService {
    * 取不到就**如实抛**:一个没有 `screens.rpy` 的项目是跑不起来的(关窗即崩),
    * 与其造一个"看着像项目、一玩就崩"的东西,不如当场说清缺什么、去哪儿补。
    */
-  async #uiFilesFrom(sdkDir: string | undefined): Promise<{ files: Array<{ path: string; content: string }>; fontFiles: Array<{ path: string; content: Uint8Array }> }> {
+  async #uiFilesFrom(sdkDir: string | undefined): Promise<{ files: Array<{ path: string; content: string }>; binaryFiles: Array<{ path: string; content: Uint8Array }> }> {
     if (sdkDir === undefined || sdkDir === '') {
       throw new GalfreeError(
         'sdk-ui-missing',
@@ -1642,17 +1777,29 @@ export class ProjectService {
         )
       }
     }
-    // 中文字体:SDK 自带思源黑体,拷进项目(**相对路径才有效**;绝对路径会被静默回退)。
-    // 拿不到不阻断建项目 —— 界面补丁会在注释里说明"中文会显示成方块",
+    // 中文字体与界面图片:都从 SDK 拷进项目(**相对路径才有效**;绝对路径会被静默回退)。
+    // 字体拿不到**不阻断**建项目 —— 界面补丁会在注释里说明"中文会显示成方块",
     // 这比"因为少一个字体就不让人建项目"合理:项目本身是好的。
-    const fontFiles: Array<{ path: string; content: Uint8Array }> = []
+    const binaryFiles: Array<{ path: string; content: Uint8Array }> = []
     try {
-      fontFiles.push({
+      binaryFiles.push({
         path: `game/${TEMPLATE_CJK_FONT.target}`,
         content: await readFile(join(sdkDir, 'sdk-fonts', TEMPLATE_CJK_FONT.source)),
       })
     } catch { /* 见上:不阻断 */ }
-    return { files, fontFiles }
+
+    // SDK 界面模板里的图片资源(`gui/*.png`):**发行版里没有生成器**,所以能拷的就拷进去
+    // (其余界面图由 SDK 在首次运行时生成 —— 那一步的兜底与检查见 template.ts 的 gui7 空壳)。
+    try {
+      for (const relative of await listFilesRecursive(join(dir, TEMPLATE_UI_IMAGE_DIR))) {
+        binaryFiles.push({
+          path: `game/${TEMPLATE_UI_IMAGE_DIR}/${relative}`,
+          content: await readFile(join(dir, TEMPLATE_UI_IMAGE_DIR, ...relative.split('/'))),
+        })
+      }
+    } catch { /* 图片缺失不阻断建项目:界面图本来就还有一条"首次运行时生成"的路 */ }
+
+    return { files, binaryFiles }
   }
 
   async #initGit(root: string, name: string): Promise<void> {
@@ -1664,4 +1811,24 @@ export class ProjectService {
 
 export function createProjectService(options: ProjectServiceOptions): ProjectService {
   return new ProjectService(options)
+}
+
+/** 递归列出一个目录下的文件(相对 POSIX 路径;缺目录 = 空)。模板拷界面图用。 */
+async function listFilesRecursive(dir: string, prefix = ''): Promise<string[]> {
+  let entries
+  try {
+    entries = await readdir(dir, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const found: string[] = []
+  for (const entry of entries) {
+    const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+    if (entry.isDirectory()) {
+      found.push(...await listFilesRecursive(join(dir, entry.name), rel))
+      continue
+    }
+    if (entry.isFile()) found.push(rel)
+  }
+  return found
 }

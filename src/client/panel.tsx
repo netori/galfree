@@ -17,6 +17,7 @@ import { StageBoard } from './stage-board.tsx'
 import { AssetBoard } from './asset-board.tsx'
 import { BibleCard } from './bible-card.tsx'
 import { SceneWorkbench } from './scene-workbench.tsx'
+import { PublishCard } from './publish-card.tsx'
 import { FileInspector } from './file-inspector.tsx'
 import { DirectoryPicker } from './directory-picker.tsx'
 import { ProjectSwitcher } from './project-switcher.tsx'
@@ -382,6 +383,13 @@ export function WorkbenchPanel() {
             </div>
           </section>
         ) : null}
+
+        <PublishCard
+          api={api}
+          hasProject={hasProject}
+          onChanged={() => refresh()}
+          onNotice={pushNotice}
+        />
 
         <FileInspector
           tree={state?.tree ?? []}

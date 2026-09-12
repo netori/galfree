@@ -220,6 +220,58 @@ export interface SceneRowView {
   note?: string
 }
 
+/** 发布(T18):一次构建的产物与状态;产物在**项目源树之外**。 */
+export interface PublishArtifactView {
+  name: string
+  path: string
+  bytes: number
+}
+
+export interface PublishBlockerView {
+  code: string
+  label: string
+  count?: number
+  detail?: string
+}
+
+export interface PublishView {
+  at: string
+  ok: boolean
+  destination: string
+  packages: string[]
+  artifacts: PublishArtifactView[]
+  logTail: string
+  /** 产物之后内容又变了 → 它代表的不再是当前这一版。 */
+  stale: boolean
+}
+
+export interface PublishReadinessView {
+  ready: boolean
+  blockers: PublishBlockerView[]
+  destination: string | null
+  packages: string[]
+  /** 上一次发布的推导视图(没发布过 = null)。 */
+  last: PublishView | null
+}
+
+/** 一次构建的结果(与接缝的 `PublishRun` 同形)。 */
+export interface PublishRunView {
+  at: string
+  ok: boolean
+  packages: string[]
+  destination: string
+  artifacts: PublishArtifactView[]
+  exitCode: number
+  logTail: string
+  fingerprint: string
+}
+
+/** `POST /publish` 的应答:前置结论 + 这一次真跑出来的结果(被阻止时 `run` 缺省)。 */
+export interface PublishReportView extends PublishReadinessView {
+  ok: boolean
+  run?: PublishRunView
+}
+
 /** 音频文件池与引用处境(T17;池是派生的,没有手工登记)。 */
 export interface AudioPoolView {
   files: Array<{ path: string; bytes: number }>
@@ -630,6 +682,19 @@ export class GalfreeApi {
   /** 音频文件池与引用处境(T17,纯读):池是派生的,没有任何手工登记。 */
   async audioPool(): Promise<AudioPoolView> {
     return readJson(await fetch('/api/galfree/audio'))
+  }
+
+  /** 发布前置检查(T18,纯读):能不能发、缺什么、会用到哪个输出目录。 */
+  async publishReadiness(): Promise<PublishReadinessView> {
+    return readJson(await fetch('/api/galfree/publish'))
+  }
+
+  /** 一键发布(T18):产物落**项目源树之外**;前置没过就如实阻止并列缺项。 */
+  async publish(payload: { packages?: string[] } = {}): Promise<PublishReportView> {    return readJson(await fetch('/api/galfree/publish', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    }))
   }
 
   /**

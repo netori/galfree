@@ -47,6 +47,8 @@ let seq = 0
 /** 目录选择后端形态与"人在对话框里选了什么",按用例改写。 */
 let pickerKind = 'native'
 let pickedPath: string | null = null
+/** 发布端口收到的构建调用(断言"被阻止时**没有**开始构建")。 */
+let publishCalls: Array<{ destination: string; packages: string[] }> = []
 
 async function req(path: string, init?: RequestInit): Promise<{ status: number; body: any }> {
   const res = await fetch(`${base}${path}`, init)
@@ -89,7 +91,23 @@ beforeAll(async () => {
   dataDir = await mkdtemp(join(tmpdir(), 'galfree-route-'))
   projectsRoot = await mkdtemp(join(tmpdir(), 'galfree-route-proj-'))
   sdkDir = await makeFakeSdk()
-    service = createProjectService({ dataDir, uiTemplate: fakeUiTemplate(sdkDir) })
+    service = createProjectService({
+      dataDir,
+      uiTemplate: fakeUiTemplate(sdkDir),
+      // 发布端口:假构建(真构建在 `publish.slow.test.ts` 的慢带里);输出目录在项目之外。
+      publish: {
+        ports: {
+          resolveLauncher: async () => join(sdkDir, 'renpy.exe'),
+          run: async (input) => {
+            publishCalls.push(input)
+            await mkdir(input.destination, { recursive: true })
+            await writeFile(join(input.destination, 'rt-pc.zip'), Buffer.from('fake-zip'))
+            return { code: 0, log: 'ok\n' }
+          },
+        },
+        destination: () => join(dataDir, 'publish', 'rt'),
+      },
+    })
   const routes = makeRoutes({
     service,
     config: () => ({ enabled: true, defaultProjectsRoot: projectsRoot }),
@@ -268,6 +286,56 @@ describe('路由适配层(/api/galfree)', () => {
     expect(cleared.body.problems.some((entry: { code: string }) => entry.code === 'missing-audio')).toBe(false)
     expect(cleared.body.audio.unused).toEqual(['audio/rain.ogg'])
     expect(cleared.body.lint.ok).toBe(true)
+  })
+
+  it('发布路由(T18):前置未过 → 逐项缺项且**不构建**;就绪 → 产物路径入响应', async () => {
+    const project = await freshProject()
+    publishCalls = []
+
+    // 这个夹具的场景引用了 `bg school`(没有图)→ 板上的"素材缺"就是发布阻塞项。
+    const progress = await req('/api/galfree/progress')
+    const missingSlots = progress.body.slots.filter((slot: { filled: boolean }) => !slot.filled).map((slot: { slot: string }) => slot.slot)
+    expect(missingSlots).toContain('bg school')
+
+    const readiness = await req('/api/galfree/publish')
+    expect(readiness.status).toBe(200)
+    expect(readiness.body.ready).toBe(false)
+    const blocker = readiness.body.blockers.find((entry: { code: string }) => entry.code === 'missing-slots')
+    expect(blocker.count).toBe(missingSlots.length)
+    expect(readiness.body.destination).toBe(join(dataDir, 'publish', 'rt'))
+
+    // 点发布 = 被**如实阻止**:报告里逐项列出缺项,而且构建端口一次都没被调用。
+    const blocked = await postJson('/api/galfree/publish', { packages: ['pc'] })
+    expect(blocked.status).toBe(200)
+    expect(blocked.body.report.ok).toBe(false)
+    expect(blocked.body.report.blockers.map((entry: { code: string }) => entry.code)).toContain('missing-slots')
+    expect(publishCalls).toHaveLength(0)
+
+    // 把缺的素材全部补上(经网关落盘)→ 就绪 → 构建 → 产物路径进响应。
+    for (const slot of progress.body.slots.filter((entry: { filled: boolean }) => !entry.filled)) {
+      const current = await service.readProjectFile(project.id, slot.assetPath)
+      expect(current.missing).toBe(true)
+      await service.writeProjectFiles(project.id, [{ path: slot.assetPath, content: Buffer.from('fake-png'), expectVersion: current.version }], { origin: 'agent', reason: 'slot' })
+    }
+    const ready = await req('/api/galfree/publish')
+    expect(ready.body.ready).toBe(true)
+
+    const published = await postJson('/api/galfree/publish', { packages: ['pc'] })
+    expect(published.status).toBe(200)
+    expect(published.body.report.ok).toBe(true)
+    expect(published.body.report.run.artifacts.map((artifact: { name: string }) => artifact.name)).toEqual(['rt-pc.zip'])
+    expect(publishCalls).toHaveLength(1)
+    expect(publishCalls[0]!.packages).toEqual(['pc'])
+
+    // 产物与状态也在推导板上(工作台读的是同一份)。
+    const after = await req('/api/galfree/progress')
+    expect(after.body.publish.ok).toBe(true)
+    expect(after.body.publish.stale).toBe(false)
+
+    // 输出目录想在项目源树里 → 明确的阻塞项(而不是"服务端故障")。
+    const inside = await postJson('/api/galfree/publish', { outputDir: join(project.root, 'dists') })
+    expect(inside.status).toBe(200)
+    expect(inside.body.report.blockers.map((entry: { code: string }) => entry.code)).toContain('destination-in-project')
   })
 
   it('人盖场景戳生效;重生成同一幕 → 待复审(指纹=场景原始文本)', async () => {

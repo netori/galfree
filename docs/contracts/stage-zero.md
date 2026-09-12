@@ -797,6 +797,105 @@ AudioPoolView = {
 3. **`voice` 声道照解析器如实呈现**(`play voice …` 在子集里),但 v1 **不生成任何音频**:
    没有音乐生成、没有 TTS,试听靠试玩。
 
+## 本地发布(T18 之后追加)
+
+**一键把项目打成可发行物**(spec User Story 19):钉版 SDK 的 `build_dists`,默认 `pc` 包
+(Windows + Linux)。平台上传与在线分发**不做**(spec Out of Scope)—— 这一票只把产物放到
+磁盘上,并把路径与状态说清楚。
+
+### 构建命令的形状(从钉版 SDK 源码读出来的)
+
+`distribute` **不是引擎内置命令**,它由 **launcher 项目**注册
+(`launcher/game/distribute.rpy:1833`)。所以调用形状是:
+
+```
+renpy.exe <SDK>/launcher distribute --destination <输出目录> --package <包名…> <项目目录>
+```
+
+- `--destination` 支持绝对路径(相对路径是相对**项目父目录**,见 `distribute.rpy:642`),
+  我们一律给绝对路径;
+- 默认包名 `pc`(`renpy/common/00build.rpy`:PC = Windows + Linux);Android 要另配 Android SDK,
+  属于"可选",由调用方给 `packages`。
+- Windows 上这里 `windowsHide: true` 是对的(命令行构建不该弹窗)—— **与试玩那条相反**
+  (试玩必须让游戏窗口出现在人眼前,那一课写在 `playtest.ts` 的注释里)。
+
+### 前置检查:用板上的判断,不另算一套
+
+`publishReadiness(ref)` / `GET /publish` 给出 `{ready, blockers[], destination, packages}`,阻塞项来自
+**同一份 `progress()`**:
+
+| code | 触发 |
+|---|---|
+| `publish-unavailable` | 这台宿主没装配发布端口(能力未就绪 = 503,与"没配渠道"同性质) |
+| `sdk-not-ready` | 钉版 SDK 未就绪(没有构建器) |
+| `lint-errors` | 板上有 error 级问题(悬空跳转、孤立场景、结局不可达…) |
+| `missing-slots` | 还有没填的素材槽(空槽发出去就是灰底) |
+| `missing-audio` | 音频引用悬空(那一段会静默没声音) |
+| `build-identity-missing` | 项目没声明 `build.name`(包名与主程序名会是空的 —— 见慢带那两条) |
+| `gui-images-missing` | 界面图还没生成(先在 SDK 里跑一次试玩) |
+| `destination-in-project` | 输出目录配到了项目源树里(见下) |
+
+后两条只在**装配了发布端口**时才算(没端口就没得发,先报那一条)。
+
+**前置没过就不构建**(`publish()` 返回 `ok:false` + 逐项缺项),不产出半成品 ——
+"宁可不发,也不出一个缺素材的包"。板说缺、发布说能出,两边迟早分叉,所以这里只读板。
+
+### 产物落在项目源树之外(可配置)
+
+- 输出目录 = 设置里的「发布输出目录」+ `<项目名>`;留空 = **数据目录下的 `publish/<项目名>`**。
+- 配到项目里面 → 如实拒绝(`destination-in-project`):源树是唯一真相,不是构建垃圾场
+  (产物进了项目,`git status` 就再也不干净,"改了什么"也看不清了)。
+- 快带以 `git status --porcelain` 为空 + 项目根下没有 `dist*` 目录为断言。
+
+### 产物清单:比对目录,不猜文件名
+
+构建前后各扫一遍输出目录,`artifacts` = **这次真的多出来的文件**(名字 + 绝对路径 + 字节)。
+猜 `<name>-pc.zip` 这类命名,在换包名/换版本号时会静默漏报。
+
+### 事实与新鲜度
+
+一次发布 = 一条 `.studio/publish.json`(`{at, ok, packages, destination, artifacts, exitCode,
+logTail, fingerprint}`,history 留最近 20 条),经网关写 → 进快照(记录的是**路径与状态**,
+不是产物本身)。`progress.publish` 由账本 + 当前内容指纹推导:
+
+- 没发布过 = `null`(如实,不是"发过了但是空的");
+- 内容在发布之后又变了 → `stale: true`(产物代表的不再是当前这一版);
+- 构建失败 → `ok:false` + `logTail`(上游原话,不吞成"失败了")。
+
+### 路由与工具面
+
+| 路由 | 语义 |
+|---|---|
+| `GET /publish` | 前置检查 + 上次发布的推导视图(纯读) |
+| `POST /publish` `{packages?, outputDir?}` | 一键发布 → 200 `{report}`;没装配端口 → 503 `publish-unavailable` |
+
+agent:**`galfree_publish`**(`readiness_only:true` 只看前置;给了 `packages` 就构建),
+`galfree_project_status` 多一段 `publish`。
+
+### 慢带:产物主程序真能启动(AC3)
+
+`src/service/publish.slow.test.ts` —— 真项目 → 前置就绪 → **真 `build_dists`** →
+产物在项目之外且 > 1MB → 解压 → 找到包里的主程序 → **启动它、进程活着、没有 traceback** →
+杀掉;顺带断言项目里没有 `dists/`。这条慢带存在的理由很直白:
+**构建命令退出码 0 ≠ 打出来的东西能跑**(lint/compile 对启动期错误都返回 0 的教训,同一个形状)。
+
+### 这条慢带抓出来的两个**真模板缺陷**(都已修,别再踩)
+
+| 现象(实测) | 根因 | 修法 |
+|---|---|---|
+| 包名 `-pc.zip`、主程序 `.exe` | Ren'Py 的 `build.name` 缺省是 `None` → `directory_name`/`executable_name` 全空(`renpy/common/00build.rpy`) | 模板的 `options.rpy` 写 `define build.name = "<项目名>"`;发布前置新增 `build-identity-missing` 拦老项目 |
+| 启动即 `ModuleNotFoundError: No module named 'gui7'` | 模板从 SDK 拷的 `guisupport.rpy` 里有一段 `init 100 python in gui:` 会 import **gui7**(它只住在 `<sdk>/launcher/game/`)来生成界面图 —— 发行版里没有 SDK | 界面补丁里 `build.classify("game/guisupport.rpy"/".rpyc", None)` **发行版排除**它,`gui.scale` 由补丁自己提供;在 SDK 里跑照常生成界面图 |
+
+两条附带结论,都写进代码注释了:
+
+- **只排 `.rpy` 等于没排**:跑的是编译出来的 `.rpyc`(我第一次就是这么栽的);
+- **别用"项目里放一个空壳 gui7"这条歪路**:Ren'Py 的导入钩子优先解析 `game/` 下的模块,
+  空壳会把**真的 gui7 也挡住**,于是"在 SDK 里跑"这条路上的界面图生成同样挂掉(试过、错)。
+
+界面图本身(`game/gui/*.png`,含哨兵 `textbox.png`)是 Ren'Py **首次运行时**生成进项目的,
+所以发布前置新增 `gui-images-missing`:**先在 SDK 里跑一次(`试玩`),界面图会像别的素材一样
+落进项目并进快照,再发布**才是完整的。
+
 ## 模板的界面层(T7 之后补齐的一块,实测换来的)
 **新建项目必须整份带上 SDK 的 GUI 模板**(`screens.rpy` / `gui.rpy` / `guisupport.rpy` / `testcases.rpy`),
 外加一份**项目内**的中文字体。这不是"锦上添花",是"能不能跑"的问题 —— 下面三条都是实测:

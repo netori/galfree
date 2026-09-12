@@ -70,7 +70,7 @@ describe('agent 工具(T10)', () => {
 
   it('注册出模型看到的契约:两个工具,参数与输出声明齐备', () => {
     const tools = register()
-    // 剧本环节两个 + 美术环节(T15)五个 + 参考链回路(T16)两个。
+    // 剧本环节两个 + 美术环节(T15)五个 + 参考链回路(T16)两个 + 发布(T18)一个。
     expect(tools.map((tool) => tool.name).sort()).toEqual([
       'galfree_art_queue',
       'galfree_character_art',
@@ -79,9 +79,17 @@ describe('agent 工具(T10)', () => {
       'galfree_generate_scene',
       'galfree_image_channel',
       'galfree_project_status',
+      'galfree_publish',
       'galfree_reference_chain',
       'galfree_reroll_image',
     ])
+
+    // T18:发布可以先只看前置检查(readiness_only),构建是可选的动作。
+    const publish = tools.find((tool) => tool.name === 'galfree_publish')!
+    expect(publish.parameters.properties.readiness_only?.type).toBe('boolean')
+    expect(publish.parameters.properties.packages?.type).toBe('array')
+    expect(publish.parameters.required).toBeUndefined()
+    expect(publish.description).toContain('源树之外')
 
     // T16:拒收注记是**可选**参数(人没给理由就不记),差分批量必须给角色与模型。
     const reroll = tools.find((tool) => tool.name === 'galfree_reroll_image')!

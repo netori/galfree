@@ -17,6 +17,7 @@ function settings(overrides: Partial<Required<Config>> = {}): Required<Config> {
     imageApiKey: 'sk-plaintext-in-settings',
     imageChannelName: '主渠道',
     imageModels: '',
+    publishDir: '',
     ...overrides,
   }
 }

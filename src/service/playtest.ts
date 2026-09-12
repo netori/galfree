@@ -8,12 +8,12 @@
  * `start` 跳向目标场 —— 不在用户项目里塞文件(`.rpy` 是唯一真相,试玩副本不是真相源)。
  * 目标场不存在就会在启动时崩出 traceback,所以"落对了"这件事有可红的信号。
  */
-import { spawn } from 'node:child_process'
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { GalfreeError } from './error.ts'
 import { fingerprint } from './hash.ts'
+import { spawnWithLog } from './spawn-log.ts'
 import type { BranchGraph } from './rpy/dialect.ts'
 
 export interface SpawnResult {
@@ -180,31 +180,10 @@ export async function realSpawn(
   const args = options.omitProjectArg === true
     ? (process.env.GALFREE_TEST_SRC === undefined ? [] : ['-e', process.env.GALFREE_TEST_SRC])
     : [projectRoot]
-  return await new Promise<SpawnResult>((resolvePromise, rejectPromise) => {
-    // windowsHide 保持**默认 false**:游戏窗口必须出现在用户屏幕上。
-    const child = spawn(launcher, args)
-    let log = ''
-    let settled = false
-    const finish = (result: SpawnResult): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      resolvePromise(result)
-    }
-    const timer = setTimeout(() => {
-      // 到时杀掉:留下僵进程比"少玩一次"糟得多。
-      try { child.kill() } catch { /* 已经没了 */ }
-      finish({ code: -1, log: `${log}\n[GALFree] 试玩等待超时(${Math.round(timeoutMs / 1000)} 秒),已中止游戏进程。\n` })
-    }, timeoutMs)
-    timer.unref?.()
-    child.stdout?.on('data', (chunk: Buffer) => { log += chunk.toString() })
-    child.stderr?.on('data', (chunk: Buffer) => { log += chunk.toString() })
-    child.on('error', (error) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      rejectPromise(error)
-    })
-    child.on('close', (code) => finish({ code: code ?? 1, log }))
+  return await spawnWithLog(launcher, args, {
+    timeoutMs,
+    // windowsHide 必须 false:游戏窗口要出现在用户屏幕上(见 spawn-log.ts 的说明)。
+    windowsHide: false,
+    timeoutNote: `[GALFree] 试玩等待超时(${Math.round(timeoutMs / 1000)} 秒),已中止游戏进程。`,
   })
 }

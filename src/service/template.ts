@@ -39,6 +39,38 @@ export const TEMPLATE_EMPTY_DIRS = ['game/images', 'game/audio', 'game/fonts', '
 export const TEMPLATE_UI_FILES = ['screens.rpy', 'gui.rpy', 'guisupport.rpy', 'testcases.rpy'] as const
 
 /**
+ * **发行版里没有 `gui7`** —— SDK 的 `guisupport.rpy` 会 import 它(T18 实测)。
+ *
+ * SDK 那份 `guisupport.rpy` 里有一段 `init 100 python in gui:`:
+ *
+ * ```
+ * sys.path.insert(0, os.path.join(config.renpy_base, "launcher", "game"))
+ * from gui7.parameters import GuiParameters
+ * ...
+ * generate_gui(p)
+ * ```
+ *
+ * 它干的事是"在 SDK 里跑时把界面图(`game/gui/*.png`)生成进项目" —— **这是它的功劳**,
+ * 新项目的界面图就是这么来的。但它依赖 `<sdk>/launcher/game/gui7`,而**发行版里没有 SDK**:
+ * 打出来的 pc 包一启动就
+ * `ModuleNotFoundError: No module named 'gui7'`(慢带实测,游戏停在报错屏)。
+ *
+ * 修法有两条,**第一条试过、错了**(记在这里免得下一个人重走):
+ *  - ✗ 在项目里放一个空壳 `gui7` 包:Ren'Py 的导入钩子优先解析 `game/` 下的模块,
+ *    它**把真的 gui7 也挡住了** → 在 SDK 里跑时生成那一步同样挂掉(`gui7.parameters` 找不到,
+ *    界面图再也生不出来);
+ *  - ✓ **发行版里把这个文件排除掉**(`build.classify("game/guisupport.rpy", None)`,
+ *    写在我们的界面补丁里),`gui.scale` 由补丁自己提供。于是:在 SDK 里跑照常生成界面图,
+ *    发行版里既没有那个文件、也没有那次 import。
+ *
+ * 界面图到底生成了没有,发布前置会**如实检查**(`gui-images-missing`,见 publish.ts)。
+ */
+export const TEMPLATE_GUI7_NOTE = 'build.classify("game/guisupport.rpy", None)'
+
+/** SDK 界面模板里的图片资源(`gui/` 下的图片;随界面的其他文件一起拷进项目)。 */
+export const TEMPLATE_UI_IMAGE_DIR = 'gui'
+
+/**
  * **图片名必须显式定义** —— 模板脚本里要提醒的一条 Ren'Py 现状(实测)。
  *
  * 现代 Ren'Py 把 `config.automatic_images` 置为 `None`(见 SDK 的 `00obsolete.rpy`),
@@ -102,6 +134,23 @@ export function renderUiPatch(hasFont: boolean): TemplateFile {
       `#     ${TEMPLATE_IMAGE_DEFINITION_NOTE}`,
       '# 不写就会显示成灰底占位 + 图片名(那是 Ren\'Py 的"找不到图"提示,不是图坏了)。',
       '',
+      '# ── 发行版里不要带 guisupport.rpy(T18 实测)───────────────────────────',
+      '# SDK 那份 guisupport.rpy 会 import gui7 来生成界面图,而 gui7 只住在 SDK 的 launcher 里。',
+      "# 打出来的包里没有 SDK —— 带着这个文件,游戏一启动就停在",
+      "#     ModuleNotFoundError: No module named 'gui7'",
+      '# 的报错屏上。于是:发行版里排除它,`gui.scale` 由本文件提供(见下)。',
+      '#**两份都要排**:跑的是编译出来的 .rpyc,只排 .rpy 等于没排(实测踩过)。',
+      '# 在 SDK 里跑(试玩)时那个文件照常在,界面图照常生成 —— 所以发布前请先跑一次试玩。',
+      'init python:',
+      '    build.classify("game/guisupport.rpy", None)',
+      '    build.classify("game/guisupport.rpyc", None)',
+      '',
+      '# gui.scale 是界面代码到处都在用的缩放助手(guisupport.rpy 提供)。发行版里那个文件',
+      '# 被排除了,所以这里自己带上 —— 与 SDK 的实现一致(int 取整)。',
+      'init -100 python in gui:',
+      '    def scale(n):',
+      '        return int(n)',
+      '',
     ].filter((line, index, all) => !(line === '' && all[index - 1] === '')).join('\n'),
   }
 }
@@ -150,6 +199,10 @@ export function renderTemplateFiles(project: TemplateProject): TemplateFile[] {
         'define config.version = "0.1.0"',
         // save_directory 要的是稳定的 ASCII 目录名,所以用 slug 而不是可能含中文的标题。
         `define config.save_directory = "galfree-${rpyEscape(name)}"`,
+        // 构建标识(T18):**没有它,build_dists 会打出名字为空的包**(实测:`-pc/.exe`)——
+        // Ren'Py 的 build.name 缺省是 None,于是 directory_name/executable_name 都空着。
+        // 给 name 就够了:目录名自动是 `<name>-<version>`,可执行文件是 `<name>`。
+        `define build.name = "${rpyEscape(name)}"`,
         'define config.has_sound = True',
         'define config.has_music = True',
         // screens.rpy 的主菜单读这两个;缺了会 AttributeError(实测崩在 gui.show_name)。
@@ -170,6 +223,10 @@ export function renderTemplateFiles(project: TemplateProject): TemplateFile[] {
         'game/log.txt',
         'game/traceback.txt',
         'game/errors.txt',
+        // Ren'Py 手工构建的默认落点(`<项目>/dists/`)。GALFree 的发布一律写到项目外,
+        // 但人要是在 launcher 里点过"Build Distributions",别让产物混进快照(T18)。
+        'dists/',
+        'build/',
         // 项目**根**下的同名文件也是 Ren'Py 崩出来的噪声(实测:启动期崩溃会写在根目录)。
         'traceback.txt',
         'errors.txt',

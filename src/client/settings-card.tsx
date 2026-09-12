@@ -47,9 +47,11 @@ interface ChannelDraft {
   imageApiKey: string
   imageChannelName: string
   imageModels: string
+  /** 发布输出目录(T18);留空 = 数据目录下的 publish/<项目名>。 */
+  publishDir: string
 }
 
-const EMPTY_DRAFT: ChannelDraft = { imageBaseUrl: '', imageApiKey: '', imageChannelName: '', imageModels: '' }
+const EMPTY_DRAFT: ChannelDraft = { imageBaseUrl: '', imageApiKey: '', imageChannelName: '', imageModels: '', publishDir: '' }
 
 /** 模型目录示例:先给一条能跑的,人照着改(空目录会让建任务被拒)。 */
 const MODEL_EXAMPLE = JSON.stringify([
@@ -354,6 +356,21 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
             </span>
             {problem !== null ? <span className={s.error}>{problem}</span> : null}
           </details>
+
+          <label className={s.field}>
+            <span className={s.label}>发布输出目录(T18)</span>
+            <input
+              className={s.input}
+              value={draft.publishDir}
+              placeholder="留空 = 数据目录下的 publish/<项目名>"
+              onChange={(event) => edit('publishDir', event.target.value)}
+              aria-label="发布输出目录"
+            />
+            <span className={s.hint}>
+              一键发布打出来的包放在这里,**每个项目各占一个子目录**。产物不进项目源树、不进快照;
+              把目录配到项目里面会被如实拒绝(源树是唯一真相,不是构建垃圾场)。
+            </span>
+          </label>
 
           <div className={s.actions}>
             <button

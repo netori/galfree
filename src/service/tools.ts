@@ -113,6 +113,8 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
           slots: progress.slots.map((slot) => ({ slot: slot.slot, filled: slot.filled, stamp: slot.stamp, scenes: slot.origin.scenes })),
           characters: progress.characters.map((character) => ({ id: character.id, defined: character.defined, hasStyleAnchor: (character.styleAnchor ?? '') !== '' })),
           bible: progress.bible,
+          // 发布(T18):上次发布的产物在哪、还新不新(没发布过 = null);能不能发看 blockers。
+          publish: progress.publish,
           // 音频(T17):池是派生的(扫 game/ 下的音频文件);悬空引用在 problems 里(定位到场景与行)。
           audio: {
             files: progress.audio.files.map((file) => file.path),
@@ -515,6 +517,59 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
         }, null, 2)
       } catch (error) {
         return `参考链操作没执行:${describe(error)}`
+      }
+    },
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_publish',
+    description: [
+      '把项目**发布成可发行物**(T18:钉版 SDK 的 `build_dists`,默认 `pc` 包)。',
+      '前置没过(板上有 lint 错 / 素材缺 / 音频引用悬空 / SDK 未就绪)**就不构建**,',
+      '如实把缺项列出来 —— 先照着修,再发。产物落在**项目源树之外**的输出目录里,',
+      '路径与状态进推导板。平台上传与在线分发**不做**(spec Out of Scope)。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      packages: {
+        type: 'array',
+        description: '要打哪些包(省略 = ["pc"] = Windows+Linux;Android 需要另配 Android SDK)',
+        items: { type: 'string' },
+      },
+      readiness_only: { type: 'boolean', description: '只看前置检查、不构建(默认 false)' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目。'
+      try {
+        if (args.readiness_only === true) {
+          return JSON.stringify(await service.publishReadiness(active), null, 2)
+        }
+        const report = await service.publish(active, {
+          ...(Array.isArray(args.packages) && args.packages.length > 0 ? { packages: args.packages } : {}),
+        })
+        return JSON.stringify({
+          ok: report.ok,
+          ready: report.ready,
+          // 被阻止时:逐项列缺项(与推导板同一份判断)。
+          blockers: report.blockers,
+          destination: report.destination,
+          packages: report.packages,
+          run: report.run === undefined
+            ? null
+            : {
+                at: report.run.at,
+                exitCode: report.run.exitCode,
+                artifacts: report.run.artifacts.map((artifact) => ({ name: artifact.name, path: artifact.path, bytes: artifact.bytes })),
+                logTail: report.run.ok ? null : report.run.logTail,
+              },
+        }, null, 2)
+      } catch (error) {
+        return `发布未执行:${describe(error)}`
       }
     },
   })))

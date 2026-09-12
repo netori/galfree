@@ -20,6 +20,7 @@ import { SdkProvisioner, probeOverrideSdk } from './service/sdk-provision.ts'
 import { extractZip, httpsDownloader } from './service/sdk-real.ts'
 import { findLauncher, platformLauncherName } from './service/hash.ts'
 import { realSpawn } from './service/playtest.ts'
+import { realDistribute } from './service/publish.ts'
 import { createCompositeValidator } from './service/validation/composite-validator.ts'
 import { registerGalfreeTools } from './service/tools.ts'
 
@@ -85,6 +86,11 @@ export interface Config {
    * 形如:`[{"id":"gpt-image-1","label":"全能力","capabilities":{"textToImage":true,"imageToImage":true,"referenceChain":true,"aspectRatioParam":true,"b64Json":true}}]`
    */
   imageModels?: string
+  /**
+   * 发布输出目录(T18)。**留空 = 数据目录下的 `publish/<项目名>`**。
+   * 每个项目在它下面各占一个子目录;配到项目源树里会被如实拒绝(产物不该混进快照)。
+   */
+  publishDir?: string
 }
 
 export const Config: z<Config> = z.object({
@@ -95,6 +101,7 @@ export const Config: z<Config> = z.object({
   imageApiKey: z.string().default(''),
   imageChannelName: z.string().default(''),
   imageModels: z.string().default(''),
+  publishDir: z.string().default(''),
 })
 
 /** 设置命名空间(与 SDK 路径/渠道覆盖同一真相;spec User Story 25)。 */
@@ -108,6 +115,7 @@ export const GalfreeSettingsSchema: z<Required<Config>> = z.object({
   imageApiKey: z.string().default(''),
   imageChannelName: z.string().default(''),
   imageModels: z.string().default(''),
+  publishDir: z.string().default(''),
 })
 
 /** 宿主侧插件数据目录(注册表、钉版 SDK 等)。 */
@@ -261,6 +269,25 @@ export function apply(ctx: Context, config?: Config): void {
     images: {
       http: imageHttp,
       channel: () => channelFromSettings(current()),
+    },
+    // 本地发布(T18):真构建(钉版 SDK 的 launcher 项目跑 distribute)。
+    // 输出目录:设置里给了就用它,否则落数据目录下的 publish/<项目名>。
+    publish: {
+      ports: {
+        resolveLauncher: async () => {
+          const dir = sdkDir()
+          if (current().sdkPath === '' && (await findLauncher(dir)) === null) {
+            const status = await provisioner.ensure().catch(() => null)
+            if (status === null || status.state !== 'ready') return null
+          }
+          return findLauncher(dir)
+        },
+        run: realDistribute,
+      },
+      destination: (project) => {
+        const configured = current().publishDir.trim()
+        return join(configured === '' ? join(dataDir, 'publish') : configured, project.name)
+      },
     },
   })
 

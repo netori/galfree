@@ -143,6 +143,7 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['/picker/create-directory', ['POST']],
   ['/picker/inspect', ['GET']],
   ['/playtest', ['POST']],
+  ['/publish', ['GET', 'POST']],
   ['/sdk', ['GET']],
   ['/sdk/ensure', ['POST']],
   ['/channel', ['GET']],
@@ -796,6 +797,39 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
+  // ─── 本地发布(T18)────────────────────────────────────────────────────
+
+  // 发布前置检查(**读**):能不能发、缺什么、会用到哪个输出目录。
+  if (method === 'GET' && path === '/publish') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    // 一次推导就够:`publishReadiness` 里已经带了上一次发布的推导视图。
+    writeJson(res, 200, await service.publishReadiness(active.id))
+    return
+  }
+
+  // 一键发布:构建产物落**项目源树之外**;前置没过就如实阻止(报告里逐项列缺项)。
+  // 没装配发布端口 = 能力未就绪 → 503(与"没配图像渠道"同性质)。
+  if (method === 'POST' && path === '/publish') {
+    const body: Record<string, unknown> = await readJsonBody(req).catch(() => ({}))
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const packages = Array.isArray(body.packages) ? body.packages.map(String).filter((name) => name.trim() !== '') : undefined
+    if (Array.isArray(body.packages) && packages!.length === 0) {
+      throw new GalfreeError('invalid-packages', 'packages 里全是空串:要么不给(默认 pc),要么给真实存在的包名(如 pc / android)')
+    }
+    const report = await service.publish(active.id, {
+      ...(packages === undefined ? {} : { packages }),
+      ...(typeof body.outputDir === 'string' && body.outputDir !== '' ? { outputDir: body.outputDir } : {}),
+    })
+    // 端口没装配 = 能力未就绪(服务端如实报告,路由映射成 503)。
+    if (report.blockers.some((blocker) => blocker.code === 'publish-unavailable')) {
+      return writeJson(res, 503, { error: '这台宿主没有装配发布端口', code: 'publish-unavailable' })
+    }
+    writeJson(res, 200, { report })
+    return
+  }
+
   // SDK 供给状态 / 触发下载(T5:首次使用自动下载、进度可见)。
   if (method === 'GET' && path === '/sdk') {
     if (deps.sdk === undefined) return writeJson(res, 503, { error: 'SDK 供给未装配' })
@@ -864,7 +898,7 @@ export function makeRoutes(deps: RouteDeps): GalfreeRoute[] {
         } else if (error instanceof GalfreeError) {
           // 404 = 目标不存在(含"项目目录已被挪走"),与 5xx 的"服务端故障"严格区分。
           const status = error.code === 'no-active-project' || error.code === 'unknown-project' || error.code === 'unknown-scene' || error.code === 'project-missing' || error.code === 'unknown-task' ? 404
-            : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' || error.code === 'character-invalid' || error.code === 'slot-invalid' || error.code === 'bible-invalid' || error.code === 'invalid-slot' || error.code === 'unknown-slot' || error.code === 'unknown-image-model' || error.code === 'unknown-character' || error.code === 'empty-prompt' || error.code === 'empty-note' || error.code === 'note-too-long' || error.code === 'invalid-audio' || error.code === 'invalid-edit' ? 400
+            : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' || error.code === 'character-invalid' || error.code === 'slot-invalid' || error.code === 'bible-invalid' || error.code === 'invalid-slot' || error.code === 'unknown-slot' || error.code === 'unknown-image-model' || error.code === 'unknown-character' || error.code === 'empty-prompt' || error.code === 'empty-note' || error.code === 'note-too-long' || error.code === 'invalid-audio' || error.code === 'invalid-edit' || error.code === 'destination-in-project' || error.code === 'invalid-packages' ? 400
             : error.code === 'body-too-large' ? 413
             : error.code === 'picker-unsupported' ? 501
             : error.code === 'picker-timeout' ? 504
