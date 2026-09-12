@@ -180,6 +180,58 @@ describe('路由适配层(/api/galfree)', () => {
     expect((await req('/api/galfree/snapshots?path=game%2Fscript.rpy')).status).toBe(200)
   })
 
+  it('参考链路由(T16):链处境可读、差分批量过门、素材字节只读可取', async () => {
+    const project = await freshProject()
+    // 一个角色 + 两个槽(主视觉与差分),登记簿把主视觉挂进参考链。
+    expect((await postJson('/api/galfree/cast/characters/upsert', {
+      id: 'alice', name: '爱丽丝', voice: 'alice', appearance: { hair: '金发' },
+      references: [
+        { path: 'game/images/alice-base.png', slot: 'alice base', note: '主视觉' },
+        { path: 'game/images/alice-ghost.png', note: '还没出的那一张' },
+      ],
+    })).status).toBe(200)
+    expect((await postJson('/api/galfree/cast/slots/upsert', { slot: 'alice smile', requiresCharacters: ['alice'] })).status).toBe(200)
+
+    // 1) 链处境:哪张就绪、哪张文件还不存在,如实回答(纯读)。
+    //    这个夹具里两张都还没出图 —— 所以两张都如实进 `missing`,没有"假装链生效"。
+    const chain = await req('/api/galfree/reference-chain?slot=alice%20smile')
+    expect(chain.status).toBe(200)
+    expect(chain.body.missing.map((reference: { path: string }) => reference.path)).toEqual([
+      'game/images/alice-base.png', 'game/images/alice-ghost.png',
+    ])
+    expect(chain.body.ready).toEqual([])
+    expect((await req('/api/galfree/reference-chain')).status).toBe(400) // 缺 slot 查询参数
+
+    // 2) 差分批量:没配渠道 → 503 且**一个任务都不建**(不是 500,也不是假装排队)。
+    const batch = await postJson('/api/galfree/tasks/differentials', { character: 'alice', model: 'gpt-image-1' })
+    expect(batch.status).toBe(503)
+
+    // 3) 对比视图:登记簿里有谁,网格里就有谁;格子来自槽账本。
+    const grid = await req('/api/galfree/differentials')
+    expect(grid.status).toBe(200)
+    const row = grid.body.characters.find((entry: { character: string }) => entry.character === 'alice')
+    expect(row.references.map((reference: { path: string; exists: boolean }) => [reference.path, reference.exists])).toEqual([
+      ['game/images/alice-base.png', false],
+      ['game/images/alice-ghost.png', false],
+    ])
+    expect(row.cells.map((cell: { slot: string }) => cell.slot)).toEqual(['alice smile'])
+
+    // 4) 素材字节:缺文件 404(带业务码),存在时按字节返回且带版本戳 ETag。
+    expect((await req('/api/galfree/asset?path=game%2Fimages%2Falice-base.png')).status).toBe(404)
+    const snap = await service.readProjectFile(project.id, 'game/script.rpy')
+    await service.writeProjectFiles(project.id, [{
+      path: 'game/images/alice-smile.png',
+      content: Buffer.from('89504e470d0a1a0a', 'hex'),
+      expectVersion: 'absent',
+    }], { origin: 'agent', reason: 'slot' })
+    void snap
+    const asset = await fetch(`${base}/api/galfree/asset?path=game%2Fimages%2Falice-smile.png`)
+    expect(asset.status).toBe(200)
+    expect(asset.headers.get('content-type')).toBe('image/png')
+    expect(asset.headers.get('etag')).toMatch(/^"[0-9a-f]{16}"$/)
+    expect((await asset.arrayBuffer()).byteLength).toBe(8)
+  })
+
   it('人盖场景戳生效;重生成同一幕 → 待复审(指纹=场景原始文本)', async () => {
     const project = await freshProject()
     expect((await postJson('/api/galfree/stamps/scene', { label: 'prologue' })).status).toBe(200)

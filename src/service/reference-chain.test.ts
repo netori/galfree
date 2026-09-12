@@ -1,0 +1,352 @@
+/**
+ * T16 seam tests — 参考链一致性回路(#24)。
+ *
+ * 契约来源(T16 票面 AC):
+ *  1. **差分批量任务参数含正确链引用**(假上游断言):登记簿的参考图链是跨批次
+ *     "同一张脸"的锚,差分任务要**自动**带上它,并指向真正能用的那一版;
+ *  2. 链上有一张图还不存在时**如实降级并列出丢了哪张**(不假装链生效);
+ *  3. **拒收注记**进任务历史,人和 agent 都回读得到。
+ *
+ * 断言面:只经 ProjectService 公共接口 + 磁盘终态 + 推导对象。
+ * "自动携链"的证据落在**假上游收到的请求体**上 —— 不是看任务对象里写了什么,
+ * 而是看真正发出去的是什么(链上的图以项目内文件的内联字节发出,远端才有得用)。
+ */
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { createProjectService, type ProjectService } from './project-service.ts'
+import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
+import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
+import { slotAssetPath } from './slot-naming.ts'
+import { createNodeHttpClient, type GenerationTask, type ImageChannelSettings, type ImageModelDescriptor } from './images.ts'
+
+/** 一个角色三个槽:主视觉 + 两个表情差分(差分的锚 = 主视觉)。 */
+const SCRIPT = [
+  'define xiao_tang = Character("小棠")',
+  '',
+  'label start:',
+  '    scene bg school',
+  '    show xiao_tang base',
+  '    xiao_tang "你来啦。"',
+  '    show xiao_tang smile',
+  '    xiao_tang "今天天气不错。"',
+  '    show xiao_tang angry',
+  '    xiao_tang "……你迟到了。"',
+  '    return',
+  '',
+].join('\n')
+
+const PNG_A = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=='
+const PNG_B = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAEAQH/4B0dAAAAAABJRU5ErkJggg=='
+const PNG_A_BYTES = Buffer.from(PNG_A, 'base64')
+const PNG_B_BYTES = Buffer.from(PNG_B, 'base64')
+
+interface UpstreamCall {
+  path: string
+  body: Record<string, unknown>
+  raw: string
+}
+
+/** 假上游:OpenAI 兼容同步接口;记录发出去的原文(断言"链到底发了什么")。 */
+class FakeUpstream {
+  readonly calls: UpstreamCall[] = []
+  payloads = [PNG_A, PNG_B]
+  #server: Server | null = null
+  #served = 0
+
+  async start(): Promise<string> {
+    this.#server = createServer((req: IncomingMessage, res: ServerResponse) => { void this.#handle(req, res) })
+    await new Promise<void>((resolve) => this.#server!.listen(0, '127.0.0.1', resolve))
+    const address = this.#server!.address()
+    const port = typeof address === 'object' && address !== null ? address.port : 0
+    return `http://127.0.0.1:${port}/v1`
+  }
+
+  async stop(): Promise<void> {
+    if (this.#server === null) return
+    await new Promise<void>((resolve) => this.#server!.close(() => resolve()))
+    this.#server = null
+  }
+
+  /** 某次调用里带的参考图(没有 image 字段 = 那次是文生图)。 */
+  referencesOf(call: UpstreamCall): Array<{ image_url?: string }> {
+    const image = call.body.image
+    return Array.isArray(image) ? image as Array<{ image_url?: string }> : []
+  }
+
+  async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const chunks: Buffer[] = []
+    for await (const chunk of req) chunks.push(chunk as Buffer)
+    const raw = Buffer.concat(chunks).toString('utf8')
+    let body: Record<string, unknown> = {}
+    try { body = JSON.parse(raw) as Record<string, unknown> } catch { body = {} }
+    this.calls.push({ path: req.url ?? '', body, raw })
+    const payload = this.payloads[Math.min(this.#served++, this.payloads.length - 1)]!
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ created: 1, data: [{ b64_json: payload }] }))
+  }
+}
+
+function channel(baseUrl: string, models?: ImageModelDescriptor[]): ImageChannelSettings {
+  return {
+    baseUrl,
+    apiKey: 'sk-test-plaintext',
+    name: '假渠道',
+    models: models ?? [
+      {
+        id: 'full',
+        label: '全能力(支持参考链)',
+        adapter: 'openai-compatible',
+        capabilities: { textToImage: true, imageToImage: true, referenceChain: true, aspectRatioParam: true, b64Json: true },
+      },
+      {
+        id: 'no-chain',
+        label: '不支持参考链',
+        adapter: 'openai-compatible',
+        capabilities: { textToImage: true, imageToImage: false, referenceChain: false, aspectRatioParam: true, b64Json: true },
+      },
+    ],
+  }
+}
+
+describe('参考链一致性回路(T16)', () => {
+  let dataDir: string
+  let sdkDir: string
+  let projectsRoot: string
+  let service: ProjectService
+  let upstream: FakeUpstream
+  let root: string
+
+  /** 登记簿:小棠的参考链 = 主视觉那一张(差分靠它保持一致)。 */
+  const registerChain = async (references: Array<{ path: string; slot?: string; note?: string }>): Promise<void> => {
+    await service.upsertCharacter('chain', {
+      id: 'xiao_tang',
+      name: '小棠',
+      voice: 'xiao_tang',
+      appearance: { hair: '黑色长直发', eyes: '琥珀色' },
+      styleAnchor: 'clean anime lineart, soft cel shading',
+      references,
+    })
+  }
+
+  /** 三个槽都挂上"要小棠出场"的制作信息。 */
+  const ledgerFor = async (): Promise<void> => {
+    for (const slot of ['xiao_tang base', 'xiao_tang smile', 'xiao_tang angry']) {
+      await service.upsertSlot('chain', { slot, requiresCharacters: ['xiao_tang'], prompt: `${slot} 的素材` })
+    }
+  }
+
+  beforeEach(async () => {
+    sdkDir = await makeFakeSdk()
+    dataDir = await makeTempDir('galfree-t16-data-')
+    projectsRoot = await makeTempDir('galfree-t16-projects-')
+    upstream = new FakeUpstream()
+    const baseUrl = await upstream.start()
+
+    service = createProjectService({
+      dataDir,
+      uiTemplate: fakeUiTemplate(sdkDir),
+      images: { http: createNodeHttpClient(), channel: () => channel(baseUrl) },
+    })
+    const project = await service.createProject({ projectsRoot, name: 'chain', title: '链' })
+    root = project.root
+    const snap = await service.readProjectFile('chain', 'game/script.rpy')
+    await service.writeProjectFiles('chain', [{ path: 'game/script.rpy', content: SCRIPT, expectVersion: snap.version }], { reason: 'scenario', origin: 'agent' })
+  })
+
+  afterEach(async () => {
+    await service.dispose()
+    await upstream.stop()
+    await cleanupTempDirs()
+  })
+
+  // ── AC1:差分批量任务参数含正确链引用 ────────────────────────────────
+
+  it('AC1 差分批量:主视觉先出,每个差分自动携登记簿的链引用(假上游看得到)', async () => {
+    await registerChain([{ path: slotAssetPath('xiao_tang base'), slot: 'xiao_tang base', note: '主视觉' }])
+    await ledgerFor()
+
+    const tasks = await service.createDifferentialTasks('chain', { character: 'xiao_tang', model: 'full', run: true })
+
+    // 1) 顺序:主视觉先出(差分要拿它当锚),差分的顺序不被人为打乱。
+    expect(tasks.map((task) => task.slot)).toEqual(['xiao_tang base', 'xiao_tang smile', 'xiao_tang angry'])
+    for (const task of tasks) expect(task.state).toBe('awaiting-review')
+
+    // 2) 任务参数:主视觉不带链(自己参考自己没有意义),两个差分各带一条。
+    expect(tasks[0]!.referenceImages).toEqual([])
+    for (const task of tasks.slice(1)) {
+      expect(task.referenceImages.map((reference) => reference.path)).toEqual([slotAssetPath('xiao_tang base')])
+    }
+
+    // 3) 真正发出去的请求:差分带 image,主视觉不带 —— 链不是账本上的一行字。
+    const withImage = upstream.calls.filter((call) => Array.isArray(call.body.image))
+    expect(withImage).toHaveLength(2)
+    expect(upstream.calls[0]!.body.image).toBeUndefined()
+    for (const call of withImage) {
+      expect(call.body.prompt).toContain('的素材')
+    }
+  })
+
+  it('AC1 链上的参考图以**内联字节**发出(远端拿不到项目内相对路径)', async () => {
+    await registerChain([{ path: slotAssetPath('xiao_tang base'), slot: 'xiao_tang base', note: '主视觉' }])
+    await ledgerFor()
+
+    await service.createDifferentialTasks('chain', { character: 'xiao_tang', model: 'full', run: true })
+
+    const chainCall = upstream.calls.at(-1)!
+    const references = upstream.referencesOf(chainCall)
+    expect(references).toHaveLength(1)
+    const url = references[0]!.image_url ?? ''
+    // 内联字节:前缀是 data URL,解出来**就是主视觉那张图的字节**(不是路径字符串)。
+    expect(url.startsWith('data:image/png;base64,')).toBe(true)
+    const decoded = Buffer.from(url.slice('data:image/png;base64,'.length), 'base64')
+    expect(decoded.equals(PNG_A_BYTES)).toBe(true)
+    // 落盘的主视觉确实就是上游刚给的那张(链路首尾对得上)。
+    const onDisk = await readFile(join(root, ...slotAssetPath('xiao_tang base').split('/')))
+    expect(decoded.equals(onDisk)).toBe(true)
+  })
+
+  it('AC1 链上的图还不存在 → 如实降级并列出丢了哪张(不假装链生效)', async () => {
+    // 主视觉先出(它就是差分的锚),再往链上挂一张**还不存在**的图。
+    await ledgerFor()
+    await service.createGenerationTask('chain', { slot: 'xiao_tang base', model: 'full', prompt: '主视觉', run: true })
+    await registerChain([
+      { path: slotAssetPath('xiao_tang base'), slot: 'xiao_tang base', note: '主视觉' },
+      { path: 'game/images/xiao-tang-ghost.png', note: '人还没出的那一张' },
+    ])
+
+    const task = await service.createGenerationTask('chain', { slot: 'xiao_tang smile', model: 'full', prompt: '微笑', run: true })
+
+    // 存在的带上,不存在的那张被丢掉并**说清楚丢了什么**。
+    expect(task.referenceImages.map((reference) => reference.path)).toEqual([slotAssetPath('xiao_tang base')])
+    expect(task.degradation?.code).toBe('reference-missing')
+    expect(task.degradation?.droppedReferenceImages.map((reference) => reference.path)).toEqual(['game/images/xiao-tang-ghost.png'])
+    expect(task.degradation?.notes.join(' ')).toContain('还不存在')
+    // 任务照样跑完 —— 降级不是失败(与 T14 的降级纪律同一条)。
+    expect(task.state).toBe('awaiting-review')
+
+    // 发出去的请求里没有那张不存在的图。
+    const call = upstream.calls.at(-1)!
+    expect(call.raw).not.toContain('xiao-tang-ghost.png')
+  })
+
+  it('AC1 模型声明不支持参考链 → 自动携的链照降级规矩丢弃并说明', async () => {
+    await ledgerFor()
+    await service.createGenerationTask('chain', { slot: 'xiao_tang base', model: 'full', prompt: '主视觉', run: true })
+    await registerChain([{ path: slotAssetPath('xiao_tang base'), slot: 'xiao_tang base' }])
+
+    const task = await service.createGenerationTask('chain', { slot: 'xiao_tang smile', model: 'no-chain', prompt: '微笑', run: true })
+
+    expect(task.degradation?.code).toBe('reference-chain-unsupported')
+    expect(task.degradation?.droppedReferenceImages).toHaveLength(1)
+    expect(task.state).toBe('awaiting-review')
+    expect(upstream.calls.at(-1)!.body.image).toBeUndefined()
+  })
+
+  it('AC1 自引用被排除:槽不会把**自己的产物**当参考(链视图如实标注)', async () => {
+    await ledgerFor()
+    await registerChain([{ path: slotAssetPath('xiao_tang smile'), slot: 'xiao_tang smile', note: '挂错了:挂成它自己' }])
+
+    const view = await service.referenceChain('chain', 'xiao_tang smile')
+    expect(view.references).toEqual([])
+    expect(view.excludedSelf).toEqual([slotAssetPath('xiao_tang smile')])
+
+    const task = await service.createGenerationTask('chain', { slot: 'xiao_tang smile', model: 'full', prompt: '微笑', run: true })
+    expect(task.referenceImages).toEqual([])
+    expect(upstream.calls.at(-1)!.body.image).toBeUndefined()
+  })
+
+  it('AC1 链视图:来源角色、就绪与否、缺哪张,一眼可查(纯读,不写)', async () => {
+    await ledgerFor()
+    await service.createGenerationTask('chain', { slot: 'xiao_tang base', model: 'full', prompt: '主视觉', run: true })
+    await registerChain([
+      { path: slotAssetPath('xiao_tang base'), slot: 'xiao_tang base', note: '主视觉' },
+      { path: 'game/images/never-made.png' },
+    ])
+
+    const before = (await service.writeLog('chain')).length
+    const view = await service.referenceChain('chain', 'xiao_tang smile')
+    const after = (await service.writeLog('chain')).length
+
+    expect(view.slot).toBe('xiao_tang smile')
+    expect(view.characters).toEqual(['xiao_tang'])
+    expect(view.references.map((reference) => [reference.path, reference.character, reference.exists])).toEqual([
+      [slotAssetPath('xiao_tang base'), 'xiao_tang', true],
+      ['game/images/never-made.png', 'xiao_tang', false],
+    ])
+    expect(view.missing.map((reference) => reference.path)).toEqual(['game/images/never-made.png'])
+    // 链视图是**读**:它不该产生任何写(推导面不落盘)。
+    expect(after).toBe(before)
+  })
+
+  it('AC1 差分批量先过渠道与模型两道门(没配渠道时如实拒绝,不产假任务)', async () => {
+    await ledgerFor()
+    await registerChain([{ path: slotAssetPath('xiao_tang base') }])
+    const bare = createProjectService({
+      dataDir,
+      uiTemplate: fakeUiTemplate(sdkDir),
+      images: { http: createNodeHttpClient(), channel: () => null },
+    })
+    try {
+      await bare.createProject({ projectsRoot, name: 'nochannel', title: '没渠道' })
+      await expect(bare.createDifferentialTasks('nochannel', { character: 'xiao_tang', model: 'full' }))
+        .rejects.toMatchObject({ code: 'no-image-channel' })
+    } finally {
+      await bare.dispose()
+    }
+  })
+
+  // ── AC3:拒收注记进任务历史,人和 agent 都回读得到 ────────────────────
+
+  it('AC3 重 roll 携带人的拒收理由 → 进历史,并指向被拒的那一版', async () => {
+    await ledgerFor()
+    const first = await service.createGenerationTask('chain', { slot: 'xiao_tang smile', model: 'full', prompt: '微笑', run: true })
+
+    const rerolled = await service.retryGenerationTask('chain', first.id, {
+      run: true,
+      prompt: '微笑,下巴更尖一点',
+      note: '脸太圆了,下巴要尖',
+      via: 'human',
+    })
+
+    expect(rerolled.rejections).toHaveLength(1)
+    const rejection = rerolled.rejections[0]!
+    expect(rejection.note).toBe('脸太圆了,下巴要尖')
+    expect(rejection.via).toBe('human')
+    // 注记指向**被拒的那一版**(它的指纹),不是空口一句话。
+    expect(rejection.fingerprint).toBe(first.attempts[0]!.fingerprint)
+    expect(rejection.attempt).toBe(1)
+    // 两版产物都能对上:被替换的指纹 = 被拒那一版。
+    expect(rerolled.attempts[1]!.replacedFingerprint).toBe(first.attempts[0]!.fingerprint)
+  })
+
+  it('AC3 拒收注记落盘且回读得到(人经账本、agent 经队列读的是同一份)', async () => {
+    await ledgerFor()
+    const first = await service.createGenerationTask('chain', { slot: 'xiao_tang smile', model: 'full', prompt: '微笑', run: true })
+    await service.retryGenerationTask('chain', first.id, { run: true, note: '眼神太凶', via: 'human' })
+
+    // 人:经接缝的账本读。
+    const listed = await service.generationTasks('chain')
+    expect(listed[0]!.rejections.map((entry) => entry.note)).toEqual(['眼神太凶'])
+    // 单任务读也一样(agent 的 galfree_art_queue 走的是同一个对象)。
+    const one = await service.generationTask('chain', first.id)
+    expect(one?.rejections[0]?.note).toBe('眼神太凶')
+
+    // 磁盘上的账本里也有它(拒收理由是**制作信息**,不是叙述内容)。
+    const doc = JSON.parse(await readFile(join(root, '.studio', 'image-tasks.json'), 'utf8')) as { tasks: GenerationTask[] }
+    expect(doc.tasks[0]!.rejections?.[0]?.note).toBe('眼神太凶')
+  })
+
+  it('AC3 空注记与超长注记都被拒(要么说清为什么拒,要么别记)', async () => {
+    await ledgerFor()
+    const task = await service.createGenerationTask('chain', { slot: 'xiao_tang smile', model: 'full', prompt: '微笑', run: true })
+
+    await expect(service.retryGenerationTask('chain', task.id, { run: false, note: '   ' }))
+      .rejects.toMatchObject({ code: 'empty-note' })
+    await expect(service.retryGenerationTask('chain', task.id, { run: false, note: '很'.repeat(601) }))
+      .rejects.toMatchObject({ code: 'note-too-long' })
+    // 被拒的调用什么都没改:历史还是干干净净。
+    expect((await service.generationTask('chain', task.id))?.rejections).toEqual([])
+  })
+})
