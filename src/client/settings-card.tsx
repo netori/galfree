@@ -14,6 +14,7 @@
  */
 import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
+import { ModelPicker, rowsFromCatalog, sameRows, type ModelRow } from './model-picker.tsx'
 import s from './settings-card.module.css'
 
 /** 与 Host 半 `CONFIG_NAMESPACE` 同一个命名空间(两端必须一致)。 */
@@ -175,6 +176,8 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
   const describe = ctx.settingsScope.describe()
   const [scope, setScope] = useState<ScopeState>(() => readScope(describe.getSnapshot()))
   const [draft, setDraft] = useState<ChannelDraft>(EMPTY_DRAFT)
+  /** 模型选择器的状态:清单行(上游拉到的 + 手输的);目录 JSON 仍是唯一真相。 */
+  const [choices, setChoices] = useState<ModelRow[]>(() => rowsFromCatalog(''))
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [message, setMessage] = useState<string | null>(null)
   /** 正在编辑的字段标记:镜像每次刷新都不要覆盖人正在敲的字。 */
@@ -205,6 +208,26 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
     refresh()
     return () => { alive = false; stop() }
   }, [describe, syncFromMirror])
+
+  /**
+   * 把"设置里已保存的目录"带进模型选择器。
+   *
+   * 三重防护,缺一不可(都在真浏览器里踩过):
+   *  1. 人没在编辑目录时才同步(dirty 里有 imageModels 就跳过);
+   *  2. 同一份文本只处理一次(lastCatalog);
+   *  3. **内容没变就保持旧引用**(sameRows)—— 否则勾选回调改文本 → 文本变化又同步清单
+   *     → 新数组 → 再渲染,自锁成死循环(界面看着在、按钮点不动)。
+   */
+  const lastCatalog = useRef<string | null>(null)
+  useEffect(() => {
+    if (dirty.current.has('imageModels')) return
+    if (draft.imageModels === lastCatalog.current) return
+    lastCatalog.current = draft.imageModels
+    setChoices((current) => {
+      const next = rowsFromCatalog(draft.imageModels)
+      return sameRows(current, next) ? current : next
+    })
+  }, [draft.imageModels])
 
   const edit = (field: keyof ChannelDraft, text: string): void => {
     dirty.current.add(field)
@@ -300,25 +323,37 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
             />
           </label>
 
-          <label className={s.field}>
-            <span className={s.label}>模型目录(JSON 数组)</span>
+          <ModelPicker
+            baseUrl={draft.imageBaseUrl}
+            apiKey={draft.imageApiKey}
+            rows={choices}
+            disabled={status === 'saving' || !scope.writable}
+            onChange={(next: ModelRow[], json: string) => {
+              // 顺序要紧:先写文本(它会触发同步),**再**落选择状态 ——
+              // 反过来的话,同步会把刚点的那一下覆盖掉(checkbox 会"弹回去")。
+              edit('imageModels', json)
+              setChoices(next)
+            }}
+          />
+
+          <details className={s.field}>
+            <summary className={s.hint}>高级:直接看/改目录 JSON(排查用)</summary>
             <textarea
               className={`${s.input} ${s.textarea}`}
               value={draft.imageModels}
               placeholder={MODEL_EXAMPLE}
               rows={7}
-              onChange={(event) => edit('imageModels', event.target.value)}
+              onChange={(event) => {
+                edit('imageModels', event.target.value)
+                setChoices(rowsFromCatalog(event.target.value))
+              }}
               aria-label="图像模型目录"
             />
             <span className={s.hint}>
-              每个模型都要声明能力,因为「协议不合要如实降级」只能靠声明判断,猜会静默发错请求。
-              缺省口径:文生图 / 尺寸参数 / b64 为真;参考链 / 图生图为假(能力宁可少说)。
-              <button type="button" className={s.link} onClick={() => edit('imageModels', MODEL_EXAMPLE)}>
-                填入示例
-              </button>
+              每个模型的能力是一份**全量快照**:写目录时五个字段都要给全(缺字段的条目会被按缺省口径读)。
             </span>
             {problem !== null ? <span className={s.error}>{problem}</span> : null}
-          </label>
+          </details>
 
           <div className={s.actions}>
             <button

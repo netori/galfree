@@ -9,6 +9,7 @@ import { GalfreeError } from './service/error.ts'
 import { createSubdirectory, describePath, listDirectories } from './service/directory-listing.ts'
 import type { SceneEdit } from './service/scene-form.ts'
 import type { ProjectService } from './service/project-service.ts'
+import type { ImageModelCapabilities } from './service/images.ts'
 import type { ProvisionStatus } from './service/sdk-provision.ts'
 
 export interface RouteDeps {
@@ -43,6 +44,22 @@ export interface RouteDeps {
     }>
     ensure: () => Promise<ProvisionStatus>
   }
+  /**
+   * 图像渠道的模型发现(T14 续):拿「端点 + 密钥」去上游拉 `/models` 并推断能力。
+   *
+   * 走**注入的出网端口**,所以快带能用本地假上游验;不装配时路由如实报未装配
+   * (面板会显示"这台宿主没给装配"),而不是假装拉到空清单。
+   */
+  discoverModels?: (input: { baseUrl: string; apiKey?: string }) => Promise<{
+    models: Array<{
+      id: string
+      label?: string
+      imageLikely: boolean
+      inference: { capabilities: ImageModelCapabilities; family?: string; basis: string; needsConfirmation: boolean }
+    }>
+    total: number
+    endpoint: string
+  }>
 }
 
 export interface GalfreeRoute {
@@ -125,6 +142,7 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['/sdk', ['GET']],
   ['/sdk/ensure', ['POST']],
   ['/channel', ['GET']],
+  ['/channel/models', ['POST']],
   ['/tasks', ['GET']],
   ['/tasks/create', ['POST']],
   ['/tasks/fill-missing', ['POST']],
@@ -596,6 +614,20 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
   // 当前渠道能力(不含密钥:只回报"配没配")。
   if (method === 'GET' && path === '/channel') {
     writeJson(res, 200, await service.imageChannel())
+    return
+  }
+
+  // 拉上游的模型清单(只接 OpenAI 兼容的 /models):面板据此让人勾选,不必手写 JSON。
+  // 密钥由请求体带过来(**不落任何地方**),只用于这一次出网。
+  if (method === 'POST' && path === '/channel/models') {
+    if (deps.discoverModels === undefined) {
+      return writeJson(res, 503, { error: '这台宿主没有装配模型发现端口', code: 'discovery-unavailable' })
+    }
+    const body = await readJsonBody(req)
+    const baseUrl = String(body.baseUrl ?? '')
+    if (baseUrl.trim() === '') throw new GalfreeError('invalid-channel', '需要 baseUrl(OpenAI 兼容基址)')
+    const apiKey = typeof body.apiKey === 'string' && body.apiKey !== '' ? body.apiKey : undefined
+    writeJson(res, 200, await deps.discoverModels({ baseUrl, ...(apiKey === undefined ? {} : { apiKey }) }))
     return
   }
 

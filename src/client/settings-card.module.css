@@ -111,3 +111,61 @@
   cursor: pointer;
   text-decoration: underline;
 }
+
+/* ── 模型选择器(T14 续)────────────────────────────────────────────── */
+
+.modelList {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 380px;
+  overflow-y: auto;
+}
+
+.modelRow {
+  border: 1px solid var(--dsw-alias-border-l3);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.modelHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.modelId {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.warnBadge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--dsw-alias-state-warn-primary);
+  border: 1px solid var(--dsw-alias-state-warn-primary);
+}
+
+.caps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.capItem {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}

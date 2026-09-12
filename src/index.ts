@@ -13,6 +13,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createProjectService } from './service/project-service.ts'
 import { createNodeHttpClient, type ImageChannelSettings, type ImageModelDescriptor } from './service/images.ts'
+import { discoverModels } from './service/discovery.ts'
 import { makeRoutes } from './routes.ts'
 import { GalfreeError } from './service/error.ts'
 import { SdkProvisioner, probeOverrideSdk } from './service/sdk-provision.ts'
@@ -210,6 +211,9 @@ export function apply(ctx: Context, config?: Config): void {
     launcherName: platformLauncherName(),
   })
 
+  /** 图像子系统的出网端口(生产 fetch);模型发现与出图共用同一个。 */
+  const imageHttp = createNodeHttpClient()
+
   const service = createProjectService({
     dataDir,
     // 合成验证器:假 lint 恒跑,SDK 就绪时叠加真 lint;覆盖路径版本差异警告入状态。
@@ -231,7 +235,7 @@ export function apply(ctx: Context, config?: Config): void {
     },
     // 图像子系统(T14):出网走真 fetch;渠道现读设置(改了立刻生效)。
     images: {
-      http: createNodeHttpClient(),
+      http: imageHttp,
       channel: () => channelFromSettings(current()),
     },
   })
@@ -271,6 +275,8 @@ export function apply(ctx: Context, config?: Config): void {
             return await capability.createDirectory(path, name)
           },
         },
+        // 模型发现(T14 续):与出图共用同一个出网端口 —— 生产 fetch,快带假上游。
+        discoverModels: (input) => discoverModels(imageHttp, input),
         sdk: {
           status: async () => {
             const override = current().sdkPath
