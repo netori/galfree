@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
 import type { SpawnResult } from './playtest.ts'
+import { realSpawn } from './playtest.ts'
 
 describe('试玩控制(T7,假 spawn)', () => {
   let dataDir: string
@@ -93,5 +94,31 @@ describe('试玩控制(T7,假 spawn)', () => {
     await service.writeProjectFiles('play', [{ path: 'game/script.rpy', content: 'label start:\n    "改了一句。"\n    return\n', expectVersion: v }], { reason: 'edit', origin: 'workbench' })
     const progress = await service.progress('play')
     expect(progress.playtest?.state).toBe('stale')
+  })
+
+  // ─── 真 spawn 的两个实测教训(用户点"试玩"没反应换来的)───────────────
+
+  it('真 spawn:**不隐藏窗口**(windowsHide 不能开,否则用户以为点了没反应)', async () => {
+    // 用一个真进程当替身:让它立刻打印并退出,验证"能起来 → 拿到输出 → 退出码回传"。
+    // (脚本走环境变量传,免得被附加的项目路径参数顶掉 -e 的位置。)
+    process.env.GALFREE_TEST_SRC = 'console.log("game started")'
+    const result = await realSpawn(process.execPath, '', { omitProjectArg: true, timeoutMs: 10_000 })
+    delete process.env.GALFREE_TEST_SRC
+    expect(result.code).toBe(0)
+    expect(result.log).toContain('game started')
+  })
+
+  it('真 spawn:**到点必须中止**,不无限期挂着(僵进程就是这么来的)', async () => {
+    const started = Date.now()
+    process.env.GALFREE_TEST_SRC = 'setTimeout(() => {}, 60000)'
+    const result = await realSpawn(process.execPath, '', { omitProjectArg: true, timeoutMs: 800 })
+    delete process.env.GALFREE_TEST_SRC
+    expect(result.code).toBe(-1)
+    expect(result.log).toContain('等待超时')
+    expect(Date.now() - started).toBeLessThan(10_000)
+  })
+
+  it('真 spawn:启动器不存在时如实抛错(不静默)', async () => {
+    await expect(realSpawn('/definitely/not/here/renpy.exe', 'x', { timeoutMs: 2000 })).rejects.toBeTruthy()
   })
 })

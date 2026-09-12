@@ -26,7 +26,7 @@ export interface PlaytestPorts {
   /** 解析启动器绝对路径;null = SDK 未就绪(如实失败)。 */
   resolveLauncher: () => Promise<string | null>
   /** 启动游戏到退出(注入端口:快测假,真实现 spawn 子进程)。 */
-  spawn: (launcher: string, projectRoot: string, options?: { fromLabel?: string | null }) => Promise<SpawnResult>
+  spawn: (launcher: string, projectRoot: string, options?: { fromLabel?: string | null; timeoutMs?: number }) => Promise<SpawnResult>
 }
 
 export interface PlaytestRun {
@@ -158,14 +158,53 @@ export async function launchPlaytest(
   }
 }
 
-/** 真 spawn 实现(Host 装配用):启动游戏进程,退出后回传合并日志。 */
-export async function realSpawn(launcher: string, projectRoot: string): Promise<SpawnResult> {
+/** 一次试玩的最长等待(Host 装配用)。到点如实中止并报错,不无限期挂着。 */
+export const PLAYTEST_TIMEOUT_MS = 15 * 60 * 1000
+
+/**
+ * 真 spawn 实现(Host 装配用):启动游戏进程,退出后回传合并日志。
+ *
+ * 两条实测教训(都在这行代码上踩过):
+ *  1. **绝不能带 `windowsHide: true`** —— 那会把游戏窗口藏起来,用户点"试玩"看起来
+ *     毫无反应(其实进程已经起来了)。Windows 上 GUI 程序与控制台共享这个标志,
+ *     传 true 等于"把游戏窗口也藏了"。
+ *  2. **必须有超时**:游戏窗口要是跑到后台/别的显示器,或用户忘了关,试玩请求会一直
+ *     等它退出 —— 面板卡在"试玩中",还会留下僵进程。到点杀掉并如实报"等超时"。
+ */
+export async function realSpawn(
+  launcher: string,
+  projectRoot: string,
+  options: { timeoutMs?: number; /** 仅测试用:不把项目路径当参数传(拿非 renpy 程序当替身时用)。 */ omitProjectArg?: boolean } = {},
+): Promise<SpawnResult> {
+  const timeoutMs = options.timeoutMs ?? PLAYTEST_TIMEOUT_MS
+  const args = options.omitProjectArg === true
+    ? (process.env.GALFREE_TEST_SRC === undefined ? [] : ['-e', process.env.GALFREE_TEST_SRC])
+    : [projectRoot]
   return await new Promise<SpawnResult>((resolvePromise, rejectPromise) => {
-    const child = spawn(launcher, [projectRoot], { windowsHide: true })
+    // windowsHide 保持**默认 false**:游戏窗口必须出现在用户屏幕上。
+    const child = spawn(launcher, args)
     let log = ''
-    child.stdout.on('data', (chunk: Buffer) => { log += chunk.toString() })
-    child.stderr.on('data', (chunk: Buffer) => { log += chunk.toString() })
-    child.on('error', rejectPromise)
-    child.on('close', (code) => resolvePromise({ code: code ?? 1, log }))
+    let settled = false
+    const finish = (result: SpawnResult): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolvePromise(result)
+    }
+    const timer = setTimeout(() => {
+      // 到时杀掉:留下僵进程比"少玩一次"糟得多。
+      try { child.kill() } catch { /* 已经没了 */ }
+      finish({ code: -1, log: `${log}\n[GALFree] 试玩等待超时(${Math.round(timeoutMs / 1000)} 秒),已中止游戏进程。\n` })
+    }, timeoutMs)
+    timer.unref?.()
+    child.stdout?.on('data', (chunk: Buffer) => { log += chunk.toString() })
+    child.stderr?.on('data', (chunk: Buffer) => { log += chunk.toString() })
+    child.on('error', (error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      rejectPromise(error)
+    })
+    child.on('close', (code) => finish({ code: code ?? 1, log }))
   })
 }

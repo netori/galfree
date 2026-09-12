@@ -835,7 +835,7 @@ export class ProjectService {
     name?: string
     baseUrl?: string
     apiKeyConfigured: boolean
-    models: Array<{ id: string; label?: string; note?: string; capabilities: unknown }>
+    models: Array<{ id: string; label?: string; note?: string; adapter: string; capabilities: unknown }>
   }> {
     const channel = this.#imagePorts?.channel() ?? null
     if (channel === null) return { configured: false, apiKeyConfigured: false, models: [] }
@@ -848,6 +848,9 @@ export class ProjectService {
         id: model.id,
         ...(model.label === undefined ? {} : { label: model.label }),
         ...(model.note === undefined ? {} : { note: model.note }),
+        // **协议也要报**:排查"为什么出不了图"时这是第一个要看的事实
+        // (同步 vs 异步任务制,提交路径的单复数跟着变)。曾经这里没报,只能靠猜。
+        adapter: model.adapter,
         capabilities: model.capabilities,
       })),
     }
