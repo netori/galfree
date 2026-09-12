@@ -1,13 +1,15 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # 这是**参考副本**,不是这个 preset 的组装 —— 别改它。
 #
-# 来源:`@deepseek-ai/dsh-agent-presets` 随包交付的 `presets/standard/agent.cordis.yml`
-# (从宿主安装包里取出后逐字保存)。它放在这里,是为了让"本 preset 的组装 = standard + 两处
-# 声明的改动"这句话**可以被机器检查**(见 `src/preset.test.ts`):抄错了、漂了、
-# 或者宿主升级之后 standard 变了,测试就会红。
+# 来源:`@deepseek-ai/dsh-agent-presets` **v0.1.5-rc.1** 随包交付的
+# `presets/standard/agent.cordis.yml`(从本机宿主安装包里取出后逐字保存,只多了这段表头)。
+# 放在这里,是为了让"本 preset 的组装 = standard + 两处声明的改动"这句话**可以被机器检查**
+# (见 `src/preset.test.ts`):抄错了、漂了、或者宿主升级之后 standard 变了,测试就会红。
 #
-# 宿主升级 `@deepseek-ai/dsh-agent-presets` 之后:把随包的那份重新覆盖本文件,
+# **它是一份快照,不是活的对照物**:宿主升级之后,把随包的那份重新取出来覆盖本文件,
 # 再跑 `npx vitest run src/preset.test.ts` —— 红出来的差异就是你要跟进的地方。
+# (随包那份在宿主安装位置里:Windows 桌面版在 `resources/app.asar` 内,解包脚本见
+#  `.scratch/asar-extract.cjs`;它**不是**本仓库的依赖,所以别指望在 node_modules 里找到它。)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # The `standard` agent preset: the full coding agent, mounted once per process.

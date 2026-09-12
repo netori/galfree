@@ -11,7 +11,9 @@
  * 所以这里做四件事:**解析**组装(真 YAML 解析,不是文本扫描)、**查策略**(该有的有、不该有的没有)、
  * **调前置检查**(两条路都走一遍)、**把工具名钉在插件上**(`registerGalfreeTools` 的真产物)。
  *
- * 这一条属于测试纪律台账里记过的那类"适配层/产物断言"(与 `tools-flow.test.ts` 同族)。
+ * 这一条属于测试纪律台账里记过的**第四类**"适配层/产物断言":与 `tools-flow.test.ts` 同族,
+ * 但它断言的是**交付的那个文件**(组装 + guard),而不是运行时行为 —— 台账里那一行写明了
+ * 为什么它该住在快带(真解析 YAML 才能抓到"一个缩进让整份 preset 加载不了")。
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import { readFile } from 'node:fs/promises'
@@ -218,7 +220,6 @@ describe('「Galgame 制作」preset(T22)', () => {
   it('前置检查点名的工具,与插件**真实注册**的名字对得上(改名就红)', async () => {
     const guard = await loadGuard()
     expect(guard.REQUIRED_TOOLS.length).toBeGreaterThan(3)
-
     const dataDir = await makeTempDir('galfree-t22-data-')
     let service: ProjectService | null = null
     try {
@@ -236,6 +237,48 @@ describe('「Galgame 制作」preset(T22)', () => {
       expect(guard.REQUIRED_TOOLS).toContain('galfree_playtest')
     } finally {
       if (service !== null) await service.dispose()
+      await cleanupTempDirs()
+    }
+  })
+
+  /**
+   * 这条补一个**推理链上的洞**:guard 只查工具,而 persona 把"顺序"整个交给
+   * `galfree-workflow` 那段指引 —— 如果插件可能只给工具不给指引,guard 就会放行一个
+   * "有工具但没指引"的会话,而那正是这个 preset 想避免的静默降级。
+   *
+   * 所以这里验证的是那条**蕴含关系**:同一个插件的组装在同一台宿主上**既**注册工具
+   * **也**把指引段装进系统提示(真挂 cordis + 真 `assemble()`,与入口同一条路)。
+   * 有了它,"guard 查工具" 才等价于 "指引也在"。
+   */
+  it('同一个插件既给工具**也**给指引:guard 查工具 ⇒ 指引也在(真宿主验证)', async () => {
+    const guard = await loadGuard()
+    const { Context } = await import('@deepseek-ai/cordis')
+    const { default: SystemPrompt } = await import('@deepseek-ai/dsh-system-prompt')
+    const { ToolRuntime } = await import('@deepseek-ai/dsh-tools')
+    const { registerGalfreePlaybook } = await import('./service/playbook.ts')
+
+    const dataDir = await makeTempDir('galfree-t22-host-')
+    const service = createProjectService({ dataDir })
+    try {
+      const ctx = new Context()
+      await ctx.plugin(SystemPrompt)
+      await ctx.plugin(ToolRuntime)
+      await ctx.inject(['tools'], (toolCtx) => {
+        registerGalfreeTools(toolCtx as never, service)
+      })
+      await ctx.inject(['systemPrompt'], (promptCtx) => {
+        registerGalfreePlaybook(promptCtx.systemPrompt)
+      })
+
+      // ① guard 看到的那一半:它点名的工具都真的注册了。
+      for (const tool of guard.REQUIRED_TOOLS) {
+        expect(ctx.tools.get(tool), `真宿主上看不到 ${tool}`).toBeDefined()
+      }
+      // ② 推断的另一半:指引段真的进得了组装(preset 的 persona 把顺序全权交给它)。
+      const assembly = await ctx.systemPrompt.assemble()
+      expect(assembly.sections.map((section) => section.name)).toContain('galfree-workflow')
+    } finally {
+      await service.dispose()
       await cleanupTempDirs()
     }
   })
