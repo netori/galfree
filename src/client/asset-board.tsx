@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { CharacterBoardEntry, ImageChannelView, SlotBoardEntry } from './types.ts'
 import type { CharacterDraft, GalfreeApi, GenerationTaskView } from './api.ts'
 import { ArtToolbar, SlotArtActions, StateChip } from './art-actions.tsx'
+import { DifferentialBoard } from './differential-board.tsx'
 import { Chip, Notice, Spinner } from './ui.tsx'
 import s from './panel.module.css'
 
@@ -68,7 +69,7 @@ export function AssetBoard({ characters, slots, api, hasProject, onChanged, onNo
   onChanged: () => Promise<void> | void
   onNotice: (tone: 'bad' | 'warn', text: string) => void
 }) {
-  const [tab, setTab] = useState<'slots' | 'characters'>('slots')
+  const [tab, setTab] = useState<'slots' | 'characters' | 'differentials'>('slots')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   /** 出图任务账本(T15):进度与重试历史都读它 —— 与 agent 工具面同源。 */
@@ -113,6 +114,9 @@ export function AssetBoard({ characters, slots, api, hasProject, onChanged, onNo
             <button type="button" role="tab" aria-selected={tab === 'characters'}
               className={[s.tab, tab === 'characters' ? s.tabActive : undefined].filter(Boolean).join(' ')}
               onClick={() => setTab('characters')}>角色视图</button>
+            <button type="button" role="tab" aria-selected={tab === 'differentials'}
+              className={[s.tab, tab === 'differentials' ? s.tabActive : undefined].filter(Boolean).join(' ')}
+              onClick={() => setTab('differentials')}>差分对比</button>
           </span>
         </span>
       </div>
@@ -159,7 +163,7 @@ export function AssetBoard({ characters, slots, api, hasProject, onChanged, onNo
               </div>
             )}
           </>
-        ) : (
+        ) : tab === 'characters' ? (
           <CharacterView
             characters={characters}
             api={api}
@@ -167,6 +171,13 @@ export function AssetBoard({ characters, slots, api, hasProject, onChanged, onNo
             onBusy={setBusy}
             onError={setError}
             onChanged={onChanged}
+          />
+        ) : (
+          <DifferentialBoard
+            api={api}
+            hasProject={hasProject}
+            onChanged={onChanged}
+            onNotice={onNotice}
           />
         )}
 
@@ -290,7 +301,13 @@ function SlotRow({ slot, task, api, busy, onBusy, onError, onChanged, onNotice }
   )
 }
 
-/** 角色视图:登记簿 + 推导出来的"剧本里有没有它 / 哪些槽要它出场"。 */
+/**
+ * 角色视图:登记簿 + 推导出来的"剧本里有没有它 / 哪些槽要它出场" + **参考链编辑**(T16)。
+ *
+ * 参考链是差分一致性的根:**主视觉出好之后,人在这里把它登记进链** —— 之后这个角色
+ * 所有的表情/姿势差分建任务时都会自动带上它(见「差分对比」页)。链只存路径与备注,
+ * 不是图片内容;路径跳不出项目(接缝会拦)。
+ */
 function CharacterView({ characters, api, busy, onBusy, onError, onChanged }: {
   characters: CharacterBoardEntry[]
   api: GalfreeApi
@@ -301,6 +318,9 @@ function CharacterView({ characters, api, busy, onBusy, onError, onChanged }: {
 }) {
   const [draft, setDraft] = useState<CharacterDraft>({ id: '', name: '', voice: '', styleAnchor: '', hair: '', eyes: '', outfit: '' })
   const [adding, setAdding] = useState(characters.length === 0)
+  /** 正在编辑参考链的角色 id(一次只开一个:链是短列表,不需要同时开一堆)。 */
+  const [chainFor, setChainFor] = useState<string | null>(null)
+  const [chainText, setChainText] = useState('')
 
   const save = async (): Promise<void> => {
     onBusy(true)
@@ -327,6 +347,36 @@ function CharacterView({ characters, api, busy, onBusy, onError, onChanged }: {
     }
   }
 
+  /** 保存这个角色的参考链:整条替换(空行忽略;`路径 | 备注` 两段式)。 */
+  const saveChain = async (character: CharacterBoardEntry): Promise<void> => {
+    onBusy(true)
+    onError(null)
+    try {
+      const references = chainText
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line !== '')
+        .map((line) => {
+          const [path, note] = line.split('|').map((part) => part.trim())
+          return { path: path ?? '', ...(note === undefined || note === '' ? {} : { note }) }
+        })
+      await api.upsertCharacter({
+        id: character.id,
+        name: character.name,
+        ...(character.voice === undefined ? {} : { voice: character.voice }),
+        appearance: character.appearance,
+        ...(character.styleAnchor === undefined ? {} : { styleAnchor: character.styleAnchor }),
+        references,
+      })
+      setChainFor(null)
+      await onChanged()
+    } catch (error) {
+      onError(`「${character.name}」的参考链存不了:${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      onBusy(false)
+    }
+  }
+
   return (
     <>
       <div className={s.chips} style={{ marginBottom: 10 }}>
@@ -345,29 +395,70 @@ function CharacterView({ characters, api, busy, onBusy, onError, onChanged }: {
       ) : null}
 
       {characters.map((character) => (
-        <div key={character.id} className={s.sceneRow}>
-          <span className={s.sceneLabel} title={character.id}>{character.name}</span>
-          <span className={s.sceneWhere} title={character.voice === undefined ? '未绑定剧本角色' : `剧本变量 ${character.voice}`}>
-            {character.voice ?? '未绑定'}
-          </span>
-          <span className={s.sceneMarks}>
-            {character.defined
-              ? <Chip tone="ok" title={character.definedAt === undefined ? undefined : `${character.definedAt.file}:${character.definedAt.line}`}>
-                剧本里有{character.scriptDisplayName === undefined ? '' : `(${character.scriptDisplayName})`}
-              </Chip>
-              : <Chip tone="warn">剧本里还没有它</Chip>}
-            {Object.entries(character.appearance).filter(([, value]) => value !== undefined && value !== '').slice(0, 3).map(([key, value]) => (
-              <Chip key={key} tone="quiet" title={`${key}: ${value}`}>{value}</Chip>
-            ))}
-            {character.slots.length > 0 ? <Chip tone="none" num={character.slots.length}>要用它的槽</Chip> : null}
-            {character.styleAnchor === undefined || character.styleAnchor === '' ? <Chip tone="warn">缺画风锚</Chip> : null}
-          </span>
-          <span className={s.sceneStamp}>
-            <button type="button" className={`${s.button} ${s.ghost} ${s.tiny}`} disabled={busy} onClick={() => {
-              onBusy(true)
-              void api.removeCharacter(character.id).then(onChanged).catch((e) => onError(String(e))).finally(() => onBusy(false))
-            }}>移除</button>
-          </span>
+        <div key={character.id}>
+          <div className={s.sceneRow}>
+            <span className={s.sceneLabel} title={character.id}>{character.name}</span>
+            <span className={s.sceneWhere} title={character.voice === undefined ? '未绑定剧本角色' : `剧本变量 ${character.voice}`}>
+              {character.voice ?? '未绑定'}
+            </span>
+            <span className={s.sceneMarks}>
+              {character.defined
+                ? <Chip tone="ok" title={character.definedAt === undefined ? undefined : `${character.definedAt.file}:${character.definedAt.line}`}>
+                  剧本里有{character.scriptDisplayName === undefined ? '' : `(${character.scriptDisplayName})`}
+                </Chip>
+                : <Chip tone="warn">剧本里还没有它</Chip>}
+              {Object.entries(character.appearance).filter(([, value]) => value !== undefined && value !== '').slice(0, 3).map(([key, value]) => (
+                <Chip key={key} tone="quiet" title={`${key}: ${value}`}>{value}</Chip>
+              ))}
+              {character.slots.length > 0 ? <Chip tone="none" num={character.slots.length}>要用它的槽</Chip> : null}
+              {character.styleAnchor === undefined || character.styleAnchor === '' ? <Chip tone="warn">缺画风锚</Chip> : null}
+              {/* 参考链处境:链空 = 差分没有锚(不是错,但人该知道)。 */}
+              {character.references.length === 0
+                ? <Chip tone="warn" title="参考链是空的:这个角色的差分只能靠 prompt 描述保持一致">参考链空</Chip>
+                : <Chip tone="ok" num={character.references.length} title={character.references.map((reference) => reference.path).join('\n')}>参考链</Chip>}
+            </span>
+            <span className={s.sceneStamp}>
+              <button type="button" className={`${s.button} ${s.ghost} ${s.tiny}`} disabled={busy}
+                aria-expanded={chainFor === character.id}
+                onClick={() => {
+                  if (chainFor === character.id) { setChainFor(null); return }
+                  setChainFor(character.id)
+                  // 打开时把现有链填进输入框(每行一条:`路径 | 备注`)。
+                  setChainText(character.references.map((reference) => (reference.note === undefined ? reference.path : `${reference.path} | ${reference.note}`)).join('\n'))
+                }}>
+                {chainFor === character.id ? '收起参考链' : '参考链'}
+              </button>
+              <button type="button" className={`${s.button} ${s.ghost} ${s.tiny}`} disabled={busy} onClick={() => {
+                onBusy(true)
+                void api.removeCharacter(character.id).then(onChanged).catch((e) => onError(String(e))).finally(() => onBusy(false))
+              }}>移除</button>
+            </span>
+          </div>
+
+          {chainFor === character.id ? (
+            <div className={s.sceneDetail}>
+              <label className={`${s.field} ${s.fieldRoot}`}>
+                <span className={s.fieldLabel}>参考图链 · 每行一条,可写“路径 | 备注”</span>
+                <textarea
+                  className={s.input}
+                  style={{ minHeight: 72, width: '100%', fontFamily: 'ui-monospace, monospace' }}
+                  value={chainText}
+                  placeholder={'game/images/xiao_tang-base.png | 主视觉\n(先在剧本里 show 出这些槽并出图,链才带得上它们)'}
+                  onChange={(event) => setChainText(event.target.value)}
+                  aria-label={`角色 ${character.id} 的参考图链`}
+                />
+              </label>
+              <div className={s.form} style={{ marginTop: 6 }}>
+                <button type="button" className={`${s.button} ${s.primary}`} disabled={busy} onClick={() => void saveChain(character)}>
+                  {busy ? <Spinner /> : '保存参考链'}
+                </button>
+                <span className={s.formHint}>
+                  链上的图是**差分的锚**:出这个角色的表情/姿势差分时会自动带上它(远端收到的是图片本体,不是项目内路径)。
+                  只登记**已经出好**的那张;引用了不存在的文件会在板上如实标"缺图"。
+                </span>
+              </div>
+            </div>
+          ) : null}
         </div>
       ))}
 

@@ -316,6 +316,65 @@ export interface GenerationAttemptView {
   replacedFingerprint?: string
 }
 
+/** **拒收注记**(T16):人对某一版的否决理由,只追加、指向被拒的那一版。 */
+export interface GenerationRejectionView {
+  attempt: number
+  fingerprint?: string
+  note: string
+  via: 'human' | 'agent'
+  at: string
+}
+
+/** 槽位对比视图的一格(T16)。 */
+export interface DifferentialCellView {
+  slot: string
+  assetPath: string
+  role: 'main' | 'variant'
+  filled: boolean
+  stamp: string
+  awaitingReview: boolean
+  fingerprint: string
+  /** 这一格最近一个任务的 id(重 roll 从它走;没有任务 = 缺省)。 */
+  taskId?: string
+  history: Array<{
+    n: number
+    outcome: 'ok' | 'failed'
+    at: string
+    fingerprint?: string
+    replacedFingerprint?: string
+    error?: string
+    rejection?: { note: string; via: 'human' | 'agent'; at: string }
+  }>
+  degradation?: GenerationTaskView['degradation']
+  lastError?: string
+}
+
+/** 槽位对比视图的一行 = 一个角色的差分网格(T16)。 */
+export interface DifferentialRowView {
+  character: string
+  name: string
+  styleAnchor?: string
+  references: Array<{ path: string; exists: boolean; slot?: string; note?: string }>
+  main: string | null
+  cells: DifferentialCellView[]
+}
+
+export interface DifferentialGridView {
+  characters: DifferentialRowView[]
+}
+
+/** 参考链处境(T16,纯读)。 */
+export interface ReferenceChainView {
+  slot: string
+  assetPath: string
+  references: Array<{ path: string; character: string; slot?: string; note?: string; exists: boolean }>
+  ready: Array<{ path: string; character: string; exists: boolean }>
+  missing: Array<{ path: string; character: string; exists: boolean }>
+  excludedSelf: string[]
+  characters: string[]
+  unknownCharacters: string[]
+}
+
 /** 图像任务(T14):一级结构化对象;降级是**记在任务上**的事实。 */
 export interface GenerationTaskView {
   id: string
@@ -337,6 +396,8 @@ export interface GenerationTaskView {
     notes: string[]
   }
   attempts: GenerationAttemptView[]
+  /** 拒收注记(只追加;老账本里可能缺省)。 */
+  rejections?: GenerationRejectionView[]
   createdAt: string
   updatedAt: string
   lastError?: string
@@ -598,14 +659,43 @@ export class GalfreeApi {
 
   /**
    * 重 roll 一个任务(保留历史,追加一次尝试)。
-   * 给了 `prompt` 就**改词再出**(对话里"重 roll 得更夸张"是同一件事)。
+   * 给了 `prompt` 就**改词再出**(对话里"重 roll 得更夸张"是同一件事);
+   * 给了 `note` 就是**人的拒收理由**(它进任务历史,只追加,指向被拒的那一版)。
    */
-  async retryGenerationTask(id: string, patch: { prompt?: string; size?: string } = {}): Promise<{ task: GenerationTaskView }> {
+  async retryGenerationTask(id: string, patch: { prompt?: string; size?: string; note?: string } = {}): Promise<{ task: GenerationTaskView }> {
     return readJson(await fetch('/api/galfree/tasks/retry', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id, ...patch }),
     }))
+  }
+
+  /** **差分批量**(T16):一个角色的差分补齐 —— 主视觉先出,差分自动携参考链。 */
+  async characterDifferentials(payload: { character: string; model: string; run?: boolean }): Promise<{ tasks: GenerationTaskView[] }> {
+    return readJson(await fetch('/api/galfree/tasks/differentials', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    }))
+  }
+
+  /** 槽位对比视图(T16,纯读):同角色差分网格 = 登记簿 + 槽位历史。 */
+  async differentialGrid(): Promise<DifferentialGridView> {
+    return readJson(await fetch('/api/galfree/differentials'))
+  }
+
+  /** 参考链处境(T16,纯读)。 */
+  async referenceChain(slot: string): Promise<ReferenceChainView> {
+    return readJson(await fetch(`/api/galfree/reference-chain?slot=${encodeURIComponent(slot)}`))
+  }
+
+  /**
+   * 素材缩略图地址(T16)。带上版本戳:重 roll 换了图 → 版本变了 → 浏览器不会拿旧图糊弄人。
+   * 文件不存在时该地址返回 404(面板据此显示"待填"而不是裂图)。
+   */
+  assetUrl(path: string, version?: string): string {
+    const qs = new URLSearchParams({ path, ...(version === undefined || version === '' ? {} : { v: version }) })
+    return `/api/galfree/asset?${qs.toString()}`
   }
 
   /** 素材槽级审读戳(T15 前补:接缝早就有 stampSlot,缺的是入口)。 */

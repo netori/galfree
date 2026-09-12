@@ -537,6 +537,38 @@ button.slotChip:disabled { opacity: 0.5; cursor: default; }
   border: 0;
 }
 
+/* ─── 差分对比(T16):同角色差分网格 ─────────────────────────────────── */
+
+.diffRow { padding: 10px 0; border-top: 0.5px solid var(--gf-border); }
+.diffRow:first-of-type { border-top: 0; }
+.diffGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 10px; }
+.diffCell {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px;
+  border: 0.5px solid var(--gf-border-2);
+  border-radius: 10px;
+  background: var(--gf-surface);
+  min-width: 0;
+}
+.diffThumb {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+  border-radius: 6px;
+  background: var(--gf-hover);
+}
+.diffThumbEmpty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--gf-text-4);
+  font-size: 12px;
+  border: 0.5px dashed var(--gf-border-2);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .seal, .spinner, .meterFill { animation: none; transition: none; }
   .treeChevron, .button, .input, .sceneRow, .treeRow { transition: none; }
