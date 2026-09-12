@@ -1143,6 +1143,75 @@ interface NextAction {
   慢带里那条断言 `/progress` 带回的 `nextActions` 就是面板读的那份(带 actor)。
   点击 → 滚动 / 打开那一场,要在浏览器里点一次(与别的面板验收同一批)。
 
+## galgame 专用 agent preset(T22 / #30 之后追加)
+
+在仓库里交付一个**可复现**的 agent preset:`presets/galgame/`
+(`preset.yml` + `agent.cordis.yml` + `guard.mjs` + `README.md` + 一份 `standard` 参考副本)。
+
+### 它到底加了什么(别预期错位)
+
+| 东西 | 谁提供 |
+|---|---|
+| 流程指引(`galfree-workflow` 段,T19) | **插件**(部署级安装) |
+| 16 个 `galfree_*` 工具(T20) | 同一个插件 |
+| 板上的「下一步」(T21) | 同一个插件(面板与 `galfree_project_status` 都读它) |
+| **preset 自己** | ① 一段**立场**(persona):按指引走、只报事实、一次推进一环、`actor: human` 的请人做;② 一行**前置检查**(`guard.mjs`) |
+
+**persona 里不复述指引**(闸门码 / 判据字段都不出现)—— 那会分叉;有一条守卫盯着这件事
+(`src/preset.test.ts`:persona 必须提到 `galfree-workflow` / `galfree_project_status` / `nextActions`,
+且**不得**出现 `bible-not-final`、`summary.missingSlots` 这类指引内容)。
+
+### 组装 = 随包 `standard` + **两处**声明的改动(机器检查)
+
+`agent.cordis.yml` 逐行照抄随包 `standard` 组装,只改两处:persona、末尾加一行 guard。
+**这句话本身被守卫钉住**:`standard.reference.cordis.yml` 是那份参考副本(逐字保存),
+测试对它逐行**深度相等**比对,并断言"多出来的行有且只有 guard 一行"。
+所以:抄错一个字符、漂了、宿主升级后 standard 变了 —— 都会红。
+不做减法(不砍工具)的理由也写在文件头:**写 `.rpy` 与写代码要的是同一套工具**,
+"这个模式与众不同"不靠少给工具来体现。
+
+### 前置检查行为什么是**相对路径**,而不是 `name: 'dsh-galfree'`
+
+这一条是本票最反直觉、也最要紧的结论(两条都对源码核实过):
+
+1. preset 的**健康检查**从**宿主安装位置**解析包名 —— "a row's package name resolves against;
+   the caller's own `ctx.baseUrl`, which is where the installed harness lives"
+   (`dsh-agent-presets` 的 discovery 源码)。而第三方插件通常装在 **profile** 的 `node_modules` 里,
+   那条向上的路径够不着它 —— 于是插件明明装好了,`name: 'dsh-galfree'` 这一行也会被报成
+   **broken**(preset 不可选、不可复制)。
+2. 相对行(`./guard.mjs`)的判定是"这个文件在不在",与谁装在哪无关 ⇒ 任何部署里都稳定;
+   真正的前置判断交给 guard 自己做。
+3. guard **不能**加 `disabled`:健康检查会跳过 disabled 行,那就回到"静默少几个工具"了。
+
+### 两种装法(互斥,二选一)
+
+| 摆法 | 怎么做 | 代价 |
+|---|---|---|
+| **A. 插件装在部署里**(本机现状) | profile 的 `dsh.profile.bundles` 里已有 `dsh-galfree`;preset 只加立场与前置检查 | 别的会话也看得到那 16 个工具(占提示词,不会被用到) |
+| **B. 插件交给 preset 授予** | 插件随**宿主安装位置**交付,组装里换成 `- {id: galfree, name: 'dsh-galfree'}` | 只有这个模式有 GALFree |
+
+**两种都装绝对不行**:插件要注册一个设置命名空间与一族 `/api/galfree/*` 路由,而
+`dsh-settings` 与 `dsh-host-webserver` 都是**重复即抛**
+(`settings namespace "dsh-galfree" is already registered` /
+`webserver: duplicate GET route …`);宿主的规则是"组装里拒绝的行会让会话创建失败并回滚、
+并指名那一行"。README 把这条与两种摆法一起写明了。
+
+### AC5 的落点:失败**带原因**,不静默
+
+- 模块解析不了 → 宿主的 health 把 preset 列成 **broken** 并指名那一行(第一种失败);
+- 模块能加载但 `apply` 抛错 → **会话创建失败并回滚,指名每一行**(第二种失败)——
+  guard 走的就是这条:错误里带**缺了哪些工具**与**去哪儿装**。
+  守卫直接调 guard 的两条路(在场的放行、缺席的带原因拒绝),并断言它点名的工具与
+  `registerGalfreeTools` 真实注册的名字一致(改名就红)。
+
+### 已知边界
+
+- **AC1 的现场那一次要人做**:装进 `<dshHome>/.agent-presets/galgame/` → 新开一个**空**会话
+  → 选「Galgame 制作」→ 只给一句主题,看它是否先 `galfree_project_status` 并按指引顺序推进。
+  仓库没有 DOM/宿主级自动化面能替这一步(与 T19 的 AC1 同一性质)。
+- preset **不拥有**注册表 / 沙箱审批栈 / 持久化 / 模型路由 —— 有一条守卫按族名禁掉这些行
+  (`dsh-tools` / `dsh-settings` / `dsh-agent-presets` / `dsh-session*` / sandbox|approval / `dsh-llm` …)。
+
 ## 模板的界面层(T7 之后补齐的一块,实测换来的)
 **新建项目必须整份带上 SDK 的 GUI 模板**(`screens.rpy` / `gui.rpy` / `guisupport.rpy` / `testcases.rpy`),
 外加一份**项目内**的中文字体。这不是"锦上添花",是"能不能跑"的问题 —— 下面三条都是实测:
