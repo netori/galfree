@@ -171,6 +171,20 @@ export function WorkbenchPanel() {
     }
   }
 
+  /** 把手写文件里的段原样搬进生成目录(T10),搬完这一场才能被 agent 重生成。 */
+  const relocate = async (label: string): Promise<void> => {
+    setBusyKey(`relocate:${label}`)
+    try {
+      const moved = await api.relocateScene(label)
+      pushNotice('warn', `${label} 已原样搬进 ${moved.to}(段内容逐字未改,并留下一条快照)。现在可以让 agent 重生成它了。`)
+      await refresh()
+    } catch (error) {
+      pushNotice('bad', `搬家失败(${label}):${describeError(error)}`)
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
   const runPlaytest = async (): Promise<void> => {
     setPlaying(true)
     try {
@@ -310,6 +324,7 @@ export function WorkbenchPanel() {
           playing={playing}
           onStamp={(target) => void stamp(target)}
           onPlaytest={() => void runPlaytest()}
+          onRelocate={(label) => void relocate(label)}
           hasProject={hasProject}
         />
 

@@ -19,12 +19,20 @@ import { extractZip, httpsDownloader } from './service/sdk-real.ts'
 import { findLauncher, platformLauncherName } from './service/hash.ts'
 import { realSpawn } from './service/playtest.ts'
 import { createCompositeValidator } from './service/validation/composite-validator.ts'
+import { registerGalfreeTools } from './service/tools.ts'
 
 /** 稳定的 cordis 插件名(与 cordis.patch.yml 的 insert id 对齐)。 */
 export const name = 'galfree'
 
 /** 挂载工作台路由与设置所需的服务。 */
 export const inject = ['webServer', 'settings']
+
+/**
+ * agent 工具席位(可选):`dsh-tools` 在基础组合里总在,但工具是**可选席位** ——
+ * 没有它的宿主照样该能跑面板,所以用 cordis 的懒注入按需注册,而不是把它塞进 `inject`
+ * 让插件整体依赖它。与目录选择接缝同一种态度:缺能力就少一个入口,不是插件起不来。
+ */
+const TOOL_INJECT = { tools: false } as const
 
 /**
  * 目录选择接缝(`ctx.directoryPicker`,由 dsh-web-app 的 adapter 装配 backend)。
@@ -191,4 +199,16 @@ export function apply(ctx: Context, config?: Config): void {
     },
     'dsh-galfree: routes',
   )
+
+  // agent 工具(T10):接缝能力的薄适配器。懒注入 —— 宿主没有工具席位就少两个入口,
+  // 面板与路由照常工作。
+  ctx.inject(['tools'], (toolCtx) => {
+    toolCtx.effect(
+      () => registerGalfreeTools(
+        toolCtx as unknown as Parameters<typeof registerGalfreeTools>[0],
+        service,
+      ),
+      'dsh-galfree: agent tools',
+    )
+  })
 }

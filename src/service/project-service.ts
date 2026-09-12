@@ -16,9 +16,11 @@ import { ProjectRegistry, type RegistryEntry } from './registry.ts'
 import { commitSnapshot, fileDiff, fileHistory, rollbackFile, type SnapshotEntry } from './snapshot.ts'
 import { PROJECT_NAME_RE, renderTemplateFiles, templateKeepFiles } from './template.ts'
 import { FakeValidator } from './validation/template-validator.ts'
-import { deriveGraph, parseRpy, type RpyFile } from './rpy/parse.ts'
+import { deriveGraph, parseRpy } from './rpy/parse.ts'
+import { readRpyFiles } from './rpy/files.ts'
 import type { ParsedScript } from './rpy/dialect.ts'
 import type { BranchGraph } from './rpy/dialect.ts'
+import type { DialectProblem } from './rpy/dialect.ts'
 import { computeProgress, sceneFingerprint, slotAssetPath, type ProgressSnapshot } from './progress.ts'
 import { readStamps, sceneTarget, slotTarget, stampsDocument, withStamp, type StampRecord } from './stamps.ts'
 import {
@@ -33,6 +35,7 @@ import {
   type BibleDocument, type BiblePatch, type GenerationContext,
 } from './bible.ts'
 import { BIBLE_STAMP_TARGET } from './stamps.ts'
+import { composeSceneFile, extractSceneBlock, gatewayPathOf, scenesPathOf } from './scene-file.ts'
 import { contentFingerprint, launchPlaytest, playtestDocument, readPlaytest, PLAYTEST_FILE, type PlaytestPorts, type PlaytestRun } from './playtest.ts'
 import { ABSENT, fileFingerprint, fingerprint } from './hash.ts'
 import { WriteGateway, type ChangeEvent, type FileSnapshot, type GatewayError, type WriteLogEntry, type WriteOp, type WriteResult } from './write-gateway.ts'
@@ -59,6 +62,43 @@ export interface CreateProjectInput {
   name: string
   /** 显示标题;缺省等于 name。 */
   title?: string
+}
+
+/** 逐场生成的输入(T10)。 */
+export interface GenerateSceneInput {
+  /** 场景 label(标识符;生成物落在 game/scenes/<label>.rpy)。 */
+  label: string
+  /** 生成的 `.rpy` 段落(含 `label <label>:` 起头;只允许方言子集)。 */
+  source: string
+  /** 这一场的大纲位(供 agent 自己组织上下文用;接缝只做透传记录)。 */
+  outline?: string | undefined
+  /** 续接目标(下一场的 label);给了就校验它存在。 */
+  nextLabel?: string | null
+  /**
+   * 是否要求"定稿设定集"作为上下文。true 时没定稿直接拒绝 ——
+   * 生成必须先有权威记忆源(T9 的门禁在这里复用,而不是另立一条)。
+   */
+  requireContext?: boolean
+  /** 生成物的目标路径;只接受规范路径(传别的就是归属违规)。 */
+  targetPath?: string
+}
+
+/** 逐场生成的结果:写完当场判定的全套事实。 */
+export interface GenerateSceneReport {
+  path: string
+  label: string
+  action: 'created' | 'regenerated'
+  /** 子集能否解析(含子集外降级 → false)。 */
+  parseOk: boolean
+  /** 校验回路结果(快带假验证器 / 生产合成验证器)。 */
+  validation: ValidationReport
+  /** 本次生成相关的问题(目标文件 + 全局结构问题)。 */
+  issues: DialectProblem[]
+  /** 写完之后的推导板快照(板立刻反映)。 */
+  progress: ProgressSnapshot
+  /** 定稿设定集上下文(requireContext 时;否则 null)。 */
+  context: GenerationContext | null
+  wroteAt: string
 }
 
 /**
@@ -231,13 +271,7 @@ export class ProjectService {
   async branchGraph(projectRef: string): Promise<BranchGraph> {
     const entry = await this.#resolve(projectRef)
     await this.#assertPresent(entry)
-    const files: RpyFile[] = []
-    for (const item of await readdir(join(entry.path, 'game'), { withFileTypes: true })) {
-      if (item.isFile() && item.name.endsWith('.rpy')) {
-        files.push({ name: item.name, text: await readFile(join(entry.path, 'game', item.name), 'utf8') })
-      }
-    }
-    return deriveGraph(parseRpy(files))
+    return deriveGraph(parseRpy(await readRpyFiles(join(entry.path, 'game'))))
   }
 
   // ─── 推导进度 + 审读戳(T6)───────────────────────────────────────────
@@ -282,13 +316,7 @@ export class ProjectService {
   async #parseScript(projectRef: string): Promise<ParsedScript> {
     const entry = await this.#resolve(projectRef)
     await this.#assertPresent(entry)
-    const files: RpyFile[] = []
-    for (const item of await readdir(join(entry.path, 'game'), { withFileTypes: true })) {
-      if (item.isFile() && item.name.endsWith('.rpy')) {
-        files.push({ name: item.name, text: await readFile(join(entry.path, 'game', item.name), 'utf8') })
-      }
-    }
-    return parseRpy(files)
+    return parseRpy(await readRpyFiles(join(entry.path, 'game')))
   }
 
   /**
@@ -408,7 +436,133 @@ export class ProjectService {
     )
   }
 
+  // ─── 逐场剧本生成(T10)──────────────────────────────────────────────
+
+  /**
+   * 生成/重生成一场戏:**一个写批 = 一个快照**,写完当场判定,把结果如实交回。
+   *
+   * 归属规则(本票钉死):一个 label 只归一个文件。
+   *  - `game/script.rpy` 是**手写/模板**的家,生成器不动它;
+   *  - `game/scenes/<label>.rpy` 是**生成**的家;
+   *  - 想生成一个还活在别处的 label → 如实拒绝并指出它在哪,让调用方先搬走。
+   *    否则同一个 label 会被定义两处,真正的运行时会死在重复定义上 —— 而"真跑起来"
+   *    正是本项目的验收方式,不能让生成器悄悄制造这种项目。
+   *
+   * 生成"失败"(语法错/悬空跳转)也**照常落盘并如实上报**:内容进了仓库、快照可回滚,
+   * 板立刻显示问题;假装成功才是真正的事故。
+   */
+  async generateScene(projectRef: string, input: GenerateSceneInput): Promise<GenerateSceneReport> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const label = input.label.trim()
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(label)) {
+      throw new GalfreeError('invalid-label', `场景 label 必须是标识符:${input.label}`)
+    }
+    if (input.source.trim() === '') throw new GalfreeError('empty-scene', '场景内容不能为空')
+
+    const canonical = scenesPathOf(label)
+    const targetPath = input.targetPath ?? canonical
+    if (targetPath !== canonical) {
+      throw new GalfreeError('scene-not-canonical', `生成物固定落在 game/${canonical};不能写到 ${targetPath}`)
+    }
+
+    // 归属检查:这个 label 现在住在哪?(scene.file 与 canonical 同为 game/ 相对口径)
+    const parsed = await this.#parseScript(projectRef)
+    const existing = parsed.scenes.find((scene) => scene.label === label)
+    if (existing !== undefined && existing.file !== canonical) {
+      throw new GalfreeError(
+        'scene-label-elsewhere',
+        `label ${label} 现在住在 game/${existing.file},不在生成目录。` +
+        `要重生成它,先把那一段搬进 game/${canonical}(手写文件归人管,生成器不越界)。`,
+      )
+    }
+    const nextLabel = input.nextLabel ?? null
+    if (nextLabel !== null && !parsed.scenes.some((scene) => scene.label === nextLabel)) {
+      throw new GalfreeError('unknown-next-label', `续接目标 label 不存在:${nextLabel}`)
+    }
+
+    // 上下文门禁:要求时只给定稿版(T9 的同一道门,不偷偷用草稿)。
+    const context = input.requireContext === true ? await this.generationContext(projectRef) : null
+
+    // 若目标文件里已有**别的** label,保住它们(手写/追加都可能发生);只替换本场那一段。
+    const gatewayPath = gatewayPathOf(canonical)
+    const gateway = await this.#gatewayFor(projectRef)
+    const current = await gateway.read(gatewayPath)
+    const composed = composeSceneFile(label, input.source, current.content, nextLabel)
+
+    // 一个写批 = 一个快照。
+    await gateway.writeBatch(
+      [{ path: gatewayPath, content: composed, expectVersion: current.version }],
+      { origin: 'agent', reason: 'scene', scene: label },
+    )
+
+    // 写完当场判定:校验回路 + 推导板一起刷新。
+    const [validation, progress, parsedAfter] = await Promise.all([
+      this.validateActiveProject(),
+      this.progress(projectRef),
+      this.#parseScript(projectRef),
+    ])
+    const scene = parsedAfter.scenes.find((candidate) => candidate.label === label)
+    const issues: DialectProblem[] = [
+      ...parsedAfter.problems,
+      ...(scene?.problems ?? []),
+    ].filter((problem) => problem.file === canonical || problem.code === 'no-start-label')
+
+    return {
+      path: gatewayPath,
+      label,
+      action: existing === undefined ? 'created' : 'regenerated',
+      parseOk: scene !== undefined && !scene.readOnly,
+      validation,
+      issues,
+      progress,
+      context,
+      wroteAt: new Date().toISOString(),
+    }
+  }
+
   // ─── 设定集工作周期(T9)──────────────────────────────────────────────
+
+  /**
+   * 把 `game/script.rpy` 里的一个 label 段**原样搬**进生成目录(`game/scenes/<label>.rpy`)。
+   *
+   * 为什么需要这一步:模板项目把 `label start:` 写在 `script.rpy` 里,而生成物固定落在
+   * `game/scenes/`(一 label 一文件)。要让 `start` 变成"可生成的场景",它得先搬家 ——
+   * 而这一步**只能由人发起**(它是重写人的手写文件),所以它是独立的一次写批。
+   *
+   * 语义严格限定为"搬家":段内容逐字不变(含注释与空行),只是换个文件住;
+   * 目标文件已存在就拒绝(不覆盖既有内容)。
+   */
+  async relocateScene(projectRef: string, label: string, actor: { via: 'human' | 'agent' }): Promise<{ from: string; to: string }> {
+    this.#requireHuman(actor)
+    const parsed = await this.#parseScript(projectRef)
+    const scene = parsed.scenes.find((candidate) => candidate.label === label)
+    if (scene === undefined) throw new GalfreeError('unknown-scene', `场景 ${label} 不存在`)
+    const canonical = scenesPathOf(label)
+    if (scene.file === canonical) {
+      throw new GalfreeError('scene-already-canonical', `${label} 已经在生成目录里:game/${canonical}`)
+    }
+
+    const gateway = await this.#gatewayFor(projectRef)
+    const sourcePath = gatewayPathOf(scene.file)
+    const sourceCurrent = await gateway.read(sourcePath)
+    const targetPath = gatewayPathOf(canonical)
+    const targetCurrent = await gateway.read(targetPath)
+    if (targetCurrent.version !== ABSENT) {
+      throw new GalfreeError('scene-target-exists', `目标文件已存在,拒绝覆盖:${targetPath}`)
+    }
+
+    const { moved, remainder } = extractSceneBlock(sourceCurrent.content, label)
+    // 一个写批:源文件去掉那段 + 目标文件拿到那段 —— 原子,快照粒度 = 一次搬家。
+    await gateway.writeBatch(
+      [
+        { path: sourcePath, content: remainder, expectVersion: sourceCurrent.version },
+        { path: targetPath, content: moved, expectVersion: ABSENT },
+      ],
+      { origin: 'workbench', reason: 'relocate', scene: label },
+    )
+    return { from: sourcePath, to: targetPath }
+  }
 
   /** 设定集(读):主题 / 世界观 / 章节 / 对登记簿的引用 / 大纲引用。 */
   async bible(projectRef: string): Promise<BibleDocument> {

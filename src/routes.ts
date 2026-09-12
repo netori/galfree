@@ -111,6 +111,7 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['/bible/import-outline', ['POST']],
   ['/bible/stamp', ['POST']],
   ['/bible/context', ['GET']],
+  ['/scenes/relocate', ['POST']],
   ['/picker', ['GET']],
   ['/picker/pick', ['POST']],
   ['/picker/list', ['GET']],
@@ -510,6 +511,18 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     const active = await service.getActiveProject()
     if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
     writeJson(res, 200, await service.generationContext(active.id))
+    return
+  }
+
+  // 搬家(T10):把手写文件里的段搬进生成目录,好让它可被重生成。
+  // 只能由人发起 —— 它重写的是人的手写文件(接缝里同一条守卫)。
+  if (method === 'POST' && path === '/scenes/relocate') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const label = String(body.label ?? '')
+    if (label === '') throw new GalfreeError('unknown-scene', '需要 label')
+    writeJson(res, 200, await service.relocateScene(active.id, label, { via: 'human' }))
     return
   }
 

@@ -407,6 +407,18 @@ export class GalfreeApi {
     await readJson<unknown>(await fetch('/api/galfree/bible/stamp', { method: 'POST' }))
   }
 
+  /**
+   * 把手写文件里的一个 label 段**原样搬**进生成目录(段内容逐字不变)。
+   * 生成物固定落在 `game/scenes/<label>.rpy`,所以搬完这一场才能被 agent 重生成。
+   */
+  async relocateScene(label: string): Promise<{ from: string; to: string }> {
+    return readJson(await fetch('/api/galfree/scenes/relocate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ label }),
+    }))
+  }
+
   /** SDK 供给状态(T5;首次下载进度可见)。 */
   async sdk(): Promise<SdkView> {
     return readJson(await fetch('/api/galfree/sdk'))

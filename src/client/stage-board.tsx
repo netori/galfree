@@ -22,13 +22,15 @@ function markTone(severity: string): 'warn' | 'bad' | 'none' {
   return MARK_TONE[severity] ?? 'none'
 }
 
-export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, hasProject }: {
+export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, onRelocate, hasProject }: {
   progress: ProgressView | null
   /** 正在盖戳的目标 key(stampKey 的产物);null = 空闲。 */
   busyKey: string | null
   playing: boolean
   onStamp: (target: StampTarget) => void
   onPlaytest: () => void
+  /** 把手写文件里的段搬进生成目录(T10):搬完这一场才能被重生成。 */
+  onRelocate: (label: string) => void
   hasProject: boolean
 }) {
   const summary = progress?.summary ?? null
@@ -112,6 +114,7 @@ export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, ha
                     busyKey={busyKey}
                     onToggle={() => setOpenScene(openScene === scene.label ? null : scene.label)}
                     onStamp={onStamp}
+                    onRelocate={onRelocate}
                   />
                 ))}
               </div>
@@ -144,12 +147,13 @@ export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, ha
   )
 }
 
-function SceneRow({ scene, open, busyKey, onToggle, onStamp }: {
+function SceneRow({ scene, open, busyKey, onToggle, onStamp, onRelocate }: {
   scene: SceneProgressView
   open: boolean
   busyKey: string | null
   onToggle: () => void
   onStamp: (target: StampTarget) => void
+  onRelocate: (label: string) => void
 }) {
   const sceneTarget: StampTarget = { kind: 'scene', label: scene.label }
   const sceneBusy = busyKey === stampKey(sceneTarget)
@@ -235,9 +239,21 @@ function SceneRow({ scene, open, busyKey, onToggle, onStamp }: {
           </div>
           <div className={s.chips} style={{ marginTop: 8 }}>
             <Chip tone="quiet" num={scene.dialogueCount}>对白行</Chip>
-            {scene.stamp === 'approved' && scene.slots.every((slot) => slot.stamp === 'approved')
-              ? <Chip tone="quiet">这一场的槽都认可过了</Chip>
-              : null}
+            {scene.file.startsWith('scenes/')
+              ? <Chip tone="quiet" title="这一场住在生成目录,可以让 agent 重生成">可生成</Chip>
+              : (
+                <span className={s.chips} style={{ gap: 6 }}>
+                  <button
+                    type="button"
+                    className={`${s.button} ${s.ghost} ${s.tiny}`}
+                    onClick={() => onRelocate(scene.label)}
+                    title={`把 game/${scene.file} 里的这一段原样搬进 game/scenes/${scene.label}.rpy 后,这一场就可被生成器重写。段内容逐字不变,并留下一条快照。`}
+                  >
+                    搬进生成目录
+                  </button>
+                  <span className={s.emptyHint}>住在手写文件,生成器不越界</span>
+                </span>
+              )}
           </div>
         </div>
       ) : null}

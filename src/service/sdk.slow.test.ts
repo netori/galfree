@@ -13,10 +13,27 @@ import { SdkProvisioner, sdkIsReady } from './sdk-provision.ts'
 import { httpsDownloader, extractZip } from './sdk-real.ts'
 import { platformLauncherName, findLauncher } from './hash.ts'
 import { SdkValidator } from './validation/sdk-validator.ts'
+import { createCompositeValidator } from './validation/composite-validator.ts'
+import { createProjectService } from './project-service.ts'
+import { runGit } from './git.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
 import { renderTemplateFiles, templateKeepFiles } from './template.ts'
 
 const overrideSdk = process.env.GALFREE_SDK_DIR
+
+/** 解析出一个可用 SDK 目录(优先 GALFREE_SDK_DIR,否则真下载)。 */
+async function ensureSdk(prefix: string): Promise<string> {
+  let sdkDir = overrideSdk ?? ''
+  if (sdkDir === '' || !(await findLauncher(sdkDir))) {
+    const base = await makeTempDir(prefix)
+    sdkDir = join(base, 'renpy-pinned')
+    const provisioner = new SdkProvisioner(sdkDir, { download: httpsDownloader, extract: extractZip, launcherName: platformLauncherName() })
+    const status = await provisioner.ensure()
+    expect(status.state).toBe('ready')
+  }
+  expect(await findLauncher(sdkDir)).not.toBeNull()
+  return sdkDir
+}
 
 describe('真钉版 SDK 慢带(T5)', () => {
   it('SDK 对模板 lint = clean,结果与假适配器结构同型', async () => {
@@ -135,6 +152,92 @@ describe('真钉版 SDK 慢带(T5)', () => {
     }
     // 启动期没退出 = 真的进了主菜单(不是"崩得很快")。
     expect(started).toBe(true)
+
+    await rm(projectRoot, { recursive: true, force: true })
+    await cleanupTempDirs()
+  }, 600_000)
+
+  /**
+   * T10 的闭环,用**真东西**验一遍:生成一场(经网关 + 写批 + 快照)→ 真 SDK 的 lint
+   * 判定 → 项目真能启动。
+   *
+   * 为什么必须是这条:生成的剧本落在 `game/scenes/`(子目录),而"假验证器/分支图是否
+   * 看得见子目录"和"真 Ren'Py 是否加载子目录"是**两件独立的事**。只有真 SDK 能同时回答
+   * 这两个问题 —— 而生成器产出的项目必须真能跑起来,这是本项目的验收方式。
+   */
+  it('逐场生成闭环:生成 → 真 lint 通过 → 项目真能启动', async () => {
+    const sdkDir = await ensureSdk('galfree-slow-sdk4-')
+    const launcher = await findLauncher(sdkDir)
+    const pinnedDir = join(sdkDir, '')
+
+    const projectRoot = await makeTempDir('galfree-slow-generate-')
+    for (const file of [...renderTemplateFiles({ name: 'gen', title: '生成闭环', id: 'gen' }), ...templateKeepFiles()]) {
+      const abs = join(projectRoot, file.path)
+      await mkdir(join(abs, '..'), { recursive: true })
+      await writeFile(abs, file.content, 'utf8')
+    }
+    await (await import('./git.ts')).runGit(projectRoot, ['init', '--initial-branch', 'main'])
+    await (await import('./git.ts')).runGit(projectRoot, ['add', '--all'])
+    await (await import('./git.ts')).runGit(projectRoot, ['commit', '--no-gpg-sign', '--author', 'GALFree <galfree@dsh.local>', '-m', 'scaffold'])
+
+    // 用生产装配:合成验证器(假 lint 恒跑 + 真 SDK lint 就绪时叠加)。
+    const dataDir = await makeTempDir('galfree-slow-generate-data-')
+    const service = createProjectService({
+      dataDir,
+      validator: createCompositeValidator({ pinnedSdkDir: sdkDir, overrideSdkPath: () => '' }),
+    })
+    try {
+      await service.createProject({ projectsRoot: projectRoot, name: 'genproj', title: '生成闭环' })
+
+      const generated = await service.generateScene('genproj', {
+        label: 'scene_one',
+        source: [
+          'label scene_one:',
+          '    scene bg school',
+          '    "第一场:生成出来的戏。"',
+          '    return',
+          '',
+        ].join('\n'),
+        outline: undefined,
+      })
+
+      // 落盘在生成目录,且这一个写批就产生了一个快照。
+      expect(generated.path).toBe('game/scenes/scene_one.rpy')
+      expect(await service.snapshotHistory('genproj', 'game/scenes/scene_one.rpy')).toHaveLength(1)
+
+      // 真 SDK 的 lint:validator 应该是 sdk(合成端口在 SDK 就绪时升级),且判定干净。
+      expect(generated.validation.validator).toBe('sdk')
+      expect(generated.validation.problems.filter((problem) => problem.severity === 'error')).toEqual([])
+
+      // 板也看得见子目录里的场景(假验证器/分支图与真 lint 同口径)。
+      expect(generated.progress.scenes.map((scene) => scene.label)).toEqual(expect.arrayContaining(['scene_one']))
+      expect(generated.progress.slots.map((slot) => slot.slot)).toContain('bg school')
+    } finally {
+      await service.dispose()
+    }
+
+    // 生成之后项目真能启动(引擎加载 game/scenes/ 下新写的文件)。
+    const { spawn } = await import('node:child_process')
+    const child = spawn(launcher!, [projectRoot], {
+      cwd: projectRoot,
+      env: { ...process.env, RENPY_DISABLE_SOUND: '1', RENPY_LESS_UPDATES: '1' },
+      stdio: 'ignore',
+      windowsHide: false,
+    })
+    const started = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(true), 25_000)
+      child.once('exit', () => { clearTimeout(timer); resolve(false) })
+    })
+    child.kill()
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+
+    const tracebackPath = join(projectRoot, 'traceback.txt')
+    if (existsSync(tracebackPath)) {
+      const traceback = await readFile(tracebackPath, 'utf8')
+      expect.fail(`生成之后项目启动即崩:\n${traceback.split('\n').slice(0, 12).join('\n')}`)
+    }
+    expect(started).toBe(true)
+    void pinnedDir
 
     await rm(projectRoot, { recursive: true, force: true })
     await cleanupTempDirs()

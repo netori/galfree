@@ -260,6 +260,58 @@ agent 侧无入口)。
 **工作台设定集卡**(T9):人编辑主题/世界观、逐字导入大纲、盖定稿戳;**面板不生成内容**
 (生成属 T10)。
 
+## 逐场剧本生成(T10 之后追加)
+
+**归属规则(本票钉死):一个 label 只归一个文件。**
+
+| 文件 | 谁的 | 生成器 |
+|---|---|---|
+| `game/script.rpy` | **手写/模板**的家 | 不碰 |
+| `game/scenes/<label>.rpy` | **生成**的家(一文件一场景) | 只写这里 |
+
+想生成一个还活在别处的 label(例如模板的 `start`)→ 如实拒绝(`scene-label-elsewhere`)
+并指出它在哪;要重生成它,先由人**搬家**:`relocateScene(ref,label,{via:'human'})` 把那段
+**原样**搬进生成目录(逐字不变,含注释与缩进),一个写批完成 —— 它重写的是人的手写文件,
+所以 `via` 必须是 human。
+
+**一个写批 = 一个快照**,批次粒度到场:每次 `generateScene` 恰好写一个文件、产生一条
+commit,message 带场景名(`reason:'scene'`)。
+
+**写完当场判定**,结果原样交回(不吞):
+
+```
+generateScene(ref,{label,source,nextLabel?,requireContext?}) → {
+  path, label, action:'created'|'regenerated',
+  parseOk,      // 子集能否解析(false = 含子集外降级)
+  validation,   // 校验回路结果(快带假 / 生产合成真 SDK)
+  issues[],     // 目标文件与全局结构问题(含 dangling-jump 这类)
+  progress,     // 写完之后的推导板快照(板立刻反映)
+  context,      // 定稿设定集上下文(requireContext 时)
+  wroteAt
+}
+```
+
+`requireContext:true`(agent 工具默认)时先过 T9 的门:**没定稿设定集就拒绝生成**,
+不偷偷用草稿。**生成"失败"照常落盘并如实上报**:语法错/悬空跳转会留在仓库与快照里
+(可回滚),板立刻显示问题 —— 假装成功才是事故。
+
+**`.rpy` 读取是递归的**(`src/service/rpy/files.ts`,唯一出处):Ren'Py 会加载 `game/`
+下任意深度的 `.rpy`,真 SDK 的 lint 也是递归看的,所以方言解析、分支图、假验证器必须与它
+同口径。定位信息用 `game/` 下的**相对 POSIX 路径**(如 `scenes/start.rpy`)。
+
+**agent 工具**(cordis 懒注入 `ctx.tools`;没有工具席位只少两个入口):
+
+| 工具 | 作用 |
+|---|---|
+| `galfree_generate_scene` | 生成/重生成一场;返回落盘路径、校验结果、问题清单、板快照 |
+| `galfree_project_status` | 读推导状态(场景/槽/角色/设定集/lint/试玩),与阶段板同源 |
+
+校验不通过**不抛错**,而是把 issues 交回让模型当场修后重生成;接缝的拒绝(归属违规、
+未定稿)也原样交回,因为那是**可执行的指令**。
+
+**路由**:`POST /scenes/relocate`(人发起搬家)。**工作台**:舞台板每场展开后,住在手写
+文件的场景带一个「搬进生成目录」按钮(它是人的动作,不是 agent 的)。
+
 ## 测试纪律(spec Testing Decisions 落地)
 
 - 只在 `ProjectService` 公共接口上断言外部可观察行为:磁盘终态、推导对象、
