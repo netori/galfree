@@ -19,7 +19,15 @@ import { apply as applySettingsCard } from './settings-card.tsx'
 
 export const name = 'galfree'
 
-export const inject = ['slots']
+/**
+ * 客户端半要求的服务。
+ *
+ * `slots` 是三个席位都需要的;`settingsScope` 是**渠道设置分区**需要的 ——
+ * 少了它,组件一调 `ctx.settingsScope.describe()` 就抛错,宿主会把整块内容兜掉,
+ * 界面表现是**设置右侧一片空白**(踩过一次:左侧「GALFree」在,点进去什么都没有)。
+ * `remote` 是写设置要走的 `remote.settings.mutate`。
+ */
+export const inject = ['slots', 'settingsScope', 'remote']
 
 interface SlotsLike {
   register: (options: Record<string, unknown>, component: unknown) => () => void

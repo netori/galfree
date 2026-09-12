@@ -12,7 +12,7 @@
  * —— revision 围栏保证并发改动被拒而不是被静默覆盖。**密钥明文**按 ADR-0010
  * 存本机设置文档:界面上如实写明这一点,不含糊。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import s from './settings-card.module.css'
 
@@ -115,7 +115,56 @@ function modelsProblem(text: string): string | null {
   }
 }
 
+/**
+ * 兜住渲染期崩溃:**把错误显示出来,而不是让设置右侧一片空白**。
+ * 宿主对席位组件崩掉的处理是把内容兜掉(界面表现=空白),那对排障最不友好 ——
+ * 空白看不出是"没做"还是"坏了"。有了它,坏了就看得见。
+ */
+class SectionBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
+  override state: { error: string | null } = { error: null }
+
+  static getDerivedStateFromError(error: unknown): { error: string } {
+    return { error: error instanceof Error ? `${error.name}: ${error.message}` : String(error) }
+  }
+
+  override render(): ReactNode {
+    if (this.state.error === null) return this.props.children
+    return (
+      <section className={s.card} aria-label="GALFree 图像渠道">
+        <header className={s.head}>
+          <h3 className={s.title}>GALFree · 图像渠道</h3>
+        </header>
+        <p className={s.error}>这个设置界面渲染失败了(如实报出来,而不是留一片空白):{this.state.error}</p>
+        <p className={s.hint}>请把上面这行原文报告给插件作者;项目的出图功能不受影响。</p>
+      </section>
+    )
+  }
+}
+
 export function ChannelSettingsCard({ ctx }: { ctx: SettingsCardContext }) {
+  // 依赖缺失时**不许白屏**:说清缺什么。设置分区是用户看得见的地方,
+  // 一片空白会让人以为"功能没做",而真相是"装配缺了一个服务"。
+  if (ctx?.settingsScope === undefined || ctx?.remote?.settings === undefined) {
+    const missing = [
+      ctx?.settingsScope === undefined ? 'settingsScope' : null,
+      ctx?.remote?.settings === undefined ? 'remote.settings' : null,
+    ].filter((entry): entry is string => entry !== null)
+    return (
+      <section className={s.card} aria-label="GALFree 图像渠道">
+        <header className={s.head}>
+          <h3 className={s.title}>GALFree · 图像渠道</h3>
+        </header>
+        <p className={s.error}>
+          这个宿主没有给本插件装配设置服务(缺:{missing.join('、')})。渠道暂时没法在这里配 ——
+          请把这一条报告给插件作者,不要以为是自己填错了。
+        </p>
+      </section>
+    )
+  }
+  return <ChannelSettingsForm ctx={ctx} />
+}
+
+function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
   const describe = ctx.settingsScope.describe()
   const [scope, setScope] = useState<ScopeState>(() => readScope(describe.getSnapshot()))
   const [draft, setDraft] = useState<ChannelDraft>(EMPTY_DRAFT)
@@ -329,7 +378,11 @@ export function apply(ctx: Context): void {
       id: 'galfree',
       order: 40,
       label: () => 'GALFree',
-    }, () => <ChannelSettingsCard ctx={settings} />)) as () => void,
+    }, () => (
+      <SectionBoundary>
+        <ChannelSettingsCard ctx={settings} />
+      </SectionBoundary>
+    ))) as () => void,
     'dsh-galfree: image channel settings section',
   )
 }
