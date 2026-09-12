@@ -1204,6 +1204,14 @@ interface NextAction {
   守卫直接调 guard 的两条路(在场的放行、缺席的带原因拒绝),并断言它点名的工具与
   `registerGalfreeTools` 真实注册的名字一致(改名就红)。
 
+**真机教出来的一课(第一版就栽在这里)**:preset 里的那一行是一个 **cordis 插件**,
+所以 `ctx.tools` **不能随手取** —— 不声明 `inject` 就读服务会当场抛
+`cannot get property "tools" without inject`,表现是"切不过去(应用 loader entry 失败)",
+**不是**"少几个工具"。所以 guard 顶部有 `export const inject = ['tools']`,而且有一条守卫盯着它
+(摘掉 inject → 该用例红)。声明 inject **不会**把"席位真缺席"变成静默:宿主的规则是
+"等待组装从未提供的服务的行"会让会话创建失败并回滚、并指名那一行 —— 这条路上**两种缺法都带原因**。
+(guard 里那句"形状不对"的分支生产上到不了,留着只为说人话而不是抛 TypeError。)
+
 ### 已知边界
 
 - **AC1 的现场那一次要人做**:装进 `<dshHome>/.agent-presets/galgame/` → 新开一个**空**会话

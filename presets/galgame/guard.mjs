@@ -47,16 +47,26 @@ const HOW_TO_INSTALL = [
 ].join('')
 
 /**
+ * **必须有这一行**:cordis 的服务不能"随手取" —— 不声明 inject 就读 `ctx.tools`,
+ * 会当场抛 `cannot get property "tools" without inject`,会话压根切不过来
+ * (这一条是被真机教出来的:第一版就是这么栽的)。
+ */
+export const inject = ['tools']
+
+/**
  * 挂载时检查。抛错 = 会话创建失败并指名这一行(带原因,不是静默降级)。
  *
- * 刻意**不用 `inject: ['tools']`**:那样工具席位缺席时这一行会被静默跳过,
- * 而"工具席位都没有"恰恰是最该报出来的情形。所以这里自己取、自己判。
+ * `tools` 席位真缺席时会怎样?**这一行会一直等着它** —— 宿主的规则是"等待组装从未提供的服务的插件"
+ * 会让会话创建失败并回滚、并指名那一行(`@deepseek-ai/dsh-agent-presets` README「失败与恢复」)。
+ * 所以声明 inject 不会把"没有工具注册表"变成静默跳过;真正要在这里判的,是**席位在、
+ * 但 GALFree 的工具不在**(插件没装 / 装的是旧版本)。
  */
 export function apply(ctx) {
   const tools = ctx !== null && typeof ctx === 'object' ? ctx.tools : undefined
   if (tools === undefined || typeof tools.get !== 'function') {
+    // 生产上到不了这里(inject 保证席位);留着是为了"形状不对"时也说人话,而不是抛 TypeError。
     throw new Error(
-      '「Galgame 制作」preset 需要宿主提供工具注册表(ctx.tools),但它不在:这个部署的组合不完整。' +
+      '「Galgame 制作」preset 需要宿主提供工具注册表(ctx.tools),但它不在或形状不对:这个部署的组合不完整。' +
       HOW_TO_INSTALL,
     )
   }

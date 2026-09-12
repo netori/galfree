@@ -74,9 +74,9 @@ function names(rows: PresetRow[]): string[] {
  * 用**变量说明符**而不是字面量:`.mjs` 在 `presets/` 下没有类型声明,字面量导入会被 TS
  * 当成本地模块要求类型;这里要的是"运行时真的能载入那个文件",类型由调用方声明。
  */
-async function loadGuard(): Promise<{ REQUIRED_TOOLS: string[]; apply: (ctx: unknown) => void }> {
+async function loadGuard(): Promise<{ REQUIRED_TOOLS: string[]; inject?: string[]; apply: (ctx: unknown) => void }> {
   const specifier = '../presets/galgame/guard.mjs'
-  return await import(specifier) as { REQUIRED_TOOLS: string[]; apply: (ctx: unknown) => void }
+  return await import(specifier) as { REQUIRED_TOOLS: string[]; inject?: string[]; apply: (ctx: unknown) => void }
 }
 
 describe('「Galgame 制作」preset(T22)', () => {
@@ -200,6 +200,15 @@ describe('「Galgame 制作」preset(T22)', () => {
 
   // ── 前置检查插件本身:两条路都走一遍 ────────────────────────────────
 
+  it('前置检查**声明了 inject**(不声明就读不到 ctx.tools:真机上就是这一步栽的)', async () => {
+    const guard = await loadGuard()
+    // cordis 的服务不能随手取:不声明 inject 读 `ctx.tools` 会当场抛
+    // `cannot get property "tools" without inject`,会话压根切不过来。
+    // 而"席位真缺席"不会因为声明 inject 变成静默 —— 宿主的规则是"等待从未提供的服务的行"
+    // 会让会话创建失败并指名那一行。
+    expect(guard.inject).toEqual(['tools'])
+  })
+
   it('前置检查:插件不在场时**带原因地拒绝**(指名少了哪些工具 + 怎么装)', async () => {
     const guard = await loadGuard()
     const empty = { tools: { get: () => undefined } }
@@ -207,7 +216,7 @@ describe('「Galgame 制作」preset(T22)', () => {
     // 错误信息要能照着做:点名缺了谁、去哪儿装。
     expect(() => guard.apply(empty)).toThrowError(/galfree_project_status/)
     expect(() => guard.apply(empty)).toThrowError(/README|重启宿主/)
-    // 连工具注册表都没有:也是**带原因**地拒绝,而不是静默跳过。
+    // 席位形状不对(生产上到不了,靠 inject 保证):也说人话,不抛 TypeError。
     expect(() => guard.apply({})).toThrowError(/ctx\.tools|工具注册表/)
   })
 
