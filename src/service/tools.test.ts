@@ -67,7 +67,16 @@ describe('agent 工具(T10)', () => {
 
   it('注册出模型看到的契约:两个工具,参数与输出声明齐备', () => {
     const tools = register()
-    expect(tools.map((tool) => tool.name).sort()).toEqual(['galfree_generate_scene', 'galfree_project_status'])
+    // 剧本环节两个 + 美术环节(T15)五个。
+    expect(tools.map((tool) => tool.name).sort()).toEqual([
+      'galfree_art_queue',
+      'galfree_fill_missing_art',
+      'galfree_generate_image',
+      'galfree_generate_scene',
+      'galfree_image_channel',
+      'galfree_project_status',
+      'galfree_reroll_image',
+    ])
 
     const generate = tools.find((tool) => tool.name === 'galfree_generate_scene')!
     // 模型看到的参数契约:两个必填,其余可选。
@@ -177,5 +186,49 @@ describe('agent 工具(T10)', () => {
     expect(status.lint.errors).toBe(progress.lint.errors)
     // 孤立场景照旧被如实带出来(工具不美化)。
     expect(progress.completeness.orphans).toContain('scene_one')
+  })
+
+  // ─── T15:美术指导工具面 ─────────────────────────────────────────────
+
+  it('T15 美术工具的参数契约:出图工具必填 slot/model/prompt;重 roll 只要 id 或槽', () => {
+    const tools = register()
+    const generate = tools.find((tool) => tool.name === 'galfree_generate_image')!
+    expect(generate.parameters.required?.sort()).toEqual(['model', 'prompt', 'slot'])
+    expect(generate.description).toContain('降级')
+
+    const reroll = tools.find((tool) => tool.name === 'galfree_reroll_image')!
+    // 重 roll 的两个入口二选一,所以都**不是**必填 —— 由执行期给出可执行的拒绝。
+    expect(reroll.parameters.required ?? []).toEqual([])
+    expect(reroll.description).toContain('重试历史')
+  })
+
+  it('T15 没配渠道:出图工具如实拒绝,并把"去哪配"说清楚(不吞成"失败了")', async () => {
+    const tools = register()
+    const out = await tools.find((tool) => tool.name === 'galfree_generate_image')!.execute({
+      slot: 'bg school', model: 'whatever', prompt: '教室',
+    })
+    expect(out).toContain('no-image-channel')
+    // 渠道工具也会告诉人先配。
+    const channel = await tools.find((tool) => tool.name === 'galfree_image_channel')!.execute({})
+    expect(channel).toContain('还没有配置图像渠道')
+  })
+
+  it('T15 队列工具与接缝同源:读队列读的是同一份账本(没有工具专用的状态)', async () => {
+    const tools = register()
+    const out = JSON.parse(await tools.find((tool) => tool.name === 'galfree_art_queue')!.execute({})) as {
+      pendingSlots: string[]
+      tasks: Array<{ id: string }>
+    }
+    const progress = await service.progress('tools')
+    expect(out.pendingSlots).toEqual(progress.slots.filter((slot) => !slot.filled).map((slot) => slot.slot))
+    expect(out.tasks).toEqual(await service.generationTasks('tools'))
+  })
+
+  it('T15 重 roll 找不到任务时给可执行的话(而不是抛异常)', async () => {
+    const tools = register()
+    const out = await tools.find((tool) => tool.name === 'galfree_reroll_image')!.execute({ slot: '不存在的槽' })
+    expect(out).toContain('还没有出图任务')
+    const noArgs = await tools.find((tool) => tool.name === 'galfree_reroll_image')!.execute({})
+    expect(noArgs).toContain('task_id 或 slot')
   })
 })

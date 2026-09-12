@@ -514,6 +514,36 @@ capabilities: { textToImage, imageToImage, referenceChain, aspectRatioParam, b64
 
 **工作台的出图动作面属 T15**(T14 只把账本与队列做出来)。
 
+## 出图操作与素材板动作面(T15 之后追加)
+
+**动作面与 agent 工具面是同一条队列、同一份推导** —— 这是 T15 的 AC3,也是结构保证:
+两边都只是 `ProjectService` 的搬运工(面板经 `/tasks*` 路由,agent 经 5 个工具),
+没有"面板专用的状态",也没有"工具专用的账"。
+
+| 动作 | 面板 | agent 工具 | 接缝 |
+|---|---|---|---|
+| 看渠道与模型 | 素材板工具栏 | `galfree_image_channel` | `imageChannel()` |
+| 看队列与重试历史 | 槽行徽标 + 「历史(n)」 | `galfree_art_queue` | `generationTasks()` |
+| 生成此槽 | 槽行「生成此槽」 | `galfree_generate_image` | `createGenerationTask()` |
+| 补全全部待填 | 工具栏「补全全部待填(n)」 | `galfree_fill_missing_art` | `createTasksForMissingSlots()` |
+| 只重 roll 该槽 | 槽行「重 roll」(+ 改词框) | `galfree_reroll_image` | `retryGenerationTask()` |
+
+**重 roll 保留上一产物为历史(可对比)。** 覆盖写之前,把"正在被替换的那一版"的指纹记进
+本次尝试(`attempt.replacedFingerprint`)。文件必然被覆盖(槽位的约定路径只有一个),
+但旧内容留在**写批前的快照**里 —— 有了指纹就能对上是历史上哪一版,`snapshotHistory` 与
+回滚都能用。所以"可对比"不是口头承诺,是有据可查的。
+
+**改词重 roll**:`retryGenerationTask(ref, id, {prompt})` —— 面板的「重 roll」输入框与
+agent 的 `galfree_reroll_image {prompt}` 走的是同一个入口("把小棠的怒颜重 roll 得更夸张"
+就是这么落地的)。给了空字符串则**拒绝**(要么不给=沿用原词,要么给一句能用的)。
+
+**"补全全部"先过渠道与模型两道门,哪怕一个槽都不缺。** 这里修过一个**静默失败**:
+早先校验写在"遍历待填槽"的循环里,于是"没配渠道 + 槽刚好都填满"会静默返回空数组 ——
+人以为补全跑完了,实际一个任务都没建。静默失败比报错坏得多。
+
+**面板的进度是推出来的**:有任务处于 `queued|running` 时按 2.5s 轮询 `/tasks` 并重取推导,
+不在面板里攒状态。失败原因、降级说明都按接缝原话显示,不美化。
+
 ## 测试纪律(spec Testing Decisions 落地)
 
 - 只在 `ProjectService` 公共接口上断言外部可观察行为:磁盘终态、推导对象、

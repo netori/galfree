@@ -943,10 +943,14 @@ export class ProjectService {
    */
   async createTasksForMissingSlots(
     projectRef: string,
-    options: { model: string; prompts?: Record<string, string>; run?: boolean } ,
+    options: { model: string; prompts?: Record<string, string>; run?: boolean },
   ): Promise<GenerationTask[]> {
     const entry = await this.#resolve(projectRef)
     await this.#assertPresent(entry)
+    // 先过渠道与模型这两道门:**没有槽要填**也要拦。
+    // (曾经这里是"循环里才校验",于是"没配渠道 + 槽刚好都填满"会静默返回空数组 ——
+    //  人以为"补全全都跑完了",实际一个任务都没建。静默失败比报错坏得多。)
+    this.#requireModel(options.model)
     const progress = await this.progress(projectRef)
     const missing = progress.slots.filter((slot) => !slot.filled)
 
@@ -980,14 +984,33 @@ export class ProjectService {
   }
 
   /**
-   * 重试一个任务(人发起):保留历史,追加一次尝试。
-   * 允许在 `failed` 与 `awaiting-review` 上用(后者 = 不满意就重 roll,T15)。
+   * 重 roll 一个任务(人发起):保留历史,追加一次尝试。
+   *
+   * 允许在 `failed` 与 `awaiting-review` 上用(后者 = 看一眼不满意就重 roll)。
+   * `prompt` 给了就**改词再出**(对话里"把小棠的怒颜重 roll 得更夸张"走的就是这条);
+   * `size`/`referenceImages` 同理。被换掉的那一版记进历史(`replacedFingerprint`),
+   * 所以"可对比"不是口头承诺。
    */
-  async retryGenerationTask(projectRef: string, id: string, options: { run?: boolean } = {}): Promise<GenerationTask> {
+  async retryGenerationTask(
+    projectRef: string,
+    id: string,
+    options: { run?: boolean; prompt?: string; size?: string; quality?: string; referenceImages?: Array<{ path: string; note?: string }> ; note?: string } = {},
+  ): Promise<GenerationTask> {
     const reset = await this.#mutateTasks(projectRef, async (document, writers) => {
       const task = findTask(document, id)
       if (task === undefined) throw new GalfreeError('unknown-task', `没有这个图像任务:${id}`)
-      const next: GenerationTask = { ...task, state: 'queued', updatedAt: new Date().toISOString() }
+      if (options.prompt !== undefined && options.prompt.trim() === '') {
+        throw new GalfreeError('empty-prompt', '重 roll 时给的提示词是空的:要么不给(沿用原词),要么给一句能用的')
+      }
+      const next: GenerationTask = {
+        ...task,
+        state: 'queued',
+        ...(options.prompt === undefined ? {} : { prompt: options.prompt }),
+        ...(options.size === undefined ? {} : { size: options.size }),
+        ...(options.quality === undefined ? {} : { quality: options.quality }),
+        ...(options.referenceImages === undefined ? {} : { referenceImages: options.referenceImages }),
+        updatedAt: new Date().toISOString(),
+      }
       delete next.lastError
       writers.push(next)
       return next
@@ -1053,6 +1076,10 @@ export class ProjectService {
     //    网关会如实报漂移,而不是把外部的改动盖掉。
     const gateway = await this.#gatewayFor(projectRef)
     const current = await gateway.read(task.outputPath)
+    // 重 roll 要**保留上一产物为历史**(T15 AC):覆盖之前先把"正在被替换的那一张"
+    // 的指纹记进本次尝试。文件本身照旧被覆盖 —— 但旧内容留在写批前的快照里,
+    // 有了指纹就能精确对上"历史上哪一版是它"(git 快照 + snapshotHistory 可回看)。
+    const replacedFingerprint = current.missing ? undefined : current.version
     const result = await gateway.writeBatch(
       [{ path: task.outputPath, content: bytes, expectVersion: current.version }],
       { origin: 'agent', reason: 'slot', slot: task.slot },
@@ -1065,7 +1092,11 @@ export class ProjectService {
       const done: GenerationTask = {
         ...found,
         state: 'awaiting-review',
-        attempts: [...found.attempts, this.#attempt(found.attempts.length + 1, started, 'ok', { fingerprint: written, bytes: bytes.byteLength })],
+        attempts: [...found.attempts, this.#attempt(found.attempts.length + 1, started, 'ok', {
+          fingerprint: written,
+          bytes: bytes.byteLength,
+          ...(replacedFingerprint === undefined ? {} : { replacedFingerprint }),
+        })],
         updatedAt: new Date().toISOString(),
       }
       delete done.lastError
@@ -1078,7 +1109,7 @@ export class ProjectService {
     n: number,
     startedAt: string,
     outcome: GenerationAttempt['outcome'],
-    extra: { error?: string; fingerprint?: string; bytes?: number },
+    extra: { error?: string; fingerprint?: string; bytes?: number; replacedFingerprint?: string },
   ): GenerationAttempt {
     return {
       n,
@@ -1088,6 +1119,7 @@ export class ProjectService {
       ...(extra.error === undefined ? {} : { error: extra.error }),
       ...(extra.fingerprint === undefined ? {} : { fingerprint: extra.fingerprint }),
       ...(extra.bytes === undefined ? {} : { bytes: extra.bytes }),
+      ...(extra.replacedFingerprint === undefined ? {} : { replacedFingerprint: extra.replacedFingerprint }),
     }
   }
 

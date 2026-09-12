@@ -8,9 +8,10 @@
  *   · 悬空引用 → 推导进 problems,lint 汇总与舞台板同源。
  * 这个组件只负责把这些讲清楚,并把人/agent 写制作信息的动作送回接缝。
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { CharacterBoardEntry, ImageChannelView, SlotBoardEntry } from './types.ts'
-import type { CharacterDraft, GalfreeApi } from './api.ts'
+import type { CharacterDraft, GalfreeApi, GenerationTaskView } from './api.ts'
+import { ArtToolbar, SlotArtActions, StateChip } from './art-actions.tsx'
 import { Chip, Notice, Spinner } from './ui.tsx'
 import s from './panel.module.css'
 
@@ -70,9 +71,32 @@ export function AssetBoard({ characters, slots, api, hasProject, onChanged, onNo
   const [tab, setTab] = useState<'slots' | 'characters'>('slots')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** 出图任务账本(T15):进度与重试历史都读它 —— 与 agent 工具面同源。 */
+  const [tasks, setTasks] = useState<GenerationTaskView[]>([])
 
   const missing = slots.filter((slot) => !slot.filled)
   const awaiting = slots.filter((slot) => slot.stamp === 'stale')
+
+  const loadTasks = useCallback(async (): Promise<void> => {
+    if (!hasProject) { setTasks([]); return }
+    try {
+      const result = await api.generationTasks()
+      setTasks(result.tasks)
+    } catch { /* 读不到任务就当没有:面板主体照常 */ }
+  }, [api, hasProject])
+
+  useEffect(() => { void loadTasks() }, [loadTasks])
+
+  /** 有任务在排队/执行时轮询 —— 进度是推出来的,面板不自己攒状态。 */
+  const inFlight = tasks.some((task) => task.state === 'queued' || task.state === 'running')
+  useEffect(() => {
+    if (!inFlight) return
+    const timer = window.setInterval(() => { void loadTasks(); void onChanged() }, 2500)
+    return () => window.clearInterval(timer)
+  }, [inFlight, loadTasks, onChanged])
+
+  /** 槽 → 它最近一个任务(账本最新在前,所以第一个命中的就是)。 */
+  const taskFor = (slot: string): GenerationTaskView | undefined => tasks.find((task) => task.slot === slot)
 
   return (
     <section className={s.card} aria-label="素材板">
@@ -101,9 +125,17 @@ export function AssetBoard({ characters, slots, api, hasProject, onChanged, onNo
             <div className={s.chips} style={{ marginBottom: 10 }}>
               <Chip tone={missing.length === 0 ? 'ok' : 'warn'} num={missing.length} dot>待填</Chip>
               <Chip tone={awaiting.length === 0 ? 'ok' : 'warn'} num={awaiting.length} dot>待复审</Chip>
-              <span className={s.emptyHint}>出图按钮属 T15;渠道与任务队列已就位(T14)</span>
+              {inFlight ? <Chip tone="warn" dot>出图中</Chip> : null}
+              <span className={s.emptyHint}>出图由 Host 直连执行,不消耗对话回合</span>
             </div>
             <ChannelStatus api={api} hasProject={hasProject} />
+            <ArtToolbar
+              api={api}
+              hasProject={hasProject}
+              missingCount={missing.length}
+              onChanged={async () => { await loadTasks(); await onChanged() }}
+              onNotice={onNotice}
+            />
             {slots.length === 0 ? (
               <div className={s.empty}>
                 <div className={s.emptyTitle}>还没有素材槽</div>
@@ -115,11 +147,13 @@ export function AssetBoard({ characters, slots, api, hasProject, onChanged, onNo
                   <SlotRow
                     key={slot.slot}
                     slot={slot}
+                    task={taskFor(slot.slot)}
                     api={api}
                     busy={busy}
                     onBusy={setBusy}
                     onError={setError}
-                    onChanged={onChanged}
+                    onChanged={async () => { await loadTasks(); await onChanged() }}
+                    onNotice={onNotice}
                   />
                 ))}
               </div>
@@ -146,14 +180,16 @@ export function AssetBoard({ characters, slots, api, hasProject, onChanged, onNo
   )
 }
 
-/** 一个槽:名字/路径/状态 + 账本制作信息(要谁出场、提示词、画风锚)。 */
-function SlotRow({ slot, api, busy, onBusy, onError, onChanged }: {
+/** 一个槽:名字/路径/状态 + 账本制作信息 + **出图动作**(T15)。 */
+function SlotRow({ slot, task, api, busy, onBusy, onError, onChanged, onNotice }: {
   slot: SlotBoardEntry
+  task: GenerationTaskView | undefined
   api: GalfreeApi
   busy: boolean
   onBusy: (value: boolean) => void
   onError: (message: string | null) => void
   onChanged: () => Promise<void> | void
+  onNotice: (tone: 'bad' | 'warn', text: string) => void
 }) {
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState(() => ({
@@ -199,6 +235,7 @@ function SlotRow({ slot, api, busy, onBusy, onError, onChanged }: {
           {slot.origin.scenes.map((scene) => <Chip key={scene} tone="quiet">{scene}</Chip>)}
         </span>
         <span className={s.sceneStamp}>
+          {task !== undefined ? <StateChip state={task.state} /> : null}
           {slot.ledger === undefined ? <Chip tone="quiet">未挂制作信息</Chip> : <Chip tone="none">已挂账</Chip>}
         </span>
       </div>
@@ -206,8 +243,21 @@ function SlotRow({ slot, api, busy, onBusy, onError, onChanged }: {
         <div className={s.sceneDetail}>
           <div className={s.rootPath}>{slot.assetPath}</div>
           <div className={s.chips} style={{ marginTop: 6 }}>
-            <span className={s.emptyHint}>素材文件还不存在时,板上就是"待填";出图后自动变"已填"。</span>
+            <span className={s.emptyHint}>
+              {slot.filled
+                ? '素材文件已在磁盘上,所以板上是"已填";换一张就用「重 roll」,它会把上一版记进历史。'
+                : '素材文件还不存在时,板上就是"待填";出图后自动变"已填"。'}
+            </span>
           </div>
+          {/* T15:出图动作面(生成此槽 / 重 roll / 重试历史)。 */}
+          <SlotArtActions
+            slot={slot.slot}
+            task={task}
+            api={api}
+            disabled={busy}
+            onChanged={onChanged}
+            onNotice={onNotice}
+          />
           <div className={s.form} style={{ marginTop: 8 }}>
             <label className={`${s.field} ${s.fieldRoot}`}>
               <span className={s.fieldLabel}>生成提示词 · 图像子系统的输入</span>

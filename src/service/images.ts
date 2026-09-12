@@ -88,6 +88,14 @@ export interface GenerationAttempt {
   fingerprint?: string
   /** 成功时的字节数。 */
   bytes?: number
+  /**
+   * **被这一次覆盖掉的那一版的指纹**(T15:重 roll 保留上一产物为历史)。
+   *
+   * 文件必然被覆盖(槽位的约定路径只有一个),但覆盖前的快照里有它的内容 ——
+   * 有了这个指纹,人就能从快照历史里精确找回"上一张是哪个版本",对比才有依据。
+   * 首次生成时缺省(没有上一版)。
+   */
+  replacedFingerprint?: string
 }
 
 /**

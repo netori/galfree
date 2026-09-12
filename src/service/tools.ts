@@ -6,6 +6,9 @@
  *
  * 生成"失败"不抛异常,而是把事实(解析/校验/问题)如实交回:模型看到 lint 错才能当场修,
  * 而不是收到一句"失败了"再去猜。真正的接缝错误(归属违规、未定稿、空内容)才抛。
+ *
+ * 工具面与工作台**同一条队列 / 同一份推导**(T15 的 AC3):这里没有任何"工具专用的状态",
+ * 每个工具都是接缝方法的搬运工 —— 所以"agent 改的,工作台上立刻看得到"是结构保证,不是巧合。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -121,7 +124,228 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
     },
   })))
 
+  // ─── 美术指导(T15):与工作台**同一条队列** ─────────────────────────
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_image_channel',
+    description: [
+      '读 GALFree 项目的图像渠道处境:配没配、有哪些模型可用、每个模型声明了什么能力。',
+      '**建任务之前先看这个**:出图必须要一个渠道里的 model id;能力声明决定了哪些参数能发',
+      '(不支持的会被如实降级,降级会记在任务上)。',
+    ].join(' '),
+    parameters: {},
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute() {
+      try {
+        const channel = await service.imageChannel()
+        if (!channel.configured) {
+          return '还没有配置图像渠道。请人到「设置 → GALFree」填端点与密钥,点「获取模型」勾选模型 —— 没渠道时建任务会被如实拒绝。'
+        }
+        return JSON.stringify({
+          channel: channel.name ?? channel.baseUrl,
+          apiKeyConfigured: channel.apiKeyConfigured,
+          models: channel.models.map((model) => ({ id: model.id, label: model.label, capabilities: model.capabilities, note: model.note })),
+        }, null, 2)
+      } catch (error) {
+        return `读不到渠道:${describe(error)}`
+      }
+    },
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_art_queue',
+    description: [
+      '读 GALFree 的素材出图队列:每个任务的目标槽、状态(排队/执行/待复审/失败)、提示词、',
+      '降级说明、以及**完整重试历史**(含被替换掉的那一版的指纹)。',
+      '与工作台素材板**同源**(同一份任务账本),用来回答"哪些图还没出/出成什么样了"。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      slot: { type: 'string', description: '只看某一个槽的任务(省略 = 全部)' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目。'
+      try {
+        const progress = await service.progress(active)
+        const tasks = await service.generationTasks(active)
+        const filtered = args.slot !== undefined && args.slot !== '' ? tasks.filter((task) => task.slot === args.slot) : tasks
+        return JSON.stringify({
+          pendingSlots: progress.slots.filter((slot) => !slot.filled).map((slot) => slot.slot),
+          awaitingReview: progress.slots.filter((slot) => slot.awaitingReview).map((slot) => slot.slot),
+          tasks: filtered.map((task) => ({
+            id: task.id,
+            slot: task.slot,
+            state: task.state,
+            model: task.model,
+            prompt: task.prompt,
+            outputPath: task.outputPath,
+            degradation: task.degradation ?? null,
+            lastError: task.lastError ?? null,
+            attempts: task.attempts.map((attempt) => ({
+              n: attempt.n,
+              outcome: attempt.outcome,
+              fingerprint: attempt.fingerprint ?? null,
+              replacedFingerprint: attempt.replacedFingerprint ?? null,
+              error: attempt.error ?? null,
+              at: attempt.finishedAt,
+            })),
+          })),
+        }, null, 2)
+      } catch (error) {
+        return `读不到队列:${describe(error)}`
+      }
+    },
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_generate_image',
+    description: [
+      '为一个**素材槽**建出图任务(Host 直连执行,不消耗对话回合)。槽必须是',
+      '`galfree_project_status` 里列出的槽(它从 .rpy 的 show/scene 派生);提示词是给上游的',
+      '制作指令。产物经写网关落盘 → 自动快照 → 板的"已填/待复审"推导立刻变绿。',
+      '模型不支持你要的参数时,**任务参数会被自动降级并附说明**(降级不是失败)。',
+      '批量补全待填槽用 `galfree_fill_missing_art`。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      slot: { type: 'string', required: true, description: '目标槽名(如 "xiao_tang smile";必须是派生的槽)' },
+      model: { type: 'string', required: true, description: '渠道里的模型 id(先看 galfree_image_channel)' },
+      prompt: { type: 'string', required: true, description: '给上游的制作指令(不是台词;不要抄叙述内容)' },
+      size: { type: 'string', description: '尺寸/宽高比(模型不支持会被降级并说明)' },
+      run: { type: 'boolean', description: '是否立刻执行(默认 true)' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目。'
+      try {
+        const task = await service.createGenerationTask(active, {
+          slot: args.slot,
+          model: args.model,
+          prompt: args.prompt,
+          ...(args.size === undefined || args.size === '' ? {} : { size: args.size }),
+          run: args.run ?? true,
+        })
+        return JSON.stringify({
+          ok: task.state === 'awaiting-review',
+          id: task.id,
+          slot: task.slot,
+          state: task.state,
+          outputPath: task.outputPath,
+          degradation: task.degradation ?? null,
+          lastError: task.lastError ?? null,
+          attempts: task.attempts.length,
+          next: task.state === 'awaiting-review' ? '产物已落盘,等人在素材板上盖审读戳;不满意可以重 roll。' : '没跑成,看 lastError。',
+        }, null, 2)
+      } catch (error) {
+        // 接缝的拒绝是**可执行的指令**(先配渠道 / 槽名不对),原样给模型,别吞成"失败了"。
+        return `出图未执行:${describe(error)}`
+      }
+    },
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_reroll_image',
+    description: [
+      '重 roll 一个已存在的出图任务(不满意就再来一次)。**保留完整重试历史** ——',
+      '这一次会记下"被它覆盖掉的那一版"的指纹,所以两版可以对比、旧版能从快照找回。',
+      '可只改词不改槽:`prompt` 给了就用新词(比如"把小棠的怒颜重 roll 得更夸张")。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      task_id: { type: 'string', description: '要重 roll 的任务 id(看 galfree_art_queue)' },
+      slot: { type: 'string', description: '或者按槽名找最近一个任务(与 task_id 二选一)' },
+      prompt: { type: 'string', description: '新的制作指令(省略 = 沿用原词)' },
+      run: { type: 'boolean', description: '是否立刻执行(默认 true)' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目。'
+      try {
+        let id = args.task_id !== undefined && args.task_id !== '' ? args.task_id : undefined
+        if (id === undefined) {
+          const slot = args.slot ?? ''
+          if (slot === '') return '需要 task_id 或 slot 之一(先看 galfree_art_queue)。'
+          const hit = (await service.generationTasks(active)).find((task) => task.slot === slot)
+          if (hit === undefined) return `槽「${slot}」还没有出图任务:先用 galfree_generate_image 建一个。`
+          id = hit.id
+        }
+        const task = await service.retryGenerationTask(active, id, {
+          ...(args.prompt === undefined || args.prompt === '' ? {} : { prompt: args.prompt }),
+          run: args.run ?? true,
+        })
+        return JSON.stringify({
+          ok: task.state === 'awaiting-review',
+          id: task.id,
+          slot: task.slot,
+          state: task.state,
+          prompt: task.prompt,
+          attempts: task.attempts.length,
+          history: task.attempts.map((attempt) => ({ n: attempt.n, outcome: attempt.outcome, replaced: attempt.replacedFingerprint ?? null, error: attempt.error ?? null })),
+          lastError: task.lastError ?? null,
+        }, null, 2)
+      } catch (error) {
+        return `重 roll 未执行:${describe(error)}`
+      }
+    },
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_fill_missing_art',
+    description: [
+      '把板上**所有待填的素材槽**展开成出图任务并依次跑完(补全全部待填)。',
+      '展开依据是推导(哪些槽还没有图),不是人维护的待办表;每个槽用它在'.concat('`') + '.studio/slots.json` 里挂的提示词,没挂就按槽名凑一句。',
+      '与工作台素材板上的同一个按钮走同一条队列。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      model: { type: 'string', required: true, description: '渠道里的模型 id(先看 galfree_image_channel)' },
+      run: { type: 'boolean', description: '是否立刻执行(默认 true)' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目。'
+      try {
+        const tasks = await service.createTasksForMissingSlots(active, { model: args.model, run: args.run ?? true })
+        const progress = await service.progress(active)
+        return JSON.stringify({
+          created: tasks.length,
+          tasks: tasks.map((task) => ({ id: task.id, slot: task.slot, state: task.state, degradation: task.degradation?.code ?? null, lastError: task.lastError ?? null })),
+          stillMissing: progress.slots.filter((slot) => !slot.filled).map((slot) => slot.slot),
+          awaitingReview: progress.slots.filter((slot) => slot.awaitingReview).map((slot) => slot.slot),
+        }, null, 2)
+      } catch (error) {
+        return `补全未执行:${describe(error)}`
+      }
+    },
+  })))
+
   return () => {
     for (const dispose of disposers) dispose()
   }
+}
+
+/** 项目 id 或唯一 name → 激活项目 id(工具面统一的入口解析)。 */
+async function resolveProject(service: ProjectService, project: string | undefined): Promise<string | null> {
+  if (project !== undefined && project !== '') return project
+  return (await service.getActiveProject())?.id ?? null
 }

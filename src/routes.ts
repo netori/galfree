@@ -689,7 +689,12 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
     const id = String(body.id ?? '')
     if (id === '') throw new GalfreeError('unknown-task', '需要 id')
-    const task = await service.retryGenerationTask(active.id, id, typeof body.run === 'boolean' ? { run: body.run } : {})
+    const task = await service.retryGenerationTask(active.id, id, {
+      ...(typeof body.run === 'boolean' ? { run: body.run } : {}),
+      // 改词重 roll(T15):面板/agent 都走这一个入口,没有第二条路。
+      ...(typeof body.prompt === 'string' && body.prompt !== '' ? { prompt: body.prompt } : {}),
+      ...(typeof body.size === 'string' && body.size !== '' ? { size: body.size } : {}),
+    })
     writeJson(res, 200, { task })
     return
   }

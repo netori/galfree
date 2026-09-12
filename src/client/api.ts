@@ -312,6 +312,8 @@ export interface GenerationAttemptView {
   error?: string
   fingerprint?: string
   bytes?: number
+  /** 被这一次覆盖掉的那一版的指纹(T15:重 roll 保留上一产物为历史)。 */
+  replacedFingerprint?: string
 }
 
 /** 图像任务(T14):一级结构化对象;降级是**记在任务上**的事实。 */
@@ -594,16 +596,20 @@ export class GalfreeApi {
     }))
   }
 
-  /** 重试一个任务(保留历史,追加一次尝试)。 */
-  async retryGenerationTask(id: string): Promise<{ task: GenerationTaskView }> {
+  /**
+   * 重 roll 一个任务(保留历史,追加一次尝试)。
+   * 给了 `prompt` 就**改词再出**(对话里"重 roll 得更夸张"是同一件事)。
+   */
+  async retryGenerationTask(id: string, patch: { prompt?: string; size?: string } = {}): Promise<{ task: GenerationTaskView }> {
     return readJson(await fetch('/api/galfree/tasks/retry', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id }),
+      body: JSON.stringify({ id, ...patch }),
     }))
   }
 
-  /** 素材槽级审读戳(T15 前补:接缝早就有 stampSlot,缺的是入口)。 */  async stampSlot(slot: string): Promise<void> {
+  /** 素材槽级审读戳(T15 前补:接缝早就有 stampSlot,缺的是入口)。 */
+  async stampSlot(slot: string): Promise<void> {
     await readJson<unknown>(await fetch('/api/galfree/stamps/slot', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
