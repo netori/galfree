@@ -22,8 +22,14 @@ import { ABSENT, fingerprint } from './hash.ts'
 export interface WriteOp {
   /** 相对项目根的 POSIX 路径。 */
   path: string
-  /** 目标内容;null = 删除该文件。 */
-  content: string | null
+  /**
+   * 目标内容;`null` = 删除该文件。
+   *
+   * 文本与**二进制**同一个口子:素材环节要落 PNG(T14),而"经网关写"是铁律
+   * (ADR-0004),所以类型放开到 `Uint8Array` 而不是给图像开一条旁路。
+   * 版本戳口径不变 —— 一律按**原始字节**取哈希(`fingerprint` 两个类型都吃)。
+   */
+  content: string | Uint8Array | null
   /** CAS 期望版本(读取时的 version;'absent' = 断言不存在)。必填,拒绝无条件覆盖。 */
   expectVersion: string
 }
@@ -101,8 +107,9 @@ export class WriteGateway {
   async read(relPath: string): Promise<FileSnapshot> {
     const abs = this.#abs(relPath)
     try {
-      const content = await readFile(abs, 'utf8')
-      return { content, version: fingerprint(content), missing: false }
+      // 一律按**字节**读再解码:版本戳据此与二进制写口径一致(同内容同哈希)。
+      const raw = await readFile(abs)
+      return { content: raw.toString('utf8'), version: fingerprint(raw), missing: false }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
       if (code === 'ENOENT' || code === 'EISDIR') return { content: '', version: ABSENT, missing: true }
@@ -150,7 +157,7 @@ export class WriteGateway {
     // 3) 原子性:写窗口内(#inFlight)的路径事件按写噪声跳过;
     //    写前用刚读的旧内容做**权威 CAS 复校**,关闭校验→写入之间的 TOCTOU 缝隙。
     for (const item of prepared) this.#inFlight.add(item.abs)
-    const written: Array<{ abs: string; prev: string | null }> = []
+    const written: Array<{ abs: string; prev: Uint8Array | null }> = []
     try {
       for (const item of prepared) {
         const prev = await this.#safeReadRaw(item.abs)
@@ -164,7 +171,8 @@ export class WriteGateway {
           await rm(item.abs, { force: true })
         } else {
           await mkdir(dirname(item.abs), { recursive: true })
-          await writeFile(item.abs, item.op.content, 'utf8')
+          // 文本按 utf8 落盘,二进制原样落盘 —— 两条路都经这里,没有旁路。
+          await writeFile(item.abs, item.op.content)
         }
         written.push({ abs: item.abs, prev })
       }
@@ -174,7 +182,7 @@ export class WriteGateway {
       for (const done of written.reverse()) {
         try {
           if (done.prev === null) await rm(done.abs, { force: true })
-          else await writeFile(done.abs, done.prev, 'utf8')
+          else await writeFile(done.abs, done.prev)
         } catch (rollbackError) {
           this.#recordError(batchId, 'rollback-failed', `回滚 ${relative(this.#root, done.abs)} 失败:${String(rollbackError)}`)
         }
@@ -254,8 +262,9 @@ export class WriteGateway {
     }
   }
 
-  async #safeReadRaw(abs: string): Promise<string | null> {
-    try { return await readFile(abs, 'utf8') } catch { return null }
+  /** 原样读回字节(TOCTOU 复校 + 回滚底本);不存在的路径返回 null。 */
+  async #safeReadRaw(abs: string): Promise<Uint8Array | null> {
+    try { return await readFile(abs) } catch { return null }
   }
 
   /** 订阅变更事件(网关内部写 kind=internal;观察到的外部写 kind=external)。 */
@@ -289,9 +298,10 @@ export class WriteGateway {
           if (rel.split('/')[0] === '.git') continue
           if (rel.endsWith('.rpyc') || rel.split('/').includes('cache') || rel.split('/').includes('saves')) continue
           const abs = join(this.#root, filename)
-          let raw: string | null
+          let raw: Uint8Array | null
           try {
-            raw = await readFile(abs, 'utf8')
+            // 按字节读:版本戳与写/读同一口径,二进制素材也能被正确比对(否则内部写噪声抑制失效)。
+            raw = await readFile(abs)
           } catch {
             raw = null // 目录事件或已删除
           }

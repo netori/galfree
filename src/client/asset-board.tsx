@@ -8,8 +8,8 @@
  *   · 悬空引用 → 推导进 problems,lint 汇总与舞台板同源。
  * 这个组件只负责把这些讲清楚,并把人/agent 写制作信息的动作送回接缝。
  */
-import { useMemo, useState } from 'react'
-import type { CharacterBoardEntry, SlotBoardEntry } from './types.ts'
+import { useEffect, useMemo, useState } from 'react'
+import type { CharacterBoardEntry, ImageChannelView, SlotBoardEntry } from './types.ts'
 import type { CharacterDraft, GalfreeApi } from './api.ts'
 import { Chip, Notice, Spinner } from './ui.tsx'
 import s from './panel.module.css'
@@ -18,8 +18,46 @@ const STAMP_LABEL: Record<string, string> = {
   none: '未认可', pending: '待认可', approved: '已过审', stale: '待复审', missing: '未填',
 }
 
-export function AssetBoard({ characters, slots, api, hasProject, onChanged, onNotice }: {
-  characters: CharacterBoardEntry[]
+/**
+ * 渠道处境(T14):**只读**一行 —— 面板不藏"到底能不能出图"这件事。
+ * 没配渠道、目录里没模型,都在这里如实说;出图按钮属 T15。
+ */
+function ChannelStatus({ api, hasProject }: { api: GalfreeApi; hasProject: boolean }) {
+  const [channel, setChannel] = useState<ImageChannelView | null>(null)
+
+  useEffect(() => {
+    if (!hasProject) { setChannel(null); return }
+    let alive = true
+    void (async () => {
+      try {
+        const next = await api.imageChannel()
+        if (alive) setChannel(next)
+      } catch {
+        if (alive) setChannel(null)
+      }
+    })()
+    return () => { alive = false }
+  }, [api, hasProject])
+
+  if (!hasProject || channel === null) return null
+
+  if (!channel.configured) {
+    return (
+      <div className={s.emptyHint} style={{ marginBottom: 10 }}>
+        还没配置图像渠道 —— 到「设置 → 插件 → GALFree」填端点、密钥与模型目录,才谈得上出图(缺的会如实报,不会假装能出)。
+      </div>
+    )
+  }
+  return (
+    <div className={s.emptyHint} style={{ marginBottom: 10 }}>
+      渠道:{channel.name ?? channel.baseUrl} · 模型 {channel.models.length} 个
+      {channel.apiKeyConfigured ? '' : ' · 没配密钥'}
+      {channel.models.length === 0 ? '(目录是空的:填 imageModels 之前,建任务会被拒)' : ''}
+    </div>
+  )
+}
+
+export function AssetBoard({ characters, slots, api, hasProject, onChanged, onNotice }: {  characters: CharacterBoardEntry[]
   slots: SlotBoardEntry[]
   api: GalfreeApi
   hasProject: boolean
@@ -61,8 +99,9 @@ export function AssetBoard({ characters, slots, api, hasProject, onChanged, onNo
             <div className={s.chips} style={{ marginBottom: 10 }}>
               <Chip tone={missing.length === 0 ? 'ok' : 'warn'} num={missing.length} dot>待填</Chip>
               <Chip tone={awaiting.length === 0 ? 'ok' : 'warn'} num={awaiting.length} dot>待复审</Chip>
-              <span className={s.emptyHint}>出图动作属 T14/T15,这里只有账本</span>
+              <span className={s.emptyHint}>出图按钮属 T15;渠道与任务队列已就位(T14)</span>
             </div>
+            <ChannelStatus api={api} hasProject={hasProject} />
             {slots.length === 0 ? (
               <div className={s.empty}>
                 <div className={s.emptyTitle}>还没有素材槽</div>

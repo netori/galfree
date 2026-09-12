@@ -95,7 +95,34 @@ describe('写网关(T2)', () => {
     await expect(service.writeProjectFiles('gw', [{ path: rel, content: 'after-external\n', expectVersion: observed.version }], { reason: 'edit', origin: 'agent' })).resolves.toBeTruthy()
   })
 
-  it("CAS 不可绕过:缺 expectVersion 的写批被拒绝(expect-required)", async () => {
+  it('二进制素材同样经网关落盘:字节原样、版本戳按字节、可被快照覆盖(T14 前置)', async () => {
+    // 一个最小的合法 PNG(1x1 透明像素)—— 不是文本,utf8 往返一定会坏。
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
+      'base64',
+    )
+    const rel = 'game/images/bg-school.png'
+
+    const before = await service.readProjectFile('gw', rel)
+    expect(before.version).toBe('absent')
+    const result = await service.writeProjectFiles('gw', [{ path: rel, content: png, expectVersion: before.version }], { reason: 'slot', origin: 'workbench', slot: 'bg school' })
+
+    // 磁盘终态:字节与上游给的一模一样(没被当文本转换)。
+    const onDisk = await readFile(join(root, 'game', 'images', 'bg-school.png'))
+    expect(Buffer.compare(onDisk, png)).toBe(0)
+
+    // 版本戳按字节算:读回一致;同样的字节再写一次必须给出同一个版本戳(否则 CAS 会误报漂移)。
+    const after = await service.readProjectFile('gw', rel)
+    expect(after.version).toBe(result.versions[rel])
+    await expect(service.writeProjectFiles('gw', [{ path: rel, content: png, expectVersion: after.version }], { reason: 'slot', origin: 'workbench' }))
+      .resolves.toMatchObject({ versions: { [rel]: after.version } })
+
+    // 快照覆盖了这张图(写批 → 自动 commit,ADR-0011)。
+    const history = await service.snapshotHistory('gw', rel)
+    expect(history.length).toBeGreaterThan(0)
+  })
+
+  it('CAS 不可绕过:缺 expectVersion 的写批被拒绝(expect-required)', async () => {
     // 模拟调用方偷懒:不给版本戳。
     await expect(service.writeProjectFiles('gw', [{ path: 'game/script.rpy', content: 'sneaky\n' } as never], { reason: 'edit', origin: 'agent' }))
       .rejects.toMatchObject({ code: 'expect-required' })

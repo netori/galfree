@@ -6,13 +6,15 @@
  * 没有第二处真相。
  */
 import type {
-  BibleChapterView, BibleProgressView, BibleView, BranchGraphView, CharacterBoardEntryView, ProgressView,
+  BibleChapterView, BibleProgressView, BibleView, BranchGraphView, CharacterBoardEntryView, GenerationAttemptView, GenerationTaskView,
+  ImageChannelView, ProgressView,
   SceneFormView, SceneProgressView, SceneRowView, SdkView, SlotBoardEntryView, SlotLedgerView,
   SlotProgressView, SnapshotEntry, StateView, TreeNode,
 } from './api.ts'
 
 export type {
   BibleChapterView, BibleProgressView, BibleView, BranchGraphView, CharacterBoardEntryView as CharacterBoardEntry,
+  GenerationAttemptView, GenerationTaskView, ImageChannelView,
   ProgressView, SceneFormView, SceneProgressView, SceneRowView, SdkView, SlotBoardEntryView as SlotBoardEntry,
   SlotLedgerView, SlotProgressView, SnapshotEntry, StateView, TreeNode,
 }

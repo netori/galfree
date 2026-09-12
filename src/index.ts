@@ -12,6 +12,7 @@ import type {} from '@deepseek-ai/dsh-settings'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createProjectService } from './service/project-service.ts'
+import { createNodeHttpClient, type ImageChannelSettings, type ImageModelDescriptor } from './service/images.ts'
 import { makeRoutes } from './routes.ts'
 import { GalfreeError } from './service/error.ts'
 import { SdkProvisioner, probeOverrideSdk } from './service/sdk-provision.ts'
@@ -64,12 +65,35 @@ export interface Config {
   defaultProjectsRoot?: string
   /** 既有 Ren'Py SDK 路径覆盖(空 = 用钉版自动供给)。 */
   sdkPath?: string
+  /**
+   * 图像渠道(T14):OpenAI 兼容端点基址(如 `https://api.example.com/v1`)。
+   * 空 = 没配渠道,出图动作如实拒绝(`no-image-channel`)。
+   */
+  imageBaseUrl?: string
+  /**
+   * 图像渠道密钥。**明文存在本机设置文档里**(ADR-0010 的知情选择,与 dsh-imagegen
+   * 同风险面):它不进项目目录、不进快照、不进任务账本。
+   */
+  imageApiKey?: string
+  /** 渠道名(只为在面板/账本里指认,随便填)。 */
+  imageChannelName?: string
+  /**
+   * 模型目录(JSON 数组)。每个模型要**声明能力**(支不支持参考链/图生图/尺寸参数),
+   * 因为"协议不合要如实降级"只能靠声明判断,猜就会静默发错请求。
+   *
+   * 形如:`[{"id":"gpt-image-1","label":"全能力","capabilities":{"textToImage":true,"imageToImage":true,"referenceChain":true,"aspectRatioParam":true,"b64Json":true}}]`
+   */
+  imageModels?: string
 }
 
 export const Config: z<Config> = z.object({
   enabled: z.boolean().default(true),
   defaultProjectsRoot: z.string().default(''),
   sdkPath: z.string().default(''),
+  imageBaseUrl: z.string().default(''),
+  imageApiKey: z.string().default(''),
+  imageChannelName: z.string().default(''),
+  imageModels: z.string().default(''),
 })
 
 /** 设置命名空间(与 SDK 路径/渠道覆盖同一真相;spec User Story 25)。 */
@@ -79,6 +103,10 @@ export const GalfreeSettingsSchema: z<Required<Config>> = z.object({
   enabled: z.boolean().default(true),
   defaultProjectsRoot: z.string().default(''),
   sdkPath: z.string().default(''),
+  imageBaseUrl: z.string().default(''),
+  imageApiKey: z.string().default(''),
+  imageChannelName: z.string().default(''),
+  imageModels: z.string().default(''),
 })
 
 /** 宿主侧插件数据目录(注册表、钉版 SDK 等)。 */
@@ -87,11 +115,79 @@ export function galfreeDataDir(): string {
   return join(home, 'dsh-galfree')
 }
 
+/**
+ * 从设置文档拼出图像渠道(T14)。
+ *
+ * 三件事在这里定死:
+ *  - **没填端点 = 没渠道**(`null`),出图动作在接缝上如实拒绝,不假装有;
+ *  - **密钥明文**只留在设置里,拼出的渠道对象会带着它去发请求,但接缝对外
+ *    (`imageChannel()`)只说"配没配",不回传密钥;
+ *  - **模型目录是 JSON 文本**(能力声明按模型给),解析不了就当成"没配模型"并
+ *    在渠道对象里留空 —— 面板会看到 0 个模型,比静默用一个错目录强。
+ */
+export function channelFromSettings(settings: Required<Config>): ImageChannelSettings | null {
+  if (settings.imageBaseUrl.trim() === '') return null
+  return {
+    baseUrl: settings.imageBaseUrl.trim(),
+    apiKey: settings.imageApiKey,
+    ...(settings.imageChannelName.trim() === '' ? {} : { name: settings.imageChannelName.trim() }),
+    models: parseModelCatalog(settings.imageModels),
+  }
+}
+
+/** 解析模型目录 JSON;坏输入返回空目录(面板据此显示"没模型",不静默兜底)。 */
+export function parseModelCatalog(text: string): ImageModelDescriptor[] {
+  if (text.trim() === '') return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(parsed)) return []
+  const models: ImageModelDescriptor[] = []
+  for (const entry of parsed) {
+    if (entry === null || typeof entry !== 'object') continue
+    const candidate = entry as {
+      id?: unknown
+      label?: unknown
+      note?: unknown
+      sizes?: unknown
+      capabilities?: Record<string, unknown>
+    }
+    if (typeof candidate.id !== 'string' || candidate.id === '') continue
+    const caps = candidate.capabilities ?? {}
+    models.push({
+      id: candidate.id,
+      ...(typeof candidate.label === 'string' ? { label: candidate.label } : {}),
+      ...(typeof candidate.note === 'string' ? { note: candidate.note } : {}),
+      // v1 只有这一个适配器;将来加协议时这里按目录里的 adapter 字段分流。
+      adapter: 'openai-compatible',
+      capabilities: {
+        // 缺省口径:v1 的目录绝大多数是 OpenAI 兼容的文生图端点 ——
+        // 所以"文生图/尺寸参数/b64"缺省为真,"参考链/图生图"缺省为假
+        // (能力宁可少说,不能凭空许诺)。
+        textToImage: caps.textToImage !== false,
+        imageToImage: caps.imageToImage === true,
+        referenceChain: caps.referenceChain === true,
+        aspectRatioParam: caps.aspectRatioParam !== false,
+        b64Json: caps.b64Json !== false,
+      },
+      ...(Array.isArray(candidate.sizes) ? { sizes: candidate.sizes.filter((size): size is string => typeof size === 'string') } : {}),
+    })
+  }
+  return models
+}
+
 export function apply(ctx: Context, config?: Config): void {
   const base: Partial<Required<Config>> = {
     enabled: config?.enabled ?? true,
     defaultProjectsRoot: config?.defaultProjectsRoot ?? '',
     sdkPath: config?.sdkPath ?? '',
+    imageBaseUrl: config?.imageBaseUrl ?? '',
+    imageApiKey: config?.imageApiKey ?? '',
+    imageChannelName: config?.imageChannelName ?? '',
+    imageModels: config?.imageModels ?? '',
   }
   const settingsScope = ctx.settings.register(CONFIG_NAMESPACE, GalfreeSettingsSchema, { base })
   const current = () => settingsScope.get()
@@ -132,6 +228,11 @@ export function apply(ctx: Context, config?: Config): void {
         return findLauncher(dir)
       },
       spawn: realSpawn,
+    },
+    // 图像子系统(T14):出网走真 fetch;渠道现读设置(改了立刻生效)。
+    images: {
+      http: createNodeHttpClient(),
+      channel: () => channelFromSettings(current()),
     },
   })
 

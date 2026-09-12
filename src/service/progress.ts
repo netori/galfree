@@ -53,6 +53,11 @@ export interface SlotProgress {
   approvable: boolean
   /** 盖戳被拒的原因(approvable=false 时有值)。 */
   approvableBlockedBy?: string
+  /**
+   * 有图、但还没被人认可(含"认可过又变了")——**纯推导**。
+   * T15 的"待复审队列"与面板的徽标都读这一个布尔,不在适配器里重算。
+   */
+  awaitingReview: boolean
 }
 
 export interface SceneProgress {
@@ -334,6 +339,7 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
         stamp,
         approvable: filled,
         ...(filled ? {} : { approvableBlockedBy: '素材文件还没生成,先出图再认可' }),
+        awaitingReview: filled && stamp !== 'approved',
       })
     }
     const dialogueCount = scene.statements.filter((s) => s.kind === 'dialogue').length
@@ -388,6 +394,7 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
       stamp: status?.stamp ?? 'missing',
       approvable: status?.approvable ?? false,
       ...(status?.approvableBlockedBy === undefined ? {} : { approvableBlockedBy: status.approvableBlockedBy }),
+      awaitingReview: status?.awaitingReview ?? false,
       ...(derived.ledger === undefined ? {} : { ledger: derived.ledger }),
       origin: { ...derived.origin, scenes: usedIn },
     }

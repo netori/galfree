@@ -120,6 +120,8 @@ export interface SlotProgressView {
   /** 人能否盖戳 —— 由接缝判定,UI 不复述规则。 */
   approvable: boolean
   approvableBlockedBy?: string
+  /** 有图但还没被人认可(纯推导;T15 的待复审队列读这一个布尔)。 */
+  awaitingReview: boolean
 }
 
 /** 舞台上那一行要显示的派生事实(由推导引擎给出,UI 只渲染)。 */
@@ -290,6 +292,52 @@ export interface CharacterBoardEntryView {
   scriptDisplayName?: string
   definedAt?: { file: string; line: number }
   slots: string[]
+}
+
+/** 渠道能力视图(T14;密钥永不回传,只有 `apiKeyConfigured`)。 */
+export interface ImageChannelView {
+  configured: boolean
+  name?: string
+  baseUrl?: string
+  apiKeyConfigured: boolean
+  models: Array<{ id: string; label?: string; note?: string; capabilities: Record<string, boolean> }>
+}
+
+/** 一次尝试的历史条目(只追加)。 */
+export interface GenerationAttemptView {
+  n: number
+  startedAt: string
+  finishedAt: string
+  outcome: 'ok' | 'failed'
+  error?: string
+  fingerprint?: string
+  bytes?: number
+}
+
+/** 图像任务(T14):一级结构化对象;降级是**记在任务上**的事实。 */
+export interface GenerationTaskView {
+  id: string
+  slot: string
+  outputPath: string
+  state: 'queued' | 'running' | 'awaiting-review' | 'failed'
+  channel?: string
+  model: string
+  prompt: string
+  requiresCharacters: string[]
+  artStyleAnchor?: string
+  size?: string
+  quality?: string
+  referenceImages: Array<{ path: string; note?: string }>
+  degradation?: {
+    code: string
+    message: string
+    droppedReferenceImages: Array<{ path: string; note?: string }>
+    notes: string[]
+  }
+  attempts: GenerationAttemptView[]
+  createdAt: string
+  updatedAt: string
+  lastError?: string
 }
 
 export interface SdkView {
@@ -509,8 +557,53 @@ export class GalfreeApi {
     return readJson(await fetch('/api/galfree/sdk'))
   }
 
-  /** 素材槽级审读戳(T15 前补:接缝早就有 stampSlot,缺的是入口)。 */
-  async stampSlot(slot: string): Promise<void> {
+  // ─── 图像渠道与任务队列(T14)─────────────────────────────────────────
+
+  /** 渠道能力(**不含密钥**:只回报配没配)。 */
+  async imageChannel(): Promise<ImageChannelView> {
+    return readJson(await fetch('/api/galfree/channel'))
+  }
+
+  /** 任务账本(读;最新在前)。T15 的动作面消费这里。 */
+  async generationTasks(): Promise<{ tasks: GenerationTaskView[] }> {
+    return readJson(await fetch('/api/galfree/tasks'))
+  }
+
+  /** 建一个任务(缺省立刻跑)。T15 的「生成此槽」底层。 */
+  async createGenerationTask(payload: {
+    slot: string
+    model: string
+    prompt: string
+    size?: string
+    quality?: string
+    run?: boolean
+  }): Promise<{ task: GenerationTaskView }> {
+    return readJson(await fetch('/api/galfree/tasks/create', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    }))
+  }
+
+  /** 把板上"待填"的槽展开成任务集并推进(T15 的「补全全部待填」底层)。 */
+  async fillMissingSlots(payload: { model: string; run?: boolean }): Promise<{ tasks: GenerationTaskView[] }> {
+    return readJson(await fetch('/api/galfree/tasks/fill-missing', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    }))
+  }
+
+  /** 重试一个任务(保留历史,追加一次尝试)。 */
+  async retryGenerationTask(id: string): Promise<{ task: GenerationTaskView }> {
+    return readJson(await fetch('/api/galfree/tasks/retry', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id }),
+    }))
+  }
+
+  /** 素材槽级审读戳(T15 前补:接缝早就有 stampSlot,缺的是入口)。 */  async stampSlot(slot: string): Promise<void> {
     await readJson<unknown>(await fetch('/api/galfree/stamps/slot', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

@@ -124,6 +124,12 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['/playtest', ['POST']],
   ['/sdk', ['GET']],
   ['/sdk/ensure', ['POST']],
+  ['/channel', ['GET']],
+  ['/tasks', ['GET']],
+  ['/tasks/create', ['POST']],
+  ['/tasks/fill-missing', ['POST']],
+  ['/tasks/run', ['POST']],
+  ['/tasks/retry', ['POST']],
   ['/events', ['GET']],
 ]
 
@@ -585,6 +591,77 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
+  // ─── 图像渠道与任务队列(T14)────────────────────────────────────────
+
+  // 当前渠道能力(不含密钥:只回报"配没配")。
+  if (method === 'GET' && path === '/channel') {
+    writeJson(res, 200, await service.imageChannel())
+    return
+  }
+
+  // 任务账本(读):全部任务 + 重试历史(最新在前)。
+  if (method === 'GET' && path === '/tasks') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    writeJson(res, 200, { tasks: await service.generationTasks(active.id) })
+    return
+  }
+
+  // 建一个任务。`run:false` 只入队(由 /tasks/run 推进);缺省立刻跑。
+  if (method === 'POST' && path === '/tasks/create') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const task = await service.createGenerationTask(
+      typeof body.project === 'string' && body.project !== '' ? body.project : active.id,
+      {
+        slot: String(body.slot ?? ''),
+        model: String(body.model ?? ''),
+        prompt: String(body.prompt ?? ''),
+        ...(typeof body.size === 'string' && body.size !== '' ? { size: body.size } : {}),
+        ...(typeof body.quality === 'string' && body.quality !== '' ? { quality: body.quality } : {}),
+        ...(Array.isArray(body.referenceImages) ? { referenceImages: body.referenceImages as Array<{ path: string; note?: string }> } : {}),
+        ...(typeof body.run === 'boolean' ? { run: body.run } : { run: true }),
+      },
+    )
+    writeJson(res, 201, { task })
+    return
+  }
+
+  // 把板上"待填"的槽展开成任务集(= T15 的"补全全部待填"底层动作)。
+  if (method === 'POST' && path === '/tasks/fill-missing') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const tasks = await service.createTasksForMissingSlots(active.id, {
+      model: String(body.model ?? ''),
+      ...(body.prompts !== undefined && typeof body.prompts === 'object' ? { prompts: body.prompts as Record<string, string> } : {}),
+      ...(typeof body.run === 'boolean' ? { run: body.run } : {}),
+    })
+    writeJson(res, 201, { tasks })
+    return
+  }
+
+  // 推进队列里排队中的任务(串行;失败留在 failed,等人的重试)。
+  if (method === 'POST' && path === '/tasks/run') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    writeJson(res, 200, { tasks: await service.runGenerationQueue(active.id) })
+    return
+  }
+
+  // 重试一个任务(T15 的"只重 roll 这一槽"底层):保留历史,追加一次尝试。
+  if (method === 'POST' && path === '/tasks/retry') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const id = String(body.id ?? '')
+    if (id === '') throw new GalfreeError('unknown-task', '需要 id')
+    const task = await service.retryGenerationTask(active.id, id, typeof body.run === 'boolean' ? { run: body.run } : {})
+    writeJson(res, 200, { task })
+    return
+  }
+
   // 一键试玩(T7/T13):接缝同一控制器,无第二管线。
   // `from` 给了就**从这一场开始**(副本里覆写 start;用户项目不动)。
   if (method === 'POST' && path === '/playtest') {
@@ -664,12 +741,14 @@ export function makeRoutes(deps: RouteDeps): GalfreeRoute[] {
           writeJson(res, 409, { error: failure.message, code: failure.code, path: failure.path })
         } else if (error instanceof GalfreeError) {
           // 404 = 目标不存在(含"项目目录已被挪走"),与 5xx 的"服务端故障"严格区分。
-          const status = error.code === 'no-active-project' || error.code === 'unknown-project' || error.code === 'unknown-scene' || error.code === 'project-missing' ? 404
-            : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' || error.code === 'character-invalid' || error.code === 'slot-invalid' || error.code === 'bible-invalid' ? 400
+          const status = error.code === 'no-active-project' || error.code === 'unknown-project' || error.code === 'unknown-scene' || error.code === 'project-missing' || error.code === 'unknown-task' ? 404
+            : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' || error.code === 'character-invalid' || error.code === 'slot-invalid' || error.code === 'bible-invalid' || error.code === 'invalid-slot' || error.code === 'unknown-slot' || error.code === 'unknown-image-model' ? 400
             : error.code === 'body-too-large' ? 413
             : error.code === 'picker-unsupported' ? 501
             : error.code === 'picker-timeout' ? 504
             : error.code === 'bible-not-final' ? 409
+            // 没配图像渠道 = 能力未就绪(与 SDK 未就绪同性质),不是服务端故障。
+            : error.code === 'no-image-channel' ? 503
             : error.code === 'version-drift' || error.code === 'expect-required' || error.code === 'path-escape' || error.code === 'stamp-forbidden' || error.code === 'slot-not-filled' || error.code === 'sdk-not-ready'
               || error.code === 'scene-not-editable' || error.code === 'scene-read-only' || error.code === 'scene-label-elsewhere'
               || error.code === 'scene-target-exists' || error.code === 'scene-already-canonical' ? 409

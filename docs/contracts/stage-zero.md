@@ -369,6 +369,102 @@ generateScene(ref,{label,source,nextLabel?,requireContext?}) → {
 
 **路由**:`POST /playtest` 接受 `{from}`,不存在的场 → 404(`unknown-scene`)。
 
+## 图像渠道与任务队列(T14 之后追加)
+
+素材出图**不依赖 dsh-imagegen**(ADR-0010):插件自带渠道配置、任务模型与执行队列。
+边界如下。
+
+### 写网关的类型拓宽:文本与二进制同一口子
+
+素材环节要落 PNG,而"项目文件的一切插件内写必须走网关"(ADR-0004)是铁律 ——
+所以 `WriteOp.content` 是 `string | Uint8Array | null`(**不**给图像开旁路)。
+版本戳口径不变:一律按**原始字节**取 sha256 前 16 位,读/写/外部监听三处同口径
+(否则二进制文件的"内部写噪声抑制"会失效,网关会把自己的写当成外部改动上报)。
+回滚底本同样按字节留。
+
+### 渠道:端点在设置里,能力声明在模型目录里
+
+| 在哪 | 放什么 |
+|---|---|
+| 插件设置(`dsh-galfree` 命名空间) | `imageBaseUrl`(OpenAI 兼容基址)、`imageApiKey`、`imageChannelName`、`imageModels`(JSON 数组) |
+| 模型目录的每一条 | `id` + `capabilities`(见下) |
+
+**密钥明文存本机设置文档** —— 这是 ADR-0010 的知情选择(与 dsh-imagegen 同风险面)。
+三条硬边界:密钥**不进项目目录**、不进快照、不进任务账本(账本里只有渠道名与模型 id);
+接缝的 `imageChannel()` 只回报 `apiKeyConfigured` 布尔,不回传密钥本身。
+没填端点 = 没渠道 → 出图动作在接缝上抛 **`no-image-channel`**(路由 503),绝不假装能出图。
+
+**能力声明是"协议不合要如实降级"的唯一依据**:
+
+```
+capabilities: { textToImage, imageToImage, referenceChain, aspectRatioParam, b64Json }
+```
+
+目录缺省口径:**文生图/尺寸参数/b64 缺省为真**(v1 的目录绝大多数是 OpenAI 兼容文生图端点),
+**参考链/图生图缺省为假** —— 能力宁可少说,不能凭空许诺。`imageModels(channel)` 只列
+声明了文生图的模型(聊天/嵌入模型不进这个列表)。
+
+### 任务 = 一级结构化对象
+
+落 `.studio/image-tasks.json`(经网关 → 自动快照)。字段:`id` / `slot` / `outputPath` /
+`state` / `channel` / `model` / `prompt` / `requiresCharacters` / `artStyleAnchor` /
+`size` / `quality` / `referenceImages` / `degradation?` / `attempts[]` / 时间戳 / `lastError?`。
+
+- **状态机**:`queued → running → awaiting-review | failed`。`failed` 不会被队列自动重跑
+  —— 重试是人的动作(`retryGenerationTask`),不是自动重试循环。
+- **重试历史 = `attempts[]`,只追加**:每次尝试记 `{n, startedAt, finishedAt, outcome,
+  error?|fingerprint?+bytes?}`。失败把**上游原话**带进 `error`(状态码 + 它说的那句话)。
+- **`outputPath` 恒等于槽位的约定路径**(`slotAssetPath(slot)`,见 `slot-naming.ts`):
+  出图不能对着一个不存在的槽写文件,否则产出永远是悬空引用 → 建任务时校验槽在
+  `.rpy` 派生的清单里,不在则 **`unknown-slot`**。
+- `prompt` 是**制作信息**(给上游的指令),不是叙述内容 —— 铁律照旧:账本里没有台词/正文。
+
+### 降级:改了参数就必须说(AC3)
+
+`degradeInput(model, input)` 把"人要的参数"收敛成"上游能收的参数",每一次收敛都记进
+任务的 `degradation{code,message,droppedReferenceImages[],notes[]}`:
+
+- 不支持参考链 → 丢参考图 + 说明"本次按文生图发出"(这是最容易让人误以为
+  "跨批次同一张脸"生效的地方,不能含糊);被丢的参考图**列出来**,让人确认丢了什么;
+- 支持参考链却声明不支持图生图 → 按**目录自相矛盾**如实报,不挑一个默默用;
+- 不支持尺寸参数 → 不发 `size`,说明改用了模型默认档。
+
+**降级不是失败**:任务照常跑完。没有 `degradation` 字段 = 请求原样发出 ——
+不存在"改了但不说"的第三种。
+
+### 执行在 Host 侧
+
+`runGenerationTask(ref,id)`:置 `running` → 出网 → 解码 → **经网关落盘**(`reason:'slot'`,
+自动快照)→ 记账 `awaiting-review`。落盘后槽位的"已填"推导立刻变绿,板不需要任何人上报;
+失败不产半成品。`runGenerationQueue(ref)` 串行推进所有 `queued`;
+`createTasksForMissingSlots(ref,{model})` 把板上"待填"的槽展开成任务集
+(展开依据是**推导**,不是人维护的待办表)。
+
+**出网是可注入端口**(`ImageHttpClient`):生产 `createNodeHttpClient()`(原生 fetch),
+快带注入打到**本地假 HTTP 上游**的实现 —— 同一个端口的两个实现,协议形状不因测试而变。
+
+### 戳的生命周期(复用 T6,没有新机制)
+
+产物落盘后槽位是 `filled + stamp:'pending'` → 板显示「待复审」;人盖戳 → `approved`;
+重生成覆盖写 → 指纹变化 → 旧戳自动变 `stale`(待复审)。`SlotProgress` 新增
+**`awaitingReview`**(纯推导:`filled && stamp !== 'approved'`),面板与 T15 的待复审队列
+都读这一个布尔,不在适配器里重算规则。
+
+### 路由
+
+- `GET /channel` → `{configured,name?,baseUrl?,apiKeyConfigured,models[]}`(**无密钥**)
+- `GET /tasks` → `{tasks[]}`(最新在前)
+- `POST /tasks/create` `{slot,model,prompt,size?,quality?,referenceImages?,run?}` → 201 `{task}`
+  (缺省 `run:true`;`run:false` 只入队)
+- `POST /tasks/fill-missing` `{model,prompts?,run?}` → 201 `{tasks[]}`(待填槽 → 任务集)
+- `POST /tasks/run` → `{tasks[]}`(推进队列里排队中的)
+- `POST /tasks/retry` `{id,run?}` → `{task}`(保历史,追加一次尝试)
+
+错误码:`no-image-channel` = 503(能力未就绪,与 SDK 未就绪同性质)、
+`unknown-image-model` / `unknown-slot` / `invalid-slot` = 400、`unknown-task` = 404。
+
+**工作台的出图动作面属 T15**(T14 只把账本与队列做出来)。
+
 ## 测试纪律(spec Testing Decisions 落地)
 
 - 只在 `ProjectService` 公共接口上断言外部可观察行为:磁盘终态、推导对象、

@@ -39,6 +39,12 @@ import { BIBLE_STAMP_TARGET } from './stamps.ts'
 import { composeSceneFile, extractSceneBlock, gatewayPathOf, scenesPathOf } from './scene-file.ts'
 import { applySceneEdit, buildSceneForm, type SceneEdit, type SceneFormModel } from './scene-form.ts'
 import { contentFingerprint, launchPlaytest, playtestDocument, readPlaytest, PLAYTEST_FILE, type PlaytestPorts, type PlaytestRun } from './playtest.ts'
+import {
+  IMAGE_TASKS_FILE, adapterFor, degradeInput, emptyTasksDocument, findTask, imageModels, parseTasksDocument,
+  tasksDocument, upsertTask,
+  type CreateGenerationTaskInput, type GenerationTask, type GenerationAttempt, type ImageChannelSettings,
+  type ImageHttpClient,
+} from './images.ts'
 import { ABSENT, fileFingerprint, fingerprint } from './hash.ts'
 import { WriteGateway, type ChangeEvent, type FileSnapshot, type GatewayError, type WriteLogEntry, type WriteOp, type WriteResult } from './write-gateway.ts'
 import type { WriteBatchReason } from './write-gateway.ts'
@@ -137,18 +143,37 @@ export interface ProjectServiceOptions {
   validator?: ValidatorPort
   /** 试玩端口(T7;缺省 = SDK 未就绪的诚实失败)。 */
   playtest?: PlaytestPorts
+  /**
+   * 图像子系统端口(T14):出网客户端 + 渠道读取。**缺省 = 没配渠道**,
+   * 于是"出图"这条路如实拒绝(`no-image-channel`),而不是假装有。
+   * 快带注入打出本地假上游的真 HTTP 实现;生产注入 `createNodeHttpClient()`
+   * 与读设置文档的 `channel()`。
+   */
+  images?: ImagePorts
+}
+
+/** 图像子系统的注入端口(T14)。 */
+export interface ImagePorts {
+  /** 出网(生产 fetch / 快带假上游)。 */
+  http: ImageHttpClient
+  /** 当前渠道设置;`null` = 还没配。每次现读(设置可能刚被改)。 */
+  channel: () => ImageChannelSettings | null
 }
 
 export class ProjectService {
   #registry: ProjectRegistry
   #validator: ValidatorPort
   #playtestPorts: PlaytestPorts
+  #imagePorts: ImagePorts | null
   #gateways = new Map<string, Promise<WriteGateway>>()
+  /** 图像任务账本的写串行(与网关的串行合起来构成"读-改-写"原子性)。 */
+  #taskQueue: Promise<unknown> = Promise.resolve()
 
   constructor(options: ProjectServiceOptions) {
     this.#registry = new ProjectRegistry(join(options.dataDir, 'registry.json'))
     this.#validator = options.validator ?? (async (project) => new FakeValidator().validate(join(project.root, 'game')))
     this.#playtestPorts = options.playtest ?? { resolveLauncher: async () => null, spawn: async () => ({ code: 0, log: '' }) }
+    this.#imagePorts = options.images ?? null
   }
 
   // ─── 注册表与模板新建(T1)────────────────────────────────────────────
@@ -797,6 +822,329 @@ export class ProjectService {
     }
     void entry
     return buildGenerationContext({ bible: doc, characters, outlineText })
+  }
+
+  // ─── 图像子系统:渠道 + 任务队列(T14,Host 直连 ADR-0010)─────────────
+
+  /**
+   * 当前渠道 + 它的模型目录(给面板与 agent 看"能用什么")。
+   * **不含密钥**:`apiKeyConfigured` 只说配没配,不回传密钥本身。
+   */
+  async imageChannel(): Promise<{
+    configured: boolean
+    name?: string
+    baseUrl?: string
+    apiKeyConfigured: boolean
+    models: Array<{ id: string; label?: string; note?: string; capabilities: unknown }>
+  }> {
+    const channel = this.#imagePorts?.channel() ?? null
+    if (channel === null) return { configured: false, apiKeyConfigured: false, models: [] }
+    return {
+      configured: true,
+      ...(channel.name === undefined ? {} : { name: channel.name }),
+      baseUrl: channel.baseUrl,
+      apiKeyConfigured: channel.apiKey !== undefined && channel.apiKey !== '',
+      models: channel.models.map((model) => ({
+        id: model.id,
+        ...(model.label === undefined ? {} : { label: model.label }),
+        ...(model.note === undefined ? {} : { note: model.note }),
+        capabilities: model.capabilities,
+      })),
+    }
+  }
+
+  /** 任务账本(读):全部任务,最新的在前。 */
+  async generationTasks(projectRef: string): Promise<GenerationTask[]> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const document = await this.#readTasks(projectRef)
+    return [...document.tasks].reverse()
+  }
+
+  async generationTask(projectRef: string, id: string): Promise<GenerationTask | null> {
+    const document = await this.#readTasks(projectRef)
+    return findTask(document, id) ?? null
+  }
+
+  /**
+   * 建一个素材槽生成任务(全结构化对象)。
+   *
+   * 三道门如实拦:没配渠道 / 模型不在目录里 / 槽不在 `.rpy` 派生的清单里
+   * —— 最后这条尤其重要:出图的目标路径是**槽位的约定路径**(由槽名派生),
+   * 对着一个不存在的槽出图,产出的文件永远没人引用(悬空引用)。
+   */
+  async createGenerationTask(projectRef: string, input: CreateGenerationTaskInput): Promise<GenerationTask> {
+    const created = await this.#mutateTasks(projectRef, async (document, writers) => {
+      const entry = await this.#resolve(projectRef)
+      await this.#assertPresent(entry)
+      const { channel, model } = this.#requireModel(input.model)
+      const slot = input.slot.trim()
+      if (slot === '') throw new GalfreeError('invalid-slot', '目标槽不能为空')
+
+      const outputPath = slotAssetPath(slot)
+      const [parsed, ledger, characters] = await Promise.all([
+        this.#parseScript(projectRef),
+        readSlots(entry.path),
+        readCharacters(entry.path),
+      ])
+      const derived = deriveSlots({ parsed, ledger, characters })
+      if (!derived.slots.some((candidate) => candidate.slot === slot)) {
+        throw new GalfreeError('unknown-slot', `槽「${slot}」不在 .rpy 派生的槽清单里:先在剧本里用 show/scene 引用它,或改用已有的槽`, {
+          known: derived.slots.map((candidate) => candidate.slot),
+        })
+      }
+
+      // 登记簿上下文:没显式给就按槽账本的要求带(生成强制携带登记簿上下文,ADR-0010)。
+      const ledgerRecord = ledger.find((record) => record.slot === slot)
+      const requiresCharacters = input.requiresCharacters ?? ledgerRecord?.requiresCharacters ?? []
+      const artStyleAnchor = input.artStyleAnchor ?? ledgerRecord?.artStyleAnchor
+
+      // 协议不合 → 当场降级并留下说明(AC3)。
+      const degraded = degradeInput(model, {
+        ...(input.size === undefined ? {} : { size: input.size }),
+        ...(input.quality === undefined ? {} : { quality: input.quality }),
+        referenceImages: input.referenceImages ?? [],
+      })
+
+      const at = new Date().toISOString()
+      const task: GenerationTask = {
+        schemaVersion: 1,
+        id: randomUUID(),
+        slot,
+        outputPath,
+        state: 'queued',
+        ...(channel.name === undefined ? {} : { channel: channel.name }),
+        model: model.id,
+        prompt: input.prompt,
+        requiresCharacters,
+        ...(artStyleAnchor === undefined ? {} : { artStyleAnchor }),
+        ...(degraded.effective.size === undefined ? {} : { size: degraded.effective.size }),
+        ...(degraded.effective.quality === undefined ? {} : { quality: degraded.effective.quality }),
+        referenceImages: degraded.effective.referenceImages,
+        ...(degraded.degradation === undefined ? {} : { degradation: degraded.degradation }),
+        attempts: [],
+        createdAt: at,
+        updatedAt: at,
+      }
+      writers.push(task)
+      return task
+    })
+
+    if (input.run !== true) return created
+    const ran = await this.runGenerationTask(projectRef, created.id)
+    return ran ?? created
+  }
+
+  /**
+   * 把板上"待填"的槽展开成任务集(AC4 的"补全全部待填"底层)。
+   *
+   * 展开依据是**推导**(槽清单 + 文件在不在),不是人维护的待办表 ——
+   * 所以剧本改了、素材出了,这里自动跟着变。
+   */
+  async createTasksForMissingSlots(
+    projectRef: string,
+    options: { model: string; prompts?: Record<string, string>; run?: boolean } ,
+  ): Promise<GenerationTask[]> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const progress = await this.progress(projectRef)
+    const missing = progress.slots.filter((slot) => !slot.filled)
+
+    const tasks: GenerationTask[] = []
+    for (const slot of missing) {
+      const prompt = options.prompts?.[slot.slot] ?? slot.ledger?.prompt ?? ''
+      tasks.push(await this.createGenerationTask(projectRef, {
+        slot: slot.slot,
+        model: options.model,
+        prompt: prompt === '' ? `${slot.slot} 的素材` : prompt,
+        requiresCharacters: slot.ledger?.requiresCharacters ?? [],
+        ...(slot.ledger?.artStyleAnchor === undefined ? {} : { artStyleAnchor: slot.ledger.artStyleAnchor }),
+      }))
+    }
+    if (options.run !== true) return tasks
+    for (const task of tasks) await this.runGenerationTask(projectRef, task.id)
+    const after = await this.generationTasks(projectRef)
+    return tasks.map((task) => after.find((candidate) => candidate.id === task.id) ?? task)
+  }
+
+  /**
+   * 推进队列里**排队中**的任务(串行,一个跑完再跑下一个)。
+   * 返回跑过之后的任务视图。失败的任务留在 `failed`,不会被队列反复重跑
+   * —— 重试是人的动作(`retryGenerationTask`),不是自动重试循环。
+   */
+  async runGenerationQueue(projectRef: string): Promise<GenerationTask[]> {
+    const queued = (await this.generationTasks(projectRef)).filter((task) => task.state === 'queued')
+    for (const task of queued) await this.runGenerationTask(projectRef, task.id)
+    const after = await this.generationTasks(projectRef)
+    return queued.map((task) => after.find((candidate) => candidate.id === task.id) ?? task)
+  }
+
+  /**
+   * 重试一个任务(人发起):保留历史,追加一次尝试。
+   * 允许在 `failed` 与 `awaiting-review` 上用(后者 = 不满意就重 roll,T15)。
+   */
+  async retryGenerationTask(projectRef: string, id: string, options: { run?: boolean } = {}): Promise<GenerationTask> {
+    const reset = await this.#mutateTasks(projectRef, async (document, writers) => {
+      const task = findTask(document, id)
+      if (task === undefined) throw new GalfreeError('unknown-task', `没有这个图像任务:${id}`)
+      const next: GenerationTask = { ...task, state: 'queued', updatedAt: new Date().toISOString() }
+      delete next.lastError
+      writers.push(next)
+      return next
+    })
+    if (options.run === false) return reset
+    return (await this.runGenerationTask(projectRef, id)) ?? reset
+  }
+
+  /**
+   * 真跑一次任务:出网 → 解码 → **经写网关落盘** → 记账。
+   *
+   * 落盘是这一步的全部意义:产物进了项目目录、过网关(自动快照)、
+   * 槽位的"已填"推导立刻变绿 —— 板不需要任何人上报。
+   * 失败不产半成品,并把上游原话写进 `attempts`。
+   */
+  async runGenerationTask(projectRef: string, id: string): Promise<GenerationTask | null> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+
+    // 1) 取任务(先读出来,拿到 model 才能选适配器)并置 running(状态机对外可见)。
+    const started = new Date().toISOString()
+    const task = await this.#mutateTasks(projectRef, (document, writers) => {
+      const found = findTask(document, id)
+      if (found === undefined) throw new GalfreeError('unknown-task', `没有这个图像任务:${id}`)
+      const next: GenerationTask = { ...found, state: 'running', updatedAt: started }
+      writers.push(next)
+      return Promise.resolve(next)
+    })
+    const { channel, model } = this.#requireModel(task.model)
+
+    const adapter = adapterFor(model.adapter)
+    const plan = adapter.buildRequest({
+      channel,
+      model,
+      prompt: task.prompt,
+      ...(task.size === undefined ? {} : { size: task.size }),
+      ...(task.quality === undefined ? {} : { quality: task.quality }),
+      referenceImages: task.referenceImages,
+    })
+
+    // 2) 出网。失败如实记账(上游原话进历史)。
+    let bytes: Uint8Array
+    try {
+      const response = await this.#imagePorts!.http.send(plan.request)
+      bytes = adapter.parseResponse(response, model)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return await this.#mutateTasks(projectRef, (document, writers) => {
+        const found = findTask(document, id)!
+        const failed: GenerationTask = {
+          ...found,
+          state: 'failed',
+          lastError: message,
+          attempts: [...found.attempts, this.#attempt(found.attempts.length + 1, started, 'failed', { error: message })],
+          updatedAt: new Date().toISOString(),
+        }
+        writers.push(failed)
+        return Promise.resolve(failed)
+      })
+    }
+
+    // 3) 产物经写网关落盘(自动快照)。CAS 用现读的版本戳:外部要是刚动过这张图,
+    //    网关会如实报漂移,而不是把外部的改动盖掉。
+    const gateway = await this.#gatewayFor(projectRef)
+    const current = await gateway.read(task.outputPath)
+    const result = await gateway.writeBatch(
+      [{ path: task.outputPath, content: bytes, expectVersion: current.version }],
+      { origin: 'agent', reason: 'slot', slot: task.slot },
+    )
+    const written = result.versions[task.outputPath] ?? fingerprint(bytes)
+
+    // 4) 记账:待复审(等人看)。
+    return await this.#mutateTasks(projectRef, (document, writers) => {
+      const found = findTask(document, id)!
+      const done: GenerationTask = {
+        ...found,
+        state: 'awaiting-review',
+        attempts: [...found.attempts, this.#attempt(found.attempts.length + 1, started, 'ok', { fingerprint: written, bytes: bytes.byteLength })],
+        updatedAt: new Date().toISOString(),
+      }
+      delete done.lastError
+      writers.push(done)
+      return Promise.resolve(done)
+    })
+  }
+
+  #attempt(
+    n: number,
+    startedAt: string,
+    outcome: GenerationAttempt['outcome'],
+    extra: { error?: string; fingerprint?: string; bytes?: number },
+  ): GenerationAttempt {
+    return {
+      n,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      outcome,
+      ...(extra.error === undefined ? {} : { error: extra.error }),
+      ...(extra.fingerprint === undefined ? {} : { fingerprint: extra.fingerprint }),
+      ...(extra.bytes === undefined ? {} : { bytes: extra.bytes }),
+    }
+  }
+
+  /** 渠道与模型的两道门(没配 / 不在目录里都如实拒绝)。 */
+  #requireModel(modelId: string): { channel: ImageChannelSettings; model: ReturnType<typeof imageModels>[number] } {
+    const channel = this.#imagePorts?.channel() ?? null
+    if (channel === null) {
+      throw new GalfreeError('no-image-channel', '还没有配置图像渠道(设置 → 插件 → GALFree):先填端点、密钥与模型目录')
+    }
+    const model = channel.models.find((candidate) => candidate.id === modelId)
+    if (model === undefined) {
+      throw new GalfreeError('unknown-image-model', `模型「${modelId}」不在这个渠道的模型目录里`, {
+        known: imageModels(channel).map((candidate) => candidate.id),
+      })
+    }
+    return { channel, model }
+  }
+
+  async #readTasks(projectRef: string): Promise<ReturnType<typeof parseTasksDocument>> {
+    const gateway = await this.#gatewayFor(projectRef)
+    const current = await gateway.read(IMAGE_TASKS_FILE)
+    if (current.missing) return emptyTasksDocument()
+    return parseTasksDocument(current.content)
+  }
+
+  /**
+   * 读-改-写任务账本。`#taskQueue` 串起来保证并发调用不会互相覆盖
+   * (网关只保证单次写批的原子性,跨批的"读→算→写"要自己串)。
+   */
+  async #mutateTasks<T>(
+    projectRef: string,
+    mutate: (document: ReturnType<typeof parseTasksDocument>, writers: GenerationTask[]) => Promise<T> | T,
+  ): Promise<T> {
+    // 先把队尾摘下来再挂自己:这样 mutate 内部若再调 `#mutateTasks`(例如"建完立刻跑")
+    // 不会等自己 —— 嵌套调用排队等的是**前一个**调用,不是当前这个。
+    const previous = this.#taskQueue
+    let release!: () => void
+    this.#taskQueue = new Promise<void>((resolve) => { release = resolve })
+    await previous.catch(() => {})
+    try {
+      const gateway = await this.#gatewayFor(projectRef)
+      const current = await gateway.read(IMAGE_TASKS_FILE)
+      const document = current.missing ? emptyTasksDocument() : parseTasksDocument(current.content)
+      const writers: GenerationTask[] = []
+      const result = await mutate(document, writers)
+      if (writers.length > 0) {
+        let next = document
+        for (const task of writers) next = upsertTask(next, task)
+        await gateway.writeBatch(
+          [{ path: IMAGE_TASKS_FILE, content: tasksDocument(next), expectVersion: current.version }],
+          { origin: 'agent', reason: 'queue' },
+        )
+      }
+      return result
+    } finally {
+      release()
+    }
   }
 
   #requireHuman(actor: { via: 'human' | 'agent' }): void {

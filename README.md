@@ -34,7 +34,12 @@
 - ✅ T13(整线组装试玩):项目级完整性推导(入口 / 孤立场景 / 结局可达)+ 把全局问题
   **定位到场景**;**从此场试玩**(副本里覆写入口,用户项目不动;目标场不存在就崩 → 信号
   可红,慢带有真 SDK 断言);traceback 摘要入状态、板可见、agent 可读
-- ⏳ 素材环节(T14–T16)、音频/发布(T17–T18)
+- ✅ T14(图像渠道 + 任务队列,Host 直连):插件自有渠道设置(端点 / **密钥明文存本机设置** /
+  模型目录带能力声明);任务 = 全结构化一级对象(目标槽、登记簿上下文、参考链、输出路径),
+  状态机 `queued → running → awaiting-review|failed` + **只追加的重试历史**;产物一律
+  **经写网关落盘**(网关类型拓宽到二进制,版本戳按字节)→ 自动快照 → 槽位推导立刻转「待复审」;
+  **不支持参考链就自动降级文生图并附说明**(丢掉的参考图逐张列出,绝不静默)
+- ⏳ 素材动作面(T15)、参考链回路(T16)、音频/发布(T17–T18)
 
 ## 工程
 
@@ -55,7 +60,8 @@ src/
   service/            ★ 项目服务(seam)——独占逻辑全在这里
     project-service.ts   注册表 + 模板新建 + 全部环节方法
     progress.ts          推导引擎(含 deriveSceneMarks:舞台标记的唯一出处)
-    write-gateway.ts     串行 CAS 原子批 + 外部观察(唯一写通道)
+    images.ts            图像子系统:渠道/模型能力/适配器/降级判定/任务账本(纯逻辑)
+    write-gateway.ts     串行 CAS 原子批 + 二进制写 + 外部观察(唯一写通道)
     snapshot.ts          写批后 git commit(作者 GALFree,永不 push)
     rpy/                 方言子集解析器 + 分支骨架派生(纯函数)
     validation/          校验回路契约 + 假验证器 + 真 SDK 适配器 + 合成端口
@@ -68,7 +74,7 @@ docs/contracts/       接缝契约(dialect-subset.md / stage-zero.md)
 
 ```bash
 npm run typecheck      # tsc --noEmit
-npm test               # 快集成带(无网络、无真 SDK;67 tests,全在 ProjectService 接缝上)
+npm test               # 快集成带(无网络、无真 SDK;125 tests,全在 ProjectService 接缝上)
 npm run test:slow      # 慢集成带(真钉版 SDK lint/compile + 路由适配层契约;发版前必跑)
 npm run build          # lib/index.js(ESM host)+ lib/client.js(web bundle)
 ```
@@ -77,7 +83,27 @@ npm run build          # lib/index.js(ESM host)+ lib/client.js(web bundle)
 
 以本仓库为插件源,按标准 DSH 插件流程安装(设置 → 插件 → 从本地/仓库添加);
 装载后侧边栏出现「GALFree 工作台」入口。设置命名空间 `dsh-galfree` 可配
-`defaultProjectsRoot`(新建项目默认父目录)与 `sdkPath`(既有 SDK 路径覆盖)。
+`defaultProjectsRoot`(新建项目默认父目录)与 `sdkPath`(既有 SDK 路径覆盖),
+以及图像渠道(T14):
+
+| 设置项 | 说明 |
+|---|---|
+| `imageBaseUrl` | OpenAI 兼容端点基址(如 `https://api.example.com/v1`);**留空 = 没配渠道**,出图动作会如实拒绝 |
+| `imageApiKey` | 渠道密钥。**明文存在本机设置文档里**(ADR-0010 的知情选择,与 dsh-imagegen 同风险面):它不进项目目录、不进快照、不进任务账本 |
+| `imageChannelName` | 渠道名(只在面板/账本里指认用) |
+| `imageModels` | 模型目录(JSON 数组),每个模型**要声明能力**,否则按保守缺省 |
+
+`imageModels` 示例(能力缺省口径:文生图/尺寸参数/b64 **为真**,参考链/图生图**为假** ——
+能力宁可少说,不能凭空许诺):
+
+```json
+[
+  { "id": "gpt-image-1", "label": "全能力",
+    "capabilities": { "textToImage": true, "imageToImage": true, "referenceChain": true,
+                      "aspectRatioParam": true, "b64Json": true } },
+  { "id": "basic-model", "label": "只有文生图" }
+]
+```
 
 ## 硬约束(来自 ADR,改前先看契约文档)
 
