@@ -154,7 +154,7 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
       try {
         const channel = await service.imageChannel()
         if (!channel.configured) {
-          return '还没有配置图像渠道。请人到「设置 → GALFree」填端点与密钥,点「获取模型」勾选模型 —— 没渠道时建任务会被如实拒绝。'
+          return '还没有配置图像渠道。请人到「设置 → 插件 → GALFree」填端点与密钥,点「获取模型」勾选模型 —— 没渠道时建任务会被如实拒绝。'
         }
         return JSON.stringify({
           channel: channel.name ?? channel.baseUrl,

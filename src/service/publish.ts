@@ -41,7 +41,12 @@ export interface PublishArtifact {
 
 /** 阻止发布的一项(与推导板同源,不是另算的一套)。 */
 export interface PublishBlocker {
-  code: 'lint-errors' | 'missing-slots' | 'missing-audio' | 'sdk-not-ready' | 'publish-unavailable' | 'destination-in-project' | 'build-identity-missing' | 'gui-images-missing'
+  /**
+   * 稳定机器码。`sdk-not-ready` 这一项**借用闸门码**(`typeof GATE.sdkNotReady`):同一件事
+   * ——"钉版 SDK 还没就绪"—— 在两个地方说(试玩/发布抛的拒绝、发布前置里的一项),
+   * 用同一个常量,改了这边那边编译不过(`push` 处对不上这个联合类型)。
+   */
+  code: 'lint-errors' | 'missing-slots' | 'missing-audio' | typeof GATE.sdkNotReady | 'publish-unavailable' | 'destination-in-project' | 'build-identity-missing' | 'gui-images-missing'
   /** 面向人的一句话(面板与 agent 直接显示)。 */
   label: string
   count?: number

@@ -54,7 +54,7 @@ export interface BoardCriterion {
 
 /** 流程里的一个环节。 */
 export interface WorkflowStage {
-  /** 环节名(与 CONTEXT 的环节词汇一致)。 */
+  /** 这一步叫什么(面向人的说法:建项目 / 设定集 / 剧本 / 素材 / 音频 / 试玩 / 发布)。 */
   name: string
   /** 这一步在干什么(一句话,给模型定坐标用)。 */
   what: string
@@ -63,8 +63,14 @@ export interface WorkflowStage {
    * 一个都没有就如实说"请人在工作台做"。所以这个列表允许超前于工具面。
    */
   tools: string[]
-  /** 进这一步之前挡在前面的东西。`code` 有值 = 接缝会抛这个码。 */
-  gate?: { code?: string; what: string }
+  /**
+   * 进这一步之前挡在前面的东西(**每一环都有**,包括第一环:没有项目时什么都做不了)。
+   *
+   * `code` 有值 = 这是接缝会**抛**的拒绝码(取自 `gates.ts`,渲染时点名);
+   * 没有 `code` = 这道闸门不是一条拒绝,而是板上的一条 error / 发布前置里的一项
+   * (发布那格是 `blockers[]`,不是一个码)—— 那就把**形状**讲清楚,别编一个码出来。
+   */
+  gate: { code?: string; what: string }
   /** 完成判据(板上真字段;至少一条)。 */
   done: BoardCriterion[]
   /** 这一步里**只有人能做**的事。 */
@@ -74,20 +80,24 @@ export interface WorkflowStage {
 /**
  * 全流程(环节名 / 闸门 / 判据 / 谁来做)。
  *
- * 顺序即真相:v1 的环节是横向建的,但**走的时候是纵向的** —— 上一环没过,下一环的产物
- * 就没有意义(没定稿的设定集生成出来的戏、没素材的戏试玩出来的界面,都不算数)。
+ * 顺序即真相:v1 的环节是横向建的(环节零 → 剧本 → 组装试玩 → 素材 → 音频/发布,
+ * 见 CONTEXT 的"环节"条),但**走的时候是纵向的** —— 上一环没过,下一环的产物就没有意义
+ * (没定稿的设定集生成出来的戏、没素材的戏试玩出来的界面,都不算数)。这里的七步是那条
+ * 纵线,比"环节"多出建项目与设定集两步。
  */
 export const GALFREE_WORKFLOW: readonly WorkflowStage[] = [
   {
     name: '建项目',
     what: '一部 galgame = 磁盘上一个 Ren\'Py 项目目录(v1 只从模板新建,不导入既有项目)',
     tools: ['galfree_create_project'],
+    gate: { what: '一部都还没有的时候,所有 galfree 工具都只会回一句"先新建或激活一个项目" —— 第一步只能请人开个头' },
     done: [{ path: 'scenes', op: 'nonEmpty' }],
   },
   {
     name: '设定集',
     what: '世界观 / 角色设定(同步落角色登记簿)/ 章节大纲 —— 下游所有生成的唯一记忆源',
     tools: ['galfree_write_bible', 'galfree_import_outline'],
+    gate: { what: '空设定集生成出来的东西没有上游依据 —— 先把世界观 / 角色 / 章节写下(人给的主题或大纲是它的输入)' },
     // 这一步的"做完"就是**人拍板**:设定集是后面每一次生成的上游,不盖章就往下走等于拿草稿当真源。
     done: [{ path: 'bible.stamp', op: 'equals', value: 'approved' }],
     human: '「设定定稿」戳只有人能盖',
@@ -104,6 +114,7 @@ export const GALFREE_WORKFLOW: readonly WorkflowStage[] = [
       { path: 'lint.ok', op: 'true' },
       { path: 'completeness.orphans', op: 'empty' },
     ],
+    human: '写完请人读一遍、盖场景戳才算这一幕定稿(板上"只读降级"的场景盖不了:先把子集外语法改回子集内)',
   },
   {
     name: '素材',
@@ -124,7 +135,9 @@ export const GALFREE_WORKFLOW: readonly WorkflowStage[] = [
     name: '音频',
     what: 'BGM/SE 是**接进来的**,不是生成的:把音频文件放进 `game/`,再在场景里接线(引用是**相对 `game/` 的路径**)',
     tools: ['galfree_set_scene_audio'],
+    gate: { what: '池是派生的(文件丢进 `game/` 就有,不用登记),但**引用必须落地**:悬空的音频引用在板上是一条 error(定位到哪一场哪一行),发布前置也会被它拦下' },
     done: [{ path: 'audio.missing', op: 'empty' }],
+    human: '试听靠试玩,认可靠人盖场景戳',
   },
   {
     name: '试玩',
@@ -196,9 +209,7 @@ export function workflowPlaybook(options: PlaybookOptions = {}): string {
   GALFREE_WORKFLOW.forEach((stage, index) => {
     lines.push(`${index + 1}. **${stage.name}** —— ${stage.what}`)
     lines.push(`   - ${describeTools(stage.tools, hasTool)}`)
-    if (stage.gate !== undefined) {
-      lines.push(`   - 闸门${stage.gate.code === undefined ? '' : `(\`${stage.gate.code}\`)`}:${stage.gate.what}`)
-    }
+    lines.push(`   - 闸门${stage.gate.code === undefined ? '' : `(\`${stage.gate.code}\`)`}:${stage.gate.what}`)
     lines.push(`   - 做完了 = ${stage.done.map(describeCriterion).join('、')}`)
     if (stage.human !== undefined) lines.push(`   - 人:${stage.human}`)
   })
@@ -221,6 +232,30 @@ export function workflowPlaybook(options: PlaybookOptions = {}): string {
  */
 export interface SystemPromptSeat {
   section(section: { name: string; order: number; text: string | (() => string) }): () => void
+}
+
+/**
+ * `ctx.tools` 的**结构面**(只用到 `get`):指引靠它回答"这一步有没有 agent 入口"。
+ *
+ * 与目录选择席位同一个态度 —— 按名取用、容忍缺席。探不到就**当没有**:这段提示是锦上添花,
+ * 绝不能把整段系统提示搞崩(宁可保守说"请人做")。放在这里而不是入口里,是为了让真宿主守卫
+ * 能用**同一个**探针(否则守卫验的是它自己另写的一个)。
+ */
+export interface ToolRegistrySeat {
+  // 方法写法(而非属性写法):宿主的 `get` 收的是它自己的 `ScopeKey`,这里按结构对齐时
+  // 参数按双变处理 —— 我们只传一个名字,不碰 scope。
+  get?(name: string, scope?: unknown): unknown
+}
+
+/** 工具在不在?缺席位 / 席位形状不对 / 探测抛错 → 一律"不在"。 */
+export function toolPresenceProbe(seat: ToolRegistrySeat | undefined): (name: string) => boolean {
+  return (name) => {
+    try {
+      return seat?.get?.(name) !== undefined
+    } catch {
+      return false
+    }
+  }
 }
 
 /**

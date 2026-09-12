@@ -2,11 +2,17 @@
  * T19(agent 流程指引)守卫 —— 三个接缝上断言:
  *
  *  1. **注册这一段的公共面**(`registerGalfreePlaybook`):模型真的会看到顺序 / 闸门 /
- *     判据 / 谁来做 / 怎么问现状。把注册关掉,这一组必须**红**(不是"注册了就算数")。
+ *     判据 / 谁来做 / 怎么问现状。
+ *     **可红的两个锚点**(各验过一次):把 `registerGalfreePlaybook` 里的 `seat.section(...)`
+ *     摘掉 → "注册这一段"整组红;把入口(`src/index.ts`)的 `ctx.inject(['systemPrompt'])`
+ *     摘掉 → `src/index.test.ts` 的装配用例红。两层缺一不可:注册函数对、没接上电源,
+ *     模型依然什么都看不见。
  *  2. **判据与接缝同源**(真 `ProjectService`):指引里每一条判据都写成**板上的字段路径**,
  *     这里拿一个真项目推导出来的快照逐条解析(字段没了 / 类型不对就红);
- *     指引点名的闸门码,这里**真去撞那道闸门**,拿接缝实际抛出来的码比对。
- *  3. **懒注入**(`src/index.test.ts`):宿主没有 `systemPrompt` 席位时不崩、工具照常。
+ *     指引点名的闸门码,这里**真去撞那道闸门**,拿接缝实际抛出来的码比对;
+ *     没有码的那道闸门(发布)则验接缝**真的会拦**(`readiness.ready === false`)。
+ *  3. **工具面与注册表同源**:注册出来的工具名要么被某一环认领、要么在查询工具白名单里 ——
+ *     指引里写错一个工具名会红,而不是静默变成"没有 agent 入口"。
  *
  * 为什么值得测:这段文本是模型眼里的"流程说明书"。它要是写错一个字段名,新会话就会
  * 拿着一份**看着很像真的**的判据去干活 —— 不会报错,只会安静地走错。
@@ -20,39 +26,22 @@ import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import {
   GALFREE_WORKFLOW, WORKFLOW_SECTION, WORKFLOW_SECTION_ORDER, registerGalfreePlaybook,
-  workflowPlaybook, type BoardCriterion, type SystemPromptSeat,
+  toolPresenceProbe, workflowPlaybook, type BoardCriterion,
 } from './playbook.ts'
 import { GATE } from './gates.ts'
+import { registerGalfreeTools } from './tools.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
 import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
+import { collectPromptSections, type SectionCollector } from '../testing/prompt-seat.ts'
 import type { ProgressSnapshot } from './progress.ts'
 import type { PublishPorts } from './publish.ts'
 
-/** 假 systemPrompt 席位:把注册进来的 section 收下来(这一层是薄适配器,不需要真宿主)。 */
-function fakeSeat(): { seat: SystemPromptSeat; sections: Array<{ name: string; order: number; text: string | (() => string) }> } {
-  const sections: Array<{ name: string; order: number; text: string | (() => string) }> = []
-  return {
-    sections,
-    seat: {
-      section(section) {
-        sections.push(section)
-        return () => { /* disposer */ }
-      },
-    },
-  }
-}
-
-/** 把收下来的 section 渲染成文本(注册时给的是每次组装现算的 provider)。 */
-function render(section: { text: string | (() => string) }): string {
-  return typeof section.text === 'function' ? section.text() : section.text
-}
-
 /** 注册一次并把文本取出来 —— 守卫统一走这条路(而不是直接调 `workflowPlaybook`)。 */
 function registeredText(options: { hasTool: (name: string) => boolean }): string {
-  const registry = fakeSeat()
+  const registry = collectPromptSections()
   registerGalfreePlaybook(registry.seat, options)
   expect(registry.sections).toHaveLength(1)
-  return render(registry.sections[0]!)
+  return registry.render()
 }
 
 /** 板上字段路径 → 值(`summary.missingSlots` 这种点路径;真快照上解析)。 */
@@ -70,7 +59,7 @@ describe('agent 流程指引(T19)', () => {
 
   describe('注册这一段(可红的守卫)', () => {
     it('section 名字与位置:注册在 galfree 名下、有明确排序', () => {
-      const registry = fakeSeat()
+      const registry = collectPromptSections()
       const dispose = registerGalfreePlaybook(registry.seat, { hasTool: () => true })
       expect(registry.sections.map((section) => section.name)).toEqual([WORKFLOW_SECTION])
       expect(registry.sections[0]!.order).toBe(WORKFLOW_SECTION_ORDER)
@@ -95,14 +84,14 @@ describe('agent 流程指引(T19)', () => {
       expect(text).toMatch(/顺序/)
     })
 
-    it('闸门:每个"挡在前面"的拒绝都写明了它是什么、撞上了要做什么', () => {
+    it('闸门:**每一环**都写明了挡在前面的是什么,撞上了要做什么', () => {
       const text = registeredText({ hasTool: () => true })
-      const gated = GALFREE_WORKFLOW.filter((stage) => stage.gate?.code !== undefined)
-      expect(gated.length).toBeGreaterThan(0)
-      for (const stage of gated) {
-        // 码与"怎么办"都在文本里(只写码,模型会不知道下一步)。
-        expect(text).toContain(stage.gate!.code!)
-        expect(text).toContain(stage.gate!.what)
+      for (const stage of GALFREE_WORKFLOW) {
+        // 每一环都有闸门 —— 包括"建项目"(一部都还没有的时候,工具只会让你先去建一个)。
+        expect(stage.gate.what.trim(), `${stage.name} 没有闸门`).not.toBe('')
+        expect(text).toContain(stage.gate.what)
+        // 有码的那几道:码也要点名(只写码,模型不知道下一步;只写话,模型不知道撞的是哪个)。
+        if (stage.gate.code !== undefined) expect(text).toContain(stage.gate.code)
       }
     })
 
@@ -122,10 +111,12 @@ describe('agent 流程指引(T19)', () => {
       const text = registeredText({ hasTool: () => true })
       expect(text).toContain(GATE.stampForbidden)
       expect(text).toMatch(/只有人能盖|只有人/)
-      // 试玩的"玩过了、行"与发布的取舍也是人的事(不是工具能代替的)。
-      const playtest = GALFREE_WORKFLOW.find((stage) => stage.name === '试玩')!
-      expect(playtest.human).toBeDefined()
-      expect(text).toContain(playtest.human!)
+      // 每一环里"只有人能做的事"都要说出来(试玩那句、发布那句、设定集那句…)。
+      for (const stage of GALFREE_WORKFLOW.filter((candidate) => candidate.human !== undefined)) {
+        expect(text).toContain(stage.human!)
+      }
+      // 至少:定稿戳 / 试玩的"行不行" / 发布取舍 三处必须请人。
+      expect(GALFREE_WORKFLOW.filter((stage) => stage.human !== undefined).length).toBeGreaterThanOrEqual(5)
     })
 
     it('如实呈现的纪律:校验不过要当场改再重生成、ok:false 不能说成完成', () => {
@@ -256,15 +247,75 @@ describe('agent 流程指引(T19)', () => {
         uiTemplate: fakeUiTemplate(sdkDir),
         playtest: { resolveLauncher: async () => null, spawn: async () => ({ code: 0, log: '' }) },
       })
+      let sdk = '(没跑到)'
       try {
-        const sdk = await codeOf(() => noSdk.playtestStart('flow'))
+        sdk = await codeOf(() => noSdk.playtestStart('flow'))
         expect(text).toContain(sdk)
       } finally {
         await noSdk.dispose()
       }
 
       // 四条都得是接缝自己那套词汇(不是文本里编的码)。
-      expect([bible, stamp, channel]).toEqual([GATE.bibleNotFinal, GATE.stampForbidden, GATE.noImageChannel])
+      expect([bible, stamp, channel, sdk]).toEqual([GATE.bibleNotFinal, GATE.stampForbidden, GATE.noImageChannel, GATE.sdkNotReady])
+    })
+
+    it('没有码的那道闸门(发布)也是**真的**:接缝真的会拦下来,文本讲的是它给的形状', async () => {
+      const text = registeredText({ hasTool: () => true })
+      // 造一个"发不了"的局面,而且**只要这一处坏**:把一个不存在的音频接进 prologue 的正文里
+      // (池是派生的,文件不在 = 悬空)。小心别顺手制造 lint 错 —— 那样守卫就变成
+      // "反正有东西拦住了"的同义反复,验不出这道闸门本身。
+      const current = await service.readProjectFile('flow', 'game/script.rpy')
+      const patched = current.content.replace(
+        'label prologue:\n',
+        'label prologue:\n    play music "audio/not-there.ogg"\n',
+      )
+      expect(patched, '没打到模板的 prologue 上:夹具过期了').not.toBe(current.content)
+      await service.writeProjectFiles('flow', [{
+        path: 'game/script.rpy',
+        content: patched,
+        expectVersion: current.version,
+      }], { origin: 'agent', reason: 'scenario' })
+
+      const progress = await service.progress('flow')
+      // 先把"只坏了这一处"钉死:板上只有这一条 error,而且它就是悬空音频。
+      expect(progress.lint.errors, '夹具顺带弄出了别的 lint 错,守卫会变成同义反复').toBe(1)
+      expect(progress.problems.map((problem) => problem.code)).toEqual(['missing-audio'])
+      expect(progress.audio.missing.map((reference) => reference.ref)).toEqual(['audio/not-there.ogg'])
+
+      const readiness = await service.publishReadiness('flow')
+      expect(readiness.ready, '这道闸门没拦住:守卫本身失效了').toBe(false)
+      // 拦住它的**必须**包含音频那一条(否则"ready=false"可能来自任何别的原因)。
+      // 悬空引用同时也是板上的 error,所以会连带出现 `lint-errors` —— 两条都在是对的。
+      expect(readiness.blockers.map((blocker) => blocker.code)).toContain('missing-audio')
+      // 指引必须讲到这道闸门的**形状**(逐项列出、照着实修),而不是编一个码。
+      const publish = GALFREE_WORKFLOW.find((stage) => stage.name === '发布')!
+      expect(publish.gate.code).toBeUndefined()
+      expect(text).toContain(publish.gate.what)
+      expect(text).toContain('blockers[]')
+      // 接缝真给的每一项都带这三样(指引让模型照着修的东西确实在)。
+      for (const blocker of readiness.blockers) {
+        expect(typeof blocker.code).toBe('string')
+        expect(typeof blocker.label).toBe('string')
+      }
+    })
+
+    it('工具面与注册表同源:注册出来的工具要么是某环的入口,要么是查询工具', () => {
+      // 真注册一次拿**真名**(模型看到的工具面):名字写错一个字母会在这里红,
+      // 而不是静默渲染成"目前没有 agent 入口"(那是反方向的谎)。
+      const registry = { tools: [] as Array<{ name: string }>, register(tool: unknown) { registry.tools.push(tool as { name: string }); return () => {} } }
+      registerGalfreeTools({ tools: registry } as unknown as Parameters<typeof registerGalfreeTools>[0], service)
+      const registered = registry.tools.map((tool) => tool.name)
+      expect(registered.length).toBeGreaterThan(0)
+
+      const claimed = new Set(GALFREE_WORKFLOW.flatMap((stage) => stage.tools))
+      // "读现状 / 查队列"这类横跨所有环节的工具:不进任何一环的入口列表,是**显式**的例外。
+      const queries = new Set(['galfree_project_status', 'galfree_art_queue', 'galfree_reference_chain'])
+      for (const name of registered) {
+        expect(claimed.has(name) || queries.has(name), `${name} 既不是任何环节的入口,也不在查询工具白名单里`).toBe(true)
+      }
+      // 反向:已经注册的入口,指引必须点名它(名字写错 → 上面那条先红;这条保证"说有的确实有")。
+      const text = registeredText({ hasTool: (name) => registered.includes(name) })
+      for (const name of claimed) if (registered.includes(name)) expect(text).toContain(name)
     })
 
     it('指引不写死数字:判据只以字段形态出现', () => {
@@ -314,7 +365,8 @@ describe('真宿主装配(cordis 真服务)', () => {
     })
     await ctx.inject(['systemPrompt'], (promptCtx) => {
       registerGalfreePlaybook(promptCtx.systemPrompt, {
-        hasTool: (toolName) => ctx.tools.get(toolName) !== undefined,
+        // 用**入口同一个探针**(不是这里另写一个),否则守卫验的是它自己。
+        hasTool: toolPresenceProbe(ctx.tools),
       })
     })
 

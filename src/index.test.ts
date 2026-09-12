@@ -6,8 +6,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { apply, channelFromSettings, parseModelCatalog, type Config } from './index.ts'
-import { WORKFLOW_SECTION } from './service/playbook.ts'
+import { WORKFLOW_SECTION, type SystemPromptSeat } from './service/playbook.ts'
 import { cleanupTempDirs, makeTempDir } from './testing/tmp.ts'
+import { collectPromptSections, type CollectedSection } from './testing/prompt-seat.ts'
 import type { Context } from '@deepseek-ai/cordis'
 
 /** 一份填齐的设置文档(密钥明文,这是 ADR-0010 的知情选择)。 */
@@ -116,7 +117,7 @@ describe('插件入口装配(T19)', () => {
   })
 
   interface FakeSeats {
-    systemPrompt?: { section: (section: { name: string; order: number; text: string | (() => string) }) => () => void }
+    systemPrompt?: SystemPromptSeat
     tools?: { register: (tool: unknown) => () => void }
   }
 
@@ -124,12 +125,13 @@ describe('插件入口装配(T19)', () => {
   function fakeHost(seats: FakeSeats): {
     ctx: Context
     routes: unknown[]
-    sections: Array<{ name: string; order: number; text: string | (() => string) }>
+    sections: CollectedSection[]
     tools: Array<{ name: string }>
   } {
     const routes: unknown[] = []
-    const sections: Array<{ name: string; order: number; text: string | (() => string) }> = []
     const tools: Array<{ name: string }> = []
+    // 提示词席位的收集形状与 playbook.test.ts 共用一份夹具(宿主改了形状,两边一起改)。
+    const collector = collectPromptSections()
     const ctx = {
       settings: {
         register: () => ({
@@ -147,14 +149,7 @@ describe('插件入口装配(T19)', () => {
         if (deps.every((dep) => (seats as Record<string, unknown>)[dep] !== undefined)) callback(ctx)
         return undefined
       },
-      ...(seats.systemPrompt === undefined ? {} : {
-        systemPrompt: {
-          section: (section: { name: string; order: number; text: string | (() => string) }) => {
-            sections.push(section)
-            return seats.systemPrompt!.section(section)
-          },
-        },
-      }),
+      ...(seats.systemPrompt === undefined ? {} : { systemPrompt: collector.seat }),
       ...(seats.tools === undefined ? {} : {
         tools: {
           register: (tool: unknown) => { tools.push(tool as { name: string }); return seats.tools!.register(tool) },
@@ -164,7 +159,7 @@ describe('插件入口装配(T19)', () => {
         },
       }),
     }
-    return { ctx: ctx as unknown as Context, routes, sections, tools }
+    return { ctx: ctx as unknown as Context, routes, sections: collector.sections, tools }
   }
 
   const seats = (withSystemPrompt: boolean): FakeSeats => ({

@@ -25,7 +25,7 @@ import { realSpawn } from './service/playtest.ts'
 import { realDistribute } from './service/publish.ts'
 import { createCompositeValidator } from './service/validation/composite-validator.ts'
 import { registerGalfreeTools } from './service/tools.ts'
-import { registerGalfreePlaybook } from './service/playbook.ts'
+import { registerGalfreePlaybook, toolPresenceProbe, type ToolRegistrySeat } from './service/playbook.ts'
 
 /** 稳定的 cordis 插件名(与 cordis.patch.yml 的 insert id 对齐)。 */
 export const name = 'galfree'
@@ -65,16 +65,10 @@ function directoryPickerSeam(ctx: Context): DirectoryPickerSeam | undefined {
 
 /**
  * agent 工具注册表的席位(可选,只用到 `get`):流程指引靠它回答"这一步有没有 agent 入口"。
- *
- * 与目录选择同一个态度 —— 按名取用、容忍缺席:缺工具席位时指引如实说"请人在工作台做",
- * 而不是报一个调不通的工具名。
+ * 与目录选择同一个态度 —— 按名取用、容忍缺席。
  */
-interface ToolRegistrySeam {
-  get?: (name: string, scope?: unknown) => unknown
-}
-
-function toolRegistrySeam(ctx: Context): ToolRegistrySeam | undefined {
-  return (ctx as unknown as { tools?: ToolRegistrySeam }).tools
+function toolRegistrySeam(ctx: Context): ToolRegistrySeat | undefined {
+  return (ctx as unknown as { tools?: ToolRegistrySeat }).tools
 }
 
 export interface Config {
@@ -397,8 +391,7 @@ export function apply(ctx: Context, config?: Config): void {
       () => registerGalfreePlaybook(promptCtx.systemPrompt, {
         // 工具面是**可选席位**,而且可能晚于本段就位:每次组装现问一次"这个工具在不在",
         // 于是"还没做的入口"会如实显示成"请人在工作台做",不报一个调不通的工具名。
-        // 探不到就**当没有**:这段提示是锦上添花,绝不能把整段系统提示搞崩。
-        hasTool: (toolName) => toolRegistrySeam(ctx)?.get?.(toolName) !== undefined,
+        hasTool: toolPresenceProbe(toolRegistrySeam(ctx)),
       }),
       'dsh-galfree: workflow playbook',
     )
