@@ -29,6 +29,7 @@ import {
   type CharacterRecord, type SlotRecord,
 } from './characters.ts'
 import { deriveSlots } from './slots.ts'
+import { deriveAudio, poolViewOf, readAudioFiles, type AudioDerivation, type AudioPoolView } from './audio.ts'
 import { resolveReferenceChain, sortSlotsByReference, type ReferenceChainView } from './reference-chain.ts'
 import { buildDifferentialGrid, type DifferentialGrid } from './differentials.ts'
 import { deriveCompleteness, type CompletenessReport } from './completeness.ts'
@@ -387,9 +388,11 @@ export class ProjectService {
     const derived = deriveSlots({ parsed, ledger, characters })
     // 项目级完整性(T13):孤立场景 / 结局不可达,外加把全局问题**定位到场景**。
     const completeness = deriveCompleteness(graph)
+    // 音频引用(T17):池是派生的(扫 game/ 下的音频文件),悬空引用 = error 上板。
+    const audio = await this.#deriveAudio(graph.scenes, entry.path)
     return computeProgress(entry.path, {
       scenes: graph.scenes,
-      problems: [...graph.problems, ...completeness.problems, ...derived.problems],
+      problems: [...graph.problems, ...completeness.problems, ...derived.problems, ...audio.problems],
       derivedSlots: derived.slots,
       characters,
       definedCharacters: parsed.characters,
@@ -398,6 +401,7 @@ export class ProjectService {
         orphans: completeness.orphans,
         endingReachable: completeness.endingReachable,
       },
+      audio: poolViewOf(audio),
       bible: {
         fingerprint: bibleFingerprint(bible),
         chapters: bible.chapters.length,
@@ -415,6 +419,22 @@ export class ProjectService {
     const entry = await this.#resolve(projectRef)
     await this.#assertPresent(entry)
     return parseRpy(await readRpyFiles(join(entry.path, 'game')))
+  }
+
+  /**
+   * 音频文件池 + 引用处境(T17,纯推导 + 一次扫描)。
+   *
+   * 池成员 = `game/` 下的音频文件(递归),**没有任何手工登记**:人把文件丢进去,
+   * 这里立刻有它;删掉就没了。引用缺失音频 = error,定位到哪一场的哪一行。
+   */
+  async audioPool(projectRef: string): Promise<AudioPoolView> {
+    const graph = await this.branchGraph(projectRef)
+    const entry = await this.#resolve(projectRef)
+    return poolViewOf(await this.#deriveAudio(graph.scenes, entry.path))
+  }
+
+  async #deriveAudio(scenes: ReturnType<typeof parseRpy>['scenes'], root: string): Promise<AudioDerivation> {
+    return deriveAudio({ scenes, files: await readAudioFiles(join(root, 'game')) })
   }
 
   /**
@@ -685,11 +705,22 @@ export class ProjectService {
         `这一场用了方言子集外的语法,编辑器降级只读:${scene.problems.find((p) => p.severity === 'warning')?.message ?? ''}`,
       )
     }
+    // 音频接线(T17):`play` 必须给文件 —— 宁可当场拒绝,也不落一行 `play music ""` 的坏语法。
+    if (input.edit.kind === 'setAudio' && input.edit.action === 'play' && (input.edit.file ?? '').trim() === '') {
+      throw new GalfreeError('invalid-audio', 'play 需要一个音频文件(相对 game/ 的路径,如 audio/rain.ogg);要停声道请用 stop')
+    }
 
     const path = gatewayPathOf(scene.file)
     const gateway = await this.#gatewayFor(projectRef)
     const current = await gateway.read(path)
-    const next = applySceneEdit(current.content, input.edit)
+    // 编辑指令本身不合法(行号越界 / 锚点找不到 / play 没给文件)= 请求方的错(400),
+    // 不是服务端故障:纯函数抛的 Error 在这里翻译成带业务码的拒绝。
+    let next: string
+    try {
+      next = applySceneEdit(current.content, input.edit)
+    } catch (editError) {
+      throw new GalfreeError('invalid-edit', editError instanceof Error ? editError.message : String(editError))
+    }
 
     await gateway.writeBatch(
       [{ path, content: next, expectVersion: current.version }],
@@ -712,6 +743,8 @@ export class ProjectService {
     const issues: DialectProblem[] = [
       ...parsedAfter.problems,
       ...(scene?.problems ?? []),
+      // 音频引用的问题也在这个文件的报告里(T17):写完当场就能看到"这一段要播的东西不在"。
+      ...progress.problems.filter((problem) => problem.code === 'missing-audio'),
     ].filter((problem) => problem.file === relative || problem.code === 'no-start-label')
     return {
       path,

@@ -13,12 +13,12 @@
  * 拒绝原样呈现出来。
  */
 import { useCallback, useEffect, useState } from 'react'
-import type { GalfreeApi } from './api.ts'
+import type { AudioPoolView, GalfreeApi } from './api.ts'
 import type { BranchGraphView, SceneFormView, SceneRowView } from './types.ts'
 import { Chip, Notice, Spinner } from './ui.tsx'
 import s from './panel.module.css'
 
-export function SceneWorkbench({ api, sceneLabels, hasProject, focus, onFocusHandled, onChanged, onNotice }: {
+export function SceneWorkbench({ api, sceneLabels, hasProject, focus, onFocusHandled, onChanged, onNotice, audioPoolKey }: {
   api: GalfreeApi
   /** 剧本里现有的 label(分支图/编辑器的入口列表)。 */
   sceneLabels: string[]
@@ -28,6 +28,13 @@ export function SceneWorkbench({ api, sceneLabels, hasProject, focus, onFocusHan
   onFocusHandled: () => void
   onChanged: () => Promise<void> | void
   onNotice: (tone: 'bad' | 'warn', text: string) => void
+  /**
+   * 池内容的**版本键**(由主面板从推导状态里算出来;是路径清单拼的,**不是内容哈希** ——
+   * 它只回答"池的成员变了吗")。
+   * 人拿外部工具往 `game/audio/` 丢文件 → 网关观察 → 主面板重取推导 → 这个 key 变 →
+   * 这里重读池。**"音频目录观察"就是这么落地的**:不靠人再点一次刷新。
+   */
+  audioPoolKey?: string
 }) {
   const [label, setLabel] = useState<string | null>(null)
   const [form, setForm] = useState<SceneFormView | null>(null)
@@ -37,6 +44,23 @@ export function SceneWorkbench({ api, sceneLabels, hasProject, focus, onFocusHan
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [degraded, setDegraded] = useState<string | null>(null)
+  /** 音频文件池(T17):派生的 —— 人往 game/audio 里丢文件,这里就有它。 */
+  const [audio, setAudio] = useState<AudioPoolView | null>(null)
+  /** 池读不到是**一件要说出来的事**(面板上不能把"读不到"显示成"一个文件都没有")。 */
+  const [audioError, setAudioError] = useState<string | null>(null)
+
+  const loadAudio = useCallback(async (): Promise<void> => {
+    if (!hasProject) { setAudio(null); setAudioError(null); return }
+    try {
+      setAudio(await api.audioPool())
+      setAudioError(null)
+    } catch (error) {
+      setAudio(null)
+      setAudioError(error instanceof Error ? error.message : String(error))
+    }
+  }, [api, hasProject])
+
+  useEffect(() => { void loadAudio() }, [loadAudio, audioPoolKey])
 
   const loadForm = useCallback(async (target: string) => {
     setBusy(true)
@@ -87,6 +111,7 @@ export function SceneWorkbench({ api, sceneLabels, hasProject, focus, onFocusHan
       }
       await onChanged()
       await loadGraph()
+      await loadAudio()
     } catch (editError) {
       // 接缝的拒绝是可执行的指令(只读降级 / 先搬家),原样说给用户。
       const result = editError as { code?: string }
@@ -180,7 +205,26 @@ export function SceneWorkbench({ api, sceneLabels, hasProject, focus, onFocusHan
                   <Chip tone="quiet" title={form.path}>{form.path}</Chip>
                   {form.readOnly ? <Chip tone="warn" dot>只读降级</Chip> : null}
                   {form.file.startsWith('scenes/') ? <Chip tone="quiet">可生成</Chip> : <Chip tone="quiet">手写文件</Chip>}
+                  {/* 音频处境(T17):池是派生的;缺引用是错误(与板上同源),没用上的只是信息。 */}
+                  {audio !== null ? (
+                    <Chip tone="quiet" num={audio.files.length} title="game/ 下的音频文件(相对 game/ 的路径就是接线时要写的字符串)">
+                      音频库
+                    </Chip>
+                  ) : null}
+                  {audio !== null && audio.missing.length > 0 ? (
+                    <Chip tone="bad" num={audio.missing.length} title={audio.missing.map((reference) => `${reference.scene}:${reference.line} → ${reference.ref}`).join('\n')}>
+                      缺音频
+                    </Chip>
+                  ) : null}
+                  {audio !== null && audio.unused.length > 0 ? (
+                    <Chip tone="quiet" num={audio.unused.length} title={audio.unused.join('\n')}>没用上</Chip>
+                  ) : null}
+                  {audioError !== null ? <Chip tone="bad" title={audioError}>音频库读不到</Chip> : null}
                 </div>
+                {/* 一份 datalist 供所有音频行用(每行一个会重复渲染同一张表)。 */}
+                <datalist id="gf-audio-pool">
+                  {(audio?.files ?? []).map((file) => <option key={file.path} value={file.path} />)}
+                </datalist>
                 {degraded !== null ? <div style={{ marginBottom: 8 }}><Notice tone="warn">{degraded}</Notice></div> : null}
                 {form.readOnly && form.readOnlyReason !== undefined ? (
                   <div style={{ marginBottom: 8 }}><Notice tone="warn">{form.readOnlyReason} —— 表单只读;源文本模式仍可改(那是你的文件)。</Notice></div>
@@ -238,6 +282,9 @@ function FormRow({ row, disabled, onSubmit }: {
 
   if (row.kind === 'blank') return <div className={s.formRowBlank} aria-hidden="true" />
   if (row.kind === 'comment') return <div className={s.formRowRaw} title="注释(原样保留)">{row.raw}</div>
+  if (row.kind === 'audio') {
+    return <AudioRow row={row} disabled={disabled} onSubmit={onSubmit} />
+  }
   if (row.kind === 'unsupported' || row.kind === 'jump' || row.kind === 'call' || row.kind === 'return' || row.kind === 'menu') {
     return (
       <div className={s.formRowRaw} title={row.note ?? '结构行'}>
@@ -292,6 +339,66 @@ function FormRow({ row, disabled, onSubmit }: {
         onClick={() => void onSubmit({
           kind: 'setImage', line: row.line, role: row.role ?? 'show', tag: tag.trim(),
           attributes: attributes.split(/\s+/).filter((token) => token !== ''),
+        })}>
+        存这一行
+      </button>
+      <button type="button" className={`${s.button} ${s.ghost} ${s.tiny}`} disabled={disabled}
+        onClick={() => void onSubmit({ kind: 'deleteStatement', line: row.line })}>删</button>
+    </div>
+  )
+}
+
+/**
+ * 音频行(T17):`play music "audio/rain.ogg" loop` / `stop music`。
+ *
+ * 文件从**派生的池**里选(`<datalist>`,数据来自 `GET /audio`):人往 `game/audio`
+ * 丢一个文件,这里立刻能选 —— 没有"先登记再用"这一步。选中的字符串就是写进 `.rpy`
+ * 的那一串(相对 `game/`),所以面板不做任何路径翻译。
+ */
+function AudioRow({ row, disabled, onSubmit }: {
+  row: SceneRowView
+  disabled: boolean
+  onSubmit: (edit: Record<string, unknown>) => Promise<void>
+}) {
+  const [action, setAction] = useState<'play' | 'stop'>(row.action ?? 'play')
+  const [channel, setChannel] = useState(row.channel ?? 'music')
+  const [file, setFile] = useState(row.file ?? '')
+  const [loop, setLoop] = useState(row.loop ?? false)
+
+  const dirty = action !== (row.action ?? 'play') || channel !== (row.channel ?? 'music')
+    || file !== (row.file ?? '') || loop !== (row.loop ?? false)
+  const needsFile = action === 'play' && file.trim() === ''
+
+  return (
+    <div className={s.formRowEdit}>
+      <span className={s.formLineNo}>{row.line}</span>
+      <select className={s.input} style={{ width: 84 }} value={action} disabled={disabled}
+        aria-label={`第 ${row.line} 行音频动作`} onChange={(event) => setAction(event.target.value as 'play' | 'stop')}>
+        <option value="play">play</option>
+        <option value="stop">stop</option>
+      </select>
+      <select className={s.input} style={{ width: 96 }} value={channel} disabled={disabled}
+        aria-label={`第 ${row.line} 行音频声道`} onChange={(event) => setChannel(event.target.value)}>
+        <option value="music">music</option>
+        <option value="sound">sound</option>
+        <option value="voice">voice</option>
+      </select>
+      {action === 'play' ? (
+        <>
+          <input className={s.input} style={{ flex: 1 }} list="gf-audio-pool" value={file} disabled={disabled}
+            placeholder="audio/rain.ogg(相对 game/;可从音频库里选)"
+            aria-label={`第 ${row.line} 行音频文件`} onChange={(event) => setFile(event.target.value)} />
+          <label className={s.emptyHint} style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+            <input type="checkbox" checked={loop} disabled={disabled} onChange={(event) => setLoop(event.target.checked)} />
+            loop
+          </label>
+        </>
+      ) : null}
+      <button type="button" className={`${s.button} ${s.tiny}`} disabled={disabled || !dirty || needsFile}
+        title={needsFile ? 'play 需要一个文件;要停声道请把动作改成 stop' : undefined}
+        onClick={() => void onSubmit({
+          kind: 'setAudio', line: row.line, action, channel: channel as 'music' | 'sound' | 'voice',
+          file: action === 'play' ? file.trim() : null, loop: action === 'play' ? loop : false,
         })}>
         存这一行
       </button>

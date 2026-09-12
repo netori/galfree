@@ -41,6 +41,11 @@
 | `pause [秒数]` | 停顿 |
 | `play music|sound|voice "文件" [loop]` / `stop …` | 音频接线(T17 的语法基础) |
 
+音频引用的**口径**(T17 定稿,从钉版 SDK 源码读出):字符串是**相对 `game/` 的路径**
+(`renpy.py:predefined_searchpath` 的默认 searchpath 只有 `game/`,`config.search_prefixes`
+默认 `[""]`)—— 不存在"自动在 `audio/` 里找"。悬空引用 = error(`missing-audio`),
+详见 `stage-zero.md` 的「音频接线(T17 之后追加)」节。
+
 ## 场景内子集外(触发只读降级)
 
 - 条件/控制流:`if` / `elif` / `else` / `while` / `for` / `block`

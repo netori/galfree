@@ -136,6 +136,7 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['/scenes/form', ['GET']],
   ['/scenes/edit', ['POST']],
   ['/scenes/graph', ['GET']],
+  ['/audio', ['GET']],
   ['/picker', ['GET']],
   ['/picker/pick', ['POST']],
   ['/picker/list', ['GET']],
@@ -603,6 +604,15 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
+  // 音频文件池(T17,纯读):池是**派生**的(扫 game/ 下的音频文件),没有任何手工登记;
+  // 顺带回引用处境(谁被引用、谁还没用上、哪条引用的文件不在)。
+  if (method === 'GET' && path === '/audio') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    writeJson(res, 200, await service.audioPool(active.id))
+    return
+  }
+
   // 分支图(T12):派生骨架的只读视图(节点 + 边 + 子集外降级标记)。
   // 图上编辑**明确出范围**(spec);它只是导航 —— 点节点跳编辑器。
   if (method === 'GET' && path === '/scenes/graph') {
@@ -854,7 +864,7 @@ export function makeRoutes(deps: RouteDeps): GalfreeRoute[] {
         } else if (error instanceof GalfreeError) {
           // 404 = 目标不存在(含"项目目录已被挪走"),与 5xx 的"服务端故障"严格区分。
           const status = error.code === 'no-active-project' || error.code === 'unknown-project' || error.code === 'unknown-scene' || error.code === 'project-missing' || error.code === 'unknown-task' ? 404
-            : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' || error.code === 'character-invalid' || error.code === 'slot-invalid' || error.code === 'bible-invalid' || error.code === 'invalid-slot' || error.code === 'unknown-slot' || error.code === 'unknown-image-model' || error.code === 'unknown-character' || error.code === 'empty-prompt' || error.code === 'empty-note' || error.code === 'note-too-long' ? 400
+            : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' || error.code === 'character-invalid' || error.code === 'slot-invalid' || error.code === 'bible-invalid' || error.code === 'invalid-slot' || error.code === 'unknown-slot' || error.code === 'unknown-image-model' || error.code === 'unknown-character' || error.code === 'empty-prompt' || error.code === 'empty-note' || error.code === 'note-too-long' || error.code === 'invalid-audio' || error.code === 'invalid-edit' ? 400
             : error.code === 'body-too-large' ? 413
             : error.code === 'picker-unsupported' ? 501
             : error.code === 'picker-timeout' ? 504

@@ -36,6 +36,8 @@ export interface SceneRow {
   transition?: string
   seconds?: number | null
   channel?: 'music' | 'sound' | 'voice'
+  /** 音频动作:`stop` 行没有文件,别在编辑时被悄悄改成 `play`(T17)。 */
+  action?: 'play' | 'stop'
   file?: string | null
   loop?: boolean
   /** 选择项的选项文案(menu 行)。 */
@@ -86,7 +88,7 @@ function classify(raw: string, line: number, statement: Statement | undefined): 
       case 'pause':
         return { kind: 'pause', line, raw, seconds: statement.seconds }
       case 'audio':
-        return { kind: 'audio', line, raw, channel: statement.channel, file: statement.file, loop: statement.loop }
+        return { kind: 'audio', line, raw, action: statement.action, channel: statement.channel, file: statement.file, loop: statement.loop }
       case 'menu':
         return { kind: 'menu', line, raw, choices: statement.choices.map((choice) => choice.prompt), note: '菜单块:改选项请用源文本模式' }
       default:
@@ -154,10 +156,32 @@ export function serializeImage(indent: string, role: 'show' | 'scene' | 'hide', 
   return `${indent}${role} ${tag}${rest.length === 0 ? '' : ` ${rest.join(' ')}`}`
 }
 
+/**
+ * 音频接线(T17):`play music "audio/rain.ogg" loop` / `stop music`。
+ *
+ * 引号里的字符串是**相对 `game/` 的路径**(Ren'Py 的 searchpath 只有 `game/`,
+ * 见 `audio.ts` 顶部的说明)—— 面板选的是池里的路径,这里原样写出去。
+ * `play` 没有文件是坏语法:**写之前就拒绝**,别让半行坏语句落盘。
+ */
+export function serializeAudio(
+  indent: string,
+  action: 'play' | 'stop',
+  channel: 'music' | 'sound' | 'voice',
+  file: string | null,
+  loop: boolean,
+): string {
+  if (action === 'stop') return `${indent}stop ${channel}`
+  const name = (file ?? '').trim()
+  if (name === '') throw new Error('play 需要一个音频文件(相对 game/ 的路径,如 audio/rain.ogg)')
+  return `${indent}play ${channel} "${name.replace(/\\/g, '/').replace(/"/g, '\\"')}"${loop ? ' loop' : ''}`
+}
+
 /** 编辑指令:只动被指定的行(其余逐字保留)。 */
 export type SceneEdit =
   | { kind: 'setDialogue'; line: number; speaker: string | null; text: string }
   | { kind: 'setImage'; line: number; role: 'show' | 'scene' | 'hide'; tag: string; attributes: string[] }
+  /** 改一行的音频接线(T17);`play` 必须给文件,`stop` 不给。 */
+  | { kind: 'setAudio'; line: number; action: 'play' | 'stop'; channel: 'music' | 'sound' | 'voice'; file: string | null; loop: boolean }
   /** 插在 `anchor` 文本那一行之后;`anchor` 省略时插在 `afterLine` 之后。 */
   | { kind: 'insertStatement'; afterLine?: number; anchor?: string; source: string }
   | { kind: 'deleteStatement'; line: number }
@@ -185,6 +209,11 @@ export function applySceneEdit(text: string, edit: SceneEdit): string {
     case 'setImage': {
       guard(edit.line)
       lines[edit.line - 1] = serializeImage(indentOf(at(edit.line)), edit.role, edit.tag, edit.attributes)
+      return lines.join('\n')
+    }
+    case 'setAudio': {
+      guard(edit.line)
+      lines[edit.line - 1] = serializeAudio(indentOf(at(edit.line)), edit.action, edit.channel, edit.file, edit.loop)
       return lines.join('\n')
     }
     case 'insertStatement': {

@@ -89,8 +89,8 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
   disposers.push(ctx.tools.register(defineTool({
     name: 'galfree_project_status',
     description: [
-      '读 GALFree 项目的推导状态:场景(含戳状态)、素材槽、角色、设定集处境、lint 与试玩。',
-      '与工作台阶段板**同源**(都是推导出来的),用于回答"这个项目到哪一步了 / 还缺什么"。',
+      '读 GALFree 项目的推导状态:场景(含戳状态)、素材槽、角色、设定集处境、音频池与引用处境、',
+      'lint 与试玩。与工作台阶段板**同源**(都是推导出来的),用于回答"这个项目到哪一步了 / 还缺什么"。',
     ].join(' '),
     parameters: {
       project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
@@ -113,6 +113,16 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
           slots: progress.slots.map((slot) => ({ slot: slot.slot, filled: slot.filled, stamp: slot.stamp, scenes: slot.origin.scenes })),
           characters: progress.characters.map((character) => ({ id: character.id, defined: character.defined, hasStyleAnchor: (character.styleAnchor ?? '') !== '' })),
           bible: progress.bible,
+          // 音频(T17):池是派生的(扫 game/ 下的音频文件);悬空引用在 problems 里(定位到场景与行)。
+          audio: {
+            files: progress.audio.files.map((file) => file.path),
+            references: progress.audio.references.map((reference) => ({
+              ref: reference.ref, scene: reference.scene, line: reference.line, channel: reference.channel, found: reference.found,
+            })),
+            missing: progress.audio.missing.map((reference) => reference.ref),
+            unused: progress.audio.unused,
+            note: '接线写在 .rpy 里(`play music "audio/x.ogg" [loop]` / `stop music`);引用是**相对 game/ 的路径**。本票不做音乐生成与 TTS;试听靠试玩,认可靠人盖场景戳。',
+          },
           lint: progress.lint,
           playtest: progress.playtest,
           summary: progress.summary,

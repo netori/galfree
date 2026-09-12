@@ -359,6 +359,10 @@ export function WorkbenchPanel() {
           onFocusHandled={() => setFocusScene(null)}
           onChanged={() => refresh()}
           onNotice={pushNotice}
+          // 池的内容变了(有人往 game/audio 丢/删文件)就重读 —— 与推导状态同一条观察链。
+          audioPoolKey={progress === null
+            ? ''
+            : `${progress.audio.files.map((file) => file.path).join(',')}|${progress.audio.missing.map((reference) => reference.ref).join(',')}`}
         />
 
         {state !== null && state.gatewayErrors.length > 0 ? (

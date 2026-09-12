@@ -232,6 +232,44 @@ describe('路由适配层(/api/galfree)', () => {
     expect((await asset.arrayBuffer()).byteLength).toBe(8)
   })
 
+  it('音频池路由(T17):池是派生的、悬空引用进板且随文件消失', async () => {
+    const project = await freshProject()
+
+    // 一开始池是空的(没有手工登记这一步)。
+    const empty = await req('/api/galfree/audio')
+    expect(empty.status).toBe(200)
+    expect(empty.body.files).toEqual([])
+
+    // 丢一个文件进 game/audio → 池里立刻有它(路径就是接线要写的那一串)。
+    await service.writeProjectFiles(project.id, [{ path: 'game/audio/rain.ogg', content: Buffer.from('OggS-fake'), expectVersion: 'absent' }], { origin: 'workbench', reason: 'asset' })
+    const pool = await req('/api/galfree/audio')
+    expect(pool.body.files.map((file: { path: string }) => file.path)).toEqual(['audio/rain.ogg'])
+    expect(pool.body.unused).toEqual(['audio/rain.ogg'])
+
+    // 在剧本里接线(这一场住在手写文件里 → 用源文本模式,那是人自己的文件)。
+    const current = await service.readProjectFile(project.id, 'game/script.rpy')
+    const edited = await postJson('/api/galfree/scenes/edit', {
+      label: 'prologue',
+      edit: { kind: 'replaceSource', source: current.content.replace('    alice "序章。"', '    play music "audio/not-there.ogg"\n    alice "序章。"') },
+    })
+    expect(edited.status).toBe(200)
+
+    // 悬空引用 = error 上板(定位到哪一场的哪一行),而且当场就在编辑报告里。
+    expect(edited.body.issues.some((issue: { code: string }) => issue.code === 'missing-audio')).toBe(true)
+    const withMissing = await req('/api/galfree/progress')
+    const problem = withMissing.body.problems.find((entry: { code: string }) => entry.code === 'missing-audio')
+    expect(problem.file).toBe('script.rpy')
+    expect(problem.line).toBeGreaterThan(0)
+    expect(withMissing.body.audio.missing.map((reference: { ref: string }) => reference.ref)).toEqual(['audio/not-there.ogg'])
+
+    // 文件一放进去,问题自己消失(纯推导);刚丢进来那张反而成了 unused(是信息,不是错)。
+    await service.writeProjectFiles(project.id, [{ path: 'game/audio/not-there.ogg', content: Buffer.from('OggS-fake-2'), expectVersion: 'absent' }], { origin: 'workbench', reason: 'asset' })
+    const cleared = await req('/api/galfree/progress')
+    expect(cleared.body.problems.some((entry: { code: string }) => entry.code === 'missing-audio')).toBe(false)
+    expect(cleared.body.audio.unused).toEqual(['audio/rain.ogg'])
+    expect(cleared.body.lint.ok).toBe(true)
+  })
+
   it('人盖场景戳生效;重生成同一幕 → 待复审(指纹=场景原始文本)', async () => {
     const project = await freshProject()
     expect((await postJson('/api/galfree/stamps/scene', { label: 'prologue' })).status).toBe(200)

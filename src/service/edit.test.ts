@@ -91,8 +91,17 @@ describe('对话流结构化编辑器(T11)', () => {
     expect(form.rows.some((row) => row.kind === 'blank')).toBe(true)
   })
 
-  it('改一句对白 → git diff 只有那一行(不断言全文件重写)', async () => {
-    const before = await readFile(join(root, 'game', 'scenes', 'scene_one.rpy'), 'utf8')
+  it('编辑指令本身不合法 → 带业务码的拒绝(不是 500 服务端故障)', async () => {
+    // 行号越界 / 锚点找不到:是**请求方**的错(400),不是服务端故障。
+    await expect(service.editScene('edit', {
+      label: 'scene_one', edit: { kind: 'setDialogue', line: 9999, speaker: null, text: 'x' },
+    })).rejects.toMatchObject({ code: 'invalid-edit' })
+    await expect(service.editScene('edit', {
+      label: 'scene_one', edit: { kind: 'insertStatement', anchor: '    这一行不存在', source: 'x' },
+    })).rejects.toMatchObject({ code: 'invalid-edit' })
+  })
+
+  it('改一句对白 → git diff 只有那一行(不断言全文件重写)', async () => {    const before = await readFile(join(root, 'game', 'scenes', 'scene_one.rpy'), 'utf8')
     const form = await service.sceneForm('edit', 'scene_one')
     const row = form.rows.find((entry) => entry.kind === 'dialogue' && entry.speaker === 'xiao_tang')!
 

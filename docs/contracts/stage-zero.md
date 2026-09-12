@@ -713,6 +713,90 @@ T14 起契约里"能力声明是降级的唯一依据"一直靠一个**从未被
 404 → 可能是单数路径、该换 `async-task`;数组进了字符串字段 → 去设置改「参考图字段」;
 要求公网 URL → 说清"该模型的参考链在你的渠道上不可用",并给出下一步。
 
+## 音频接线(T17 之后追加)
+
+**v1 的音频 = 把 BGM/SE 文件接进剧本**,没有音乐生成、没有 TTS(spec User Story 18 与
+Out of Scope 都写明)。试听由**试玩**承担,主观认可由**人盖场景戳**表达 —— 面板里没有播放器,
+这一票也不打算加一个。
+
+### 池是派生的:丢文件进去就能选,没有手工登记
+
+`audioPool(ref)` / `GET /audio`:
+
+```
+AudioPoolView = {
+  files:      [{ path, bytes }]        // game/ 下的音频文件(递归),path 相对 game/
+  references: [{ ref, action, channel, scene, file, line, snippet, found, resolved? }]
+  missing:    AudioReference[]         // 引用了但池里没有的
+  unused:     string[]                 // 池里有、没人引用的(**信息,不是 lint 噪声**)
+}
+```
+
+- 池成员 = `game/` 下后缀在 `AUDIO_EXTENSIONS`(ogg/oga/opus/mp3/wav/m4a/flac/aac)里的文件;
+  `cache`/`saves`/隐藏目录不扫。**`.studio/` 里没有音频账本** —— 文件删掉,池自己空掉,
+  不存在"取消登记"这种动作(与槽清单同一态度:推导的,不是人维护的)。
+- `references` 只收**带文件的引用**(`play`);`stop <channel>` 不带文件,不是对文件的引用。
+- 菜单选项体里的 `play` 也算引用(那同样是会响的接线)。
+- **`GET /progress` 额外给出 `audio`**(同一份池视图:files / references / missing / unused;
+  悬空引用已经并进 `problems`)。面板读它,不另开第二处真相;`GET /audio` 是同一个接缝方法的
+  按需读法(编辑器打开/刷新时取最新的一份)。
+- **观察**:池本身不监听 —— 它由"网关观察 → SSE → 面板重取推导 → `progress.audio` 变 →
+  编辑器重读"这条既有链路看见。面板拿池的**成员版本键**(路径清单拼的,不是内容哈希)
+  做依赖,所以人拿外部工具往 `game/audio/` 里丢文件,编辑器自己就会多出那一项。读不到池
+  时面板显示"音频库读不到"(不把失败画成"一个文件都没有")。
+
+### 引用口径就是 Ren'Py 的口径(从钉版 SDK 源码读出来的)
+
+`play music "audio/rain.ogg"` 里的字符串是**相对 `game/` 的路径**:
+
+- `renpy.py:predefined_searchpath()` 给的默认 searchpath 只有 `renpy.config.gamedir`(即 `game/`);
+- `config.search_prefixes` 默认是 `[""]`(SDK `config.py:673`)。
+
+所以**不存在"自动在 `audio/` 里找"这回事**:`"rain.ogg"` 只在文件真是 `game/rain.ogg` 时才算数。
+校验因此既不误报也不漏报 —— 而**误报比漏报更糟**(板会天天喊狼来了)。
+匹配先精确、再大小写不敏感(Windows 的文件系统就是这样的,在那上面报"缺失"是假阳性);
+大小写不一致时池照常认它,`resolved` 给出真实路径。
+
+### 悬空引用 = error,定位到"哪一场的哪一行"
+
+`deriveAudio()`(纯函数)从场景与池推出 `missing-audio`(**error**):
+`场景 <label> 要播「<ref>」,但 game/<ref> 不存在…`,带 `file` + `line` + `snippet`。
+它与槽的悬空引用同一条路数:**进 `progress.problems` → 进板**,文件一放进去问题自己消失。
+编辑报告(`editScene`)也当场带上这一条 —— 不必等下一次刷板。
+
+`unused` 只是**信息**(丢进来还没接线是正常工作顺序,不该每次报错),面板以徽标呈现。
+
+### 接线写在 `.rpy` 里,写批照旧
+
+- 表单编辑新增 `SceneEdit.setAudio { line, action, channel, file, loop }` →
+  `serializeAudio()` 产出 `play <channel> "<file>" [loop]` / `stop <channel>`,
+  **缩进跟原行**(与 T11 的最小化 diff 同一条纪律);
+- `play` 不给文件 → 接缝拒绝(`invalid-audio`,400):宁可不写,也不落一行 `play music ""`;
+- 走 `editScene` → **经网关 + 自动快照**(AC3),与别的编辑没有第二条路;
+- 表单行模型带 `action`,**`stop` 行不会被编辑动作悄悄变成 `play`**(round-trip 保真)。
+
+面板:音频行给 动作 / 声道 / 文件(`<datalist>` 列池里的路径)/ `loop`;
+场景卡上三枚徽标 —— 音频库个数、缺音频(红)、没用上(灰)。
+
+### 慢带:真引擎认不认
+
+`src/service/audio.slow.test.ts` —— 一段真接了 BGM/SE 的剧本过**真钉版 SDK lint** 且判干净,
+池与真磁盘一致(删文件 → `missing-audio` 立刻上板)。方言子集契约要求"扩语法要过慢集成带验证",
+这条就是音频语法的那个证据:**我们自己解析得对 ≠ 引擎认**。
+
+### 已知边界(这一票**没有**覆盖的,别当成"已经管了")
+
+1. **只有子集内的形态会被校验**。`play <channel> "<文件>" [loop]` 之外的一切
+   —— `play music "x.ogg" fadeout 1.0`、`queue`、放在 `if`/`while`/`for` 块里的 `play`
+   —— 都落在方言子集之外:那一场**整场只读降级**(warning),语句根本没进 `references`,
+   所以也不会额外报 `missing-audio`。这是**如实**的(板说的是"这一场我看不懂"),
+   但不是"引用已校验"。扩张子集要按方言子集契约走:改 `dialect-subset.md` + 解析器 + 模板,
+   并过慢集成带 —— 那是**另一张票**。
+2. **池是磁盘真相当下的读**(与槽的悬空引用同一口径),不是从写网关的版本索引推的:
+   网关管的是**写**,不是"项目里现在有什么"(ADR-0003 磁盘为真相)。
+3. **`voice` 声道照解析器如实呈现**(`play voice …` 在子集里),但 v1 **不生成任何音频**:
+   没有音乐生成、没有 TTS,试听靠试玩。
+
 ## 模板的界面层(T7 之后补齐的一块,实测换来的)
 **新建项目必须整份带上 SDK 的 GUI 模板**(`screens.rpy` / `gui.rpy` / `guisupport.rpy` / `testcases.rpy`),
 外加一份**项目内**的中文字体。这不是"锦上添花",是"能不能跑"的问题 —— 下面三条都是实测:

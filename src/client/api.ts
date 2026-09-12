@@ -212,10 +212,30 @@ export interface SceneRowView {
   transition?: string
   seconds?: number | null
   channel?: string
+  /** 音频动作(T17):`stop` 行没有文件。 */
+  action?: 'play' | 'stop'
   file?: string | null
   loop?: boolean
   choices?: string[]
   note?: string
+}
+
+/** 音频文件池与引用处境(T17;池是派生的,没有手工登记)。 */
+export interface AudioPoolView {
+  files: Array<{ path: string; bytes: number }>
+  references: Array<{
+    ref: string
+    action: 'play' | 'stop'
+    channel: string
+    scene: string
+    file: string
+    line: number
+    snippet: string
+    found: boolean
+    resolved?: string
+  }>
+  missing: AudioPoolView['references']
+  unused: string[]
 }
 
 /** 场景表单视图(行模型 + 源文本;两个视图同一份真相)。 */
@@ -257,6 +277,8 @@ export interface ProgressView {
   bible: BibleProgressView
   /** 项目级完整性(入口 / 孤立场景 / 结局可达)。 */
   completeness: CompletenessView
+  /** 音频文件池与引用处境(T17)。 */
+  audio: AudioPoolView
   problems: DialectProblemView[]
   lint: { ok: boolean; errors: number; warnings: number }
   playtest: { at: string; state: 'pass' | 'fail' | 'stale'; exitCode: number; technicalPass: boolean; traceback: string | null; from: string | null } | null
@@ -603,6 +625,11 @@ export class GalfreeApi {
   /** 分支图(只读):节点 + 跳转/选择边 + 子集外降级标记。 */
   async sceneGraph(): Promise<BranchGraphView> {
     return readJson(await fetch('/api/galfree/scenes/graph'))
+  }
+
+  /** 音频文件池与引用处境(T17,纯读):池是派生的,没有任何手工登记。 */
+  async audioPool(): Promise<AudioPoolView> {
+    return readJson(await fetch('/api/galfree/audio'))
   }
 
   /**

@@ -12,6 +12,7 @@ import { readStamps, sceneTarget, slotTarget, BIBLE_STAMP_TARGET } from './stamp
 import type { CharacterRecord, SlotRecord } from './characters.ts'
 import { OUTLINE_FILE } from './bible.ts'
 import type { DerivedSlot, SlotOrigin } from './slots.ts'
+import type { AudioPoolView } from './audio.ts'
 
 export type StampState = 'none' | 'pending' | 'approved' | 'stale' | 'missing'
 
@@ -161,6 +162,8 @@ export interface ProgressSnapshot {
   bible: BibleProgress
   /** 项目级完整性(T13):入口 / 孤立场景 / 结局可达。 */
   completeness: CompletenessView
+  /** 音频文件池与引用处境(T17):池是派生的,悬空引用已经并进 problems。 */
+  audio: AudioPoolView
   /** 顶层(非场景内)结构问题。 */
   problems: DialectProblem[]
   lint: { ok: boolean; errors: number; warnings: number }
@@ -286,6 +289,8 @@ export interface ProgressInputs {
     orphans: string[]
     endingReachable: boolean
   }
+  /** 音频文件池与引用处境(T17;池是派生的,悬空引用已经并进 problems)。 */
+  audio: AudioPoolView
   /** 试玩事实(账本 last + 当前内容指纹);缺省视为未跑过。 */
   playtest?: { last: PlaytestRun | null; currentFingerprint: string }
 }
@@ -486,6 +491,9 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
     characters,
     bible,
     completeness,
+    // 池与引用处境原样带出去(它是推导输入,不是这里算的):板上与面板读同一份。
+    // **不给"缺省空池"**:空池 ≠ 没音频,静默绿灯比报错坏(缺省由调用方显式给)。
+    audio: inputs.audio,
     problems,
     lint: { ok: lintErrors === 0, errors: lintErrors, warnings: lintWarnings },
     playtest,
