@@ -86,7 +86,7 @@ export function ArtToolbar({ api, hasProject, missingCount, onChanged, onNotice 
   if (channel.models.length === 0) {
     return (
       <div className={s.emptyHint} style={{ marginBottom: 10 }}>
-        渠道配了,但**模型目录是空的** —— 到「设置 → GALFree」点「获取模型」勾一个,这里才有可用的模型。
+        渠道配了,但模型目录是空的 —— 到「设置 → GALFree」点「获取模型」勾一个,这里才有可用的模型。
       </div>
     )
   }
@@ -210,7 +210,7 @@ export function SlotArtActions({ slot, task, api, disabled, onChanged, onNotice 
       {openHistory && task !== undefined ? (
         <div className={s.commitRow} style={{ marginTop: 6, display: 'block' }}>
           <div className={s.emptyHint} style={{ marginBottom: 4 }}>
-            重试历史(只追加)。**上一产物**留在写批前的快照里:拿指纹去「文件 → 快照历史」能找回那一版。
+            重试历史(只追加)。被替换掉的上一版留在写批前的快照里:拿指纹去「文件 → 快照历史」能找回那一版。
           </div>
           {task.attempts.map((attempt) => (
             <div key={attempt.n} className={s.emptyHint} style={{ fontFamily: 'ui-monospace, monospace' }}>

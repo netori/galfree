@@ -14,11 +14,14 @@ import type { GenerationDegradation, GenerationTask } from './images.ts'
 
 /** 一次尝试在网格里的形态(成功看指纹,失败看原因,被拒看理由)。 */
 export interface DifferentialHistoryEntry {
+  /** 这次尝试属于哪个任务(同一格可能先后有过多个任务)。 */
+  taskId: string
+  /** 该任务内部的尝试号。 */
   n: number
   outcome: 'ok' | 'failed'
   at: string
   fingerprint?: string
-  /** 这一次覆盖掉的那一版的指纹(版本谱系靠它接起来)。 */
+  /** 这一次覆盖掉的那一版的指纹(版本谱系靠它接起来,跨任务也接得上)。 */
   replacedFingerprint?: string
   error?: string
   /** 人对**这一版**的拒收理由(按尝试号对回 `rejections`)。 */
@@ -78,9 +81,16 @@ export interface BuildDifferentialGridInput {
 }
 
 export function buildDifferentialGrid(input: BuildDifferentialGridInput): DifferentialGrid {
-  // 每个槽最近一个任务(账本最新在前,所以第一个命中的就是)。
-  const latestTaskOf = new Map<string, GenerationTask>()
-  for (const task of input.tasks) if (!latestTaskOf.has(task.slot)) latestTaskOf.set(task.slot, task)
+  // 每一格的**完整槽位历史**:同一格先后可能有过多个任务(重 roll 是同一任务追加尝试,
+  // 但 `createGenerationTask` 也能再建一个)。只取"最近一个任务"会让旧任务上的拒收注记
+  // 从视图里消失 —— 那恰好是 AC3 要能回读的东西。所以按任务**创建时间**(老→新)接起来,
+  // 每次尝试都带着它属于哪个任务。
+  const tasksOf = new Map<string, GenerationTask[]>()
+  for (const task of [...input.tasks].reverse()) {
+    const list = tasksOf.get(task.slot) ?? []
+    list.push(task)
+    tasksOf.set(task.slot, list)
+  }
 
   const characters: DifferentialRow[] = input.characters.map((character) => {
     const references: DifferentialReference[] = character.references.map((reference) => ({
@@ -94,22 +104,23 @@ export function buildDifferentialGrid(input: BuildDifferentialGridInput): Differ
     const cells: DifferentialCell[] = input.slots
       .filter((slot) => slot.ledger?.requiresCharacters.includes(character.id) === true)
       .map((slot) => {
-        const task = latestTaskOf.get(slot.slot)
-        const rejections = task?.rejections ?? []
+        const slotTasks = tasksOf.get(slot.slot) ?? []
+        // 最近一个任务:重 roll 从它走,降级/失败原因也以它为准。
+        const latest = slotTasks.at(-1)
         return {
           slot: slot.slot,
           assetPath: slot.assetPath,
-          // 主视觉由登记簿指认:链里指到了这一格的产物 —— 不是靠槽名猜。
           // 主视觉由登记簿指认:链里指到了这一格的产物 —— 不是靠槽名猜。
           role: referencePaths.has(slot.assetPath) ? 'main' as const : 'variant' as const,
           filled: slot.filled,
           stamp: slot.stamp,
           awaitingReview: slot.awaitingReview,
           fingerprint: slot.fingerprint,
-          ...(task === undefined ? {} : { taskId: task.id }),
-          history: (task?.attempts ?? []).map((attempt) => {
-            const rejection = rejections.find((entry) => entry.attempt === attempt.n)
+          ...(latest === undefined ? {} : { taskId: latest.id }),
+          history: slotTasks.flatMap((task) => task.attempts.map((attempt) => {
+            const rejection = (task.rejections ?? []).find((entry) => entry.attempt === attempt.n)
             return {
+              taskId: task.id,
               n: attempt.n,
               outcome: attempt.outcome,
               at: attempt.finishedAt,
@@ -118,9 +129,9 @@ export function buildDifferentialGrid(input: BuildDifferentialGridInput): Differ
               ...(attempt.error === undefined ? {} : { error: attempt.error }),
               ...(rejection === undefined ? {} : { rejection: { note: rejection.note, via: rejection.via, at: rejection.at } }),
             }
-          }),
-          ...(task?.degradation === undefined ? {} : { degradation: task.degradation }),
-          ...(task?.lastError === undefined ? {} : { lastError: task.lastError }),
+          })),
+          ...(latest?.degradation === undefined ? {} : { degradation: latest.degradation }),
+          ...(latest?.lastError === undefined ? {} : { lastError: latest.lastError }),
         }
       })
 

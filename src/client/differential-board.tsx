@@ -71,7 +71,7 @@ export function DifferentialBoard({ api, hasProject, onChanged, onNotice }: {
     return (
       <div className={s.empty}>
         <div className={s.emptyTitle}>登记簿还是空的</div>
-        <div className={s.emptyHint}>差分的根是**角色登记簿**:先在「角色视图」里登记角色(含参考链),这里才长得出网格。</div>
+        <div className={s.emptyHint}>差分的根是「角色登记簿」:先在「角色视图」里登记角色(含参考链),这里才长得出网格。</div>
       </div>
     )
   }
@@ -84,7 +84,7 @@ export function DifferentialBoard({ api, hasProject, onChanged, onNotice }: {
           {models.map((id) => <option key={id} value={id}>{id}</option>)}
         </select>
         <span className={s.emptyHint}>
-          主视觉先出,表情/姿势差分**自动携登记簿的参考链** —— 跨批次保持一致靠它,不是靠重写一遍外观描述。
+          主视觉先出,表情/姿势差分会自动携登记簿的参考链 —— 跨批次保持一致靠它,不是靠重写一遍外观描述。
         </span>
       </div>
 

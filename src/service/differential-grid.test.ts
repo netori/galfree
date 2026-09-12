@@ -155,6 +155,21 @@ describe('槽位对比视图(T16)', () => {
     expect(cell.awaitingReview).toBe(true)
   })
 
+  it('AC2 同一格先后有过两个任务:两边的版本与拒收理由都留在网格里', async () => {
+    const first = await service.createGenerationTask('grid', { slot: 'xiao_tang smile', model: 'full', prompt: '微笑 v1', run: true })
+    await service.retryGenerationTask('grid', first.id, { run: true, note: '第一版脸太圆', via: 'human' })
+    // 再**新建**一个任务(不是重 roll):旧任务上的拒收注记不许从视图里消失 ——
+    // "只取最近一个任务"的实现在这里会丢掉它。
+    const second = await service.createGenerationTask('grid', { slot: 'xiao_tang smile', model: 'full', prompt: '微笑 v2', run: true })
+
+    const grid = await service.differentialGrid('grid')
+    const cell = grid.characters.find((entry) => entry.character === 'xiao_tang')!.cells.find((entry) => entry.slot === 'xiao_tang smile')!
+    expect(new Set(cell.history.map((entry) => entry.taskId))).toEqual(new Set([first.id, second.id]))
+    expect(cell.history.some((entry) => entry.rejection?.note === '第一版脸太圆')).toBe(true)
+    // 当前那一格指向**最新**的任务(重 roll 从它走)。
+    expect(cell.taskId).toBe(second.id)
+  })
+
   it('AC2 还没出图的格子如实空着(不拿"没有图"假装成有图)', async () => {
     const grid = await service.differentialGrid('grid')
     const row = grid.characters.find((entry) => entry.character === 'xiao_tang')!

@@ -24,7 +24,7 @@ import type { DialectProblem } from './rpy/dialect.ts'
 import { computeProgress, sceneFingerprint, slotAssetPath, type ProgressSnapshot } from './progress.ts'
 import { readStamps, sceneTarget, slotTarget, stampsDocument, withStamp, type StampRecord } from './stamps.ts'
 import {
-  CHARACTERS_FILE, MAX_FIELD_CHARS, SLOTS_FILE, charactersDocument, readCharacters, readSlots, removeCharacter,
+  CHARACTERS_FILE, SLOTS_FILE, charactersDocument, readCharacters, readSlots, removeCharacter,
   removeSlot, slotsDocument, upsertCharacter, upsertSlot,
   type CharacterRecord, type SlotRecord,
 } from './characters.ts'
@@ -42,7 +42,8 @@ import { composeSceneFile, extractSceneBlock, gatewayPathOf, scenesPathOf } from
 import { applySceneEdit, buildSceneForm, type SceneEdit, type SceneFormModel } from './scene-form.ts'
 import { contentFingerprint, launchPlaytest, playtestDocument, readPlaytest, PLAYTEST_FILE, type PlaytestPorts, type PlaytestRun } from './playtest.ts'
 import {
-  IMAGE_TASKS_FILE, adapterFor, dataUrlOf, degradeInput, downloadResultImage, emptyTasksDocument, findTask, imageModels,
+  IMAGE_TASKS_FILE, MAX_REJECTION_NOTE_CHARS, adapterFor, dataUrlOf, degradeInput, downloadResultImage,
+  emptyTasksDocument, findTask, imageModels,
   parseTasksDocument, tasksDocument, upsertTask,
   type CreateGenerationTaskInput, type GenerationTask, type GenerationAttempt, type GenerationRejection,
   type ImageChannelSettings, type ImageHttpClient,
@@ -937,10 +938,10 @@ export class ProjectService {
     const progress = await this.progress(projectRef)
     const tasks = await this.generationTasks(projectRef)
     // 链上的图在不在:一次问清(同一路径只查一次),再交给纯函数。
-    const existing = new Set<string>()
-    for (const path of new Set(progress.characters.flatMap((character) => character.references.map((reference) => reference.path)))) {
-      if ((await fileFingerprint(entry.path, path)) !== ABSENT) existing.add(path)
-    }
+    const existing = await this.#existingPaths(
+      entry.path,
+      progress.characters.flatMap((character) => character.references.map((reference) => reference.path)),
+    )
     return buildDifferentialGrid({
       characters: progress.characters,
       slots: progress.slots,
@@ -949,32 +950,34 @@ export class ProjectService {
     })
   }
 
-  /** 解析一个槽的参考链(存在性读盘;**只有这一处**判"链上的图在不在")。 */
+  /** 解析一个槽的参考链(纯函数 + 一次读盘得出的存在性表)。 */
   async #resolveChain(
     root: string,
     slot: string,
     requiresCharacters: string[],
     characters: CharacterRecord[],
   ): Promise<ReferenceChainView> {
-    // 链解析是**纯函数**,但"文件在不在"要读盘 —— 先把候选路径一次问清楚,
-    // 再把结果喂进去(这样同一条路径在一批里只查一次)。
     const byId = new Map(characters.map((character) => [character.id, character]))
-    const candidates: string[] = []
-    for (const id of requiresCharacters) {
-      for (const reference of byId.get(id)?.references ?? []) {
-        if (!candidates.includes(reference.path)) candidates.push(reference.path)
-      }
-    }
-    const existing = new Set<string>()
-    for (const path of candidates) {
-      if ((await fileFingerprint(root, path)) !== ABSENT) existing.add(path)
-    }
+    const candidates = requiresCharacters.flatMap((id) => (byId.get(id)?.references ?? []).map((reference) => reference.path))
+    const existing = await this.#existingPaths(root, candidates)
     return resolveReferenceChain({
       slot,
       requiresCharacters,
       characters,
       exists: (path) => existing.has(path),
     })
+  }
+
+  /**
+   * "链上的图在不在"的**唯一实现**:一串候选路径 → 存在的那些(同批同路径只查一次)。
+   * 板上"已填"与链上"就绪"因此同口径(都是"文件指纹 ≠ ABSENT")。
+   */
+  async #existingPaths(root: string, paths: string[]): Promise<Set<string>> {
+    const existing = new Set<string>()
+    for (const path of new Set(paths)) {
+      if ((await fileFingerprint(root, path)) !== ABSENT) existing.add(path)
+    }
+    return existing
   }
 
   /**
@@ -1025,7 +1028,7 @@ export class ProjectService {
       for (const reference of requested) {
         const exists = chain === null
           ? (await fileFingerprint(entry.path, reference.path)) !== ABSENT
-          : chain.ready.some((ready) => ready.path === reference.path)
+          : chain.ready.some((onDisk) => onDisk.path === reference.path)
         if (!exists) absent.push(reference)
       }
 
@@ -1072,6 +1075,10 @@ export class ProjectService {
    *
    * 展开依据是**推导**(槽清单 + 文件在不在),不是人维护的待办表 ——
    * 所以剧本改了、素材出了,这里自动跟着变。
+   *
+   * 出图顺序与差分批量同一套(T16):**被引用者先出**,并且 `run:true` 时
+   * **建一个跑一个** —— 主视觉先落地,它的差分建任务时链才是真的
+   * (先建齐再统一跑的话,差分建任务那一刻主视觉还不存在,链会被如实标成缺链)。
    */
   async createTasksForMissingSlots(
     projectRef: string,
@@ -1084,45 +1091,33 @@ export class ProjectService {
     //  人以为"补全全都跑完了",实际一个任务都没建。静默失败比报错坏得多。)
     this.#requireModel(options.model)
     const progress = await this.progress(projectRef)
-    const missing = progress.slots.filter((slot) => !slot.filled)
-
-    const tasks: GenerationTask[] = []
-    for (const slot of missing) {
-      const prompt = options.prompts?.[slot.slot] ?? slot.ledger?.prompt ?? ''
-      tasks.push(await this.createGenerationTask(projectRef, {
-        slot: slot.slot,
-        model: options.model,
-        prompt: prompt === '' ? `${slot.slot} 的素材` : prompt,
-        requiresCharacters: slot.ledger?.requiresCharacters ?? [],
-        ...(slot.ledger?.artStyleAnchor === undefined ? {} : { artStyleAnchor: slot.ledger.artStyleAnchor }),
-      }))
-    }
-    if (options.run !== true) return tasks
-    for (const task of tasks) await this.runGenerationTask(projectRef, task.id)
-    const after = await this.generationTasks(projectRef)
-    return tasks.map((task) => after.find((candidate) => candidate.id === task.id) ?? task)
+    return await this.#createOrderedTasks(projectRef, entry.path, {
+      slots: progress.slots.filter((slot) => !slot.filled).map((slot) => slot.slot),
+      model: options.model,
+      ...(options.prompts === undefined ? {} : { prompts: options.prompts }),
+      ...(options.run === undefined ? {} : { run: options.run }),
+    })
   }
 
   /**
    * **差分批量**(T16):把一个角色在板上还没出图的槽一次补齐。
    *
-   * 出图顺序由**派生事实**决定:谁的产物出现在别人的参考链里,谁先出 ——
-   * 主视觉先落地,表情/姿势差分才有锚可携(不是靠"槽名里带 base 的先出"这种猜)。
-   *
-   * 因此这里**建一个跑一个**(而不是先建齐再统一跑):差分建任务时主视觉已经在磁盘上,
-   * 链才是真的。`run:false` 只入队,链按**建任务那一刻**的磁盘状态解析 ——
-   * 主视觉还没出时,差分会被如实标成缺链(不假装)。
+   * 与"补全全部待填"共用同一条闸门(`#createOrderedTasks`):顺序由**派生事实**决定
+   * (谁的产物出现在别人的参考链里,谁先出),`run:true` 时建一个跑一个 ——
+   * 主视觉先落地,表情/姿势差分建任务时它已经在磁盘上,链才是真的。
+   * `run:false` 只入队:链按**建任务那一刻**的磁盘状态解析(主视觉还没出 → 如实标缺链)。
    */
   async createDifferentialTasks(
     projectRef: string,
-    options: { character: string; model: string; prompts?: Record<string, string>; run?: boolean },
+    options: { character: string; model: string; run?: boolean },
   ): Promise<GenerationTask[]> {
     const entry = await this.#resolve(projectRef)
     await this.#assertPresent(entry)
     // 三道门先过(没渠道 / 模型不在目录 / 角色不在登记簿),**一个槽都不缺也要拦** ——
     // "看着跑完了其实什么都没做"是这套里最坏的一种失败。
     this.#requireModel(options.model)
-    const [characters, ledger] = await Promise.all([readCharacters(entry.path), readSlots(entry.path)])
+    const ledger = await readSlots(entry.path)
+    const characters = await readCharacters(entry.path)
     if (!characters.some((character) => character.id === options.character)) {
       throw new GalfreeError('unknown-character', `角色登记簿里没有「${options.character}」:先把角色登记上,参考链才有家`, {
         known: characters.map((character) => character.id),
@@ -1131,25 +1126,45 @@ export class ProjectService {
 
     const owned = new Set(ledger.filter((slot) => slot.requiresCharacters.includes(options.character)).map((slot) => slot.slot))
     const progress = await this.progress(projectRef)
-    const missing = progress.slots.filter((slot) => owned.has(slot.slot) && !slot.filled).map((slot) => slot.slot)
+    return await this.#createOrderedTasks(projectRef, entry.path, {
+      slots: progress.slots.filter((slot) => owned.has(slot.slot) && !slot.filled).map((slot) => slot.slot),
+      model: options.model,
+      // 差分批量**默认就跑**:这条回路的全部意义在于"主视觉先出、差分才有锚",
+      // 只入队的话链要等人再点一次才生效。
+      run: options.run ?? true,
+    })
+  }
 
-    const requiresOf = (slot: string): string[] =>
-      ledger.find((candidate) => candidate.slot === slot)?.requiresCharacters ?? [options.character]
+  /**
+   * 两个批量动作共用的闸门:**排序 → 建一个跑一个**。
+   *
+   * 排序 = 按"谁的产物出现在别人的参考链里"(主视觉 → 差分),依据是派生事实,
+   * 不是槽名启发式。`run:true` 时才逐个跑 —— 那正是链能生效的原因(见上面两处注释)。
+   */
+  async #createOrderedTasks(
+    projectRef: string,
+    root: string,
+    input: { slots: string[]; model: string; prompts?: Record<string, string>; run?: boolean },
+  ): Promise<GenerationTask[]> {
+    if (input.slots.length === 0) return []
+    const [characters, ledger] = await Promise.all([readCharacters(root), readSlots(root)])
+    const requiresOf = (slot: string): string[] => ledger.find((candidate) => candidate.slot === slot)?.requiresCharacters ?? []
     const chains = new Map<string, ReferenceChainView>()
-    for (const slot of missing) chains.set(slot, await this.#resolveChain(entry.path, slot, requiresOf(slot), characters))
+    for (const slot of input.slots) chains.set(slot, await this.#resolveChain(root, slot, requiresOf(slot), characters))
     const ordered = sortSlotsByReference({
-      slots: missing,
+      slots: input.slots,
       referencesOf: (slot) => (chains.get(slot)?.references ?? []).map((reference) => reference.path),
     })
 
     const tasks: GenerationTask[] = []
     for (const slot of ordered) {
-      const prompt = options.prompts?.[slot] ?? ledger.find((candidate) => candidate.slot === slot)?.prompt ?? `${slot} 的素材`
+      const record = ledger.find((candidate) => candidate.slot === slot)
+      const prompt = input.prompts?.[slot] ?? record?.prompt ?? ''
       tasks.push(await this.createGenerationTask(projectRef, {
         slot,
-        model: options.model,
+        model: input.model,
         prompt: prompt === '' ? `${slot} 的素材` : prompt,
-        run: options.run ?? true,
+        run: input.run ?? false,
       }))
     }
     return tasks
@@ -1215,15 +1230,17 @@ export class ProjectService {
         if (note === '') {
           throw new GalfreeError('empty-note', '拒收注记是空的:要么不给(没有理由就不记),要么给一句能用的')
         }
-        if (note.length > MAX_FIELD_CHARS) {
-          throw new GalfreeError('note-too-long', `拒收注记太长(${note.length} > ${MAX_FIELD_CHARS} 字):这里写制作理由,不写剧本`)
+        if (note.length > MAX_REJECTION_NOTE_CHARS) {
+          throw new GalfreeError('note-too-long', `拒收注记太长(${note.length} > ${MAX_REJECTION_NOTE_CHARS} 字):这里写制作理由,不写剧本`)
         }
         const rejected = task.attempts.at(-1)
         next.rejections = [...(task.rejections ?? []), {
           attempt: rejected?.n ?? 0,
           ...(rejected?.fingerprint === undefined ? {} : { fingerprint: rejected.fingerprint }),
           note,
-          via: options.via ?? 'agent',
+          // 拒收注记**本质上是人的判断**;agent 只是转述,转述时必须显式标 `via:'agent'`。
+          // 默认朝"人"这一侧:忘了标也不会把人的话记成机器的话。
+          via: options.via ?? 'human',
           at,
         }]
       }

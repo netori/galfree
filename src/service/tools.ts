@@ -191,16 +191,19 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
             referenceImages: task.referenceImages.map((reference) => reference.path),
             degradation: task.degradation ?? null,
             lastError: task.lastError ?? null,
-            attempts: task.attempts.map((attempt) => ({
-              n: attempt.n,
-              outcome: attempt.outcome,
-              fingerprint: attempt.fingerprint ?? null,
-              replacedFingerprint: attempt.replacedFingerprint ?? null,
-              error: attempt.error ?? null,
-              // 这一版被谁打回过、为什么(空 = 没人打回过)。
-              rejection: (task.rejections ?? []).find((entry) => entry.attempt === attempt.n)?.note ?? null,
-              at: attempt.finishedAt,
-            })),
+            attempts: task.attempts.map((attempt) => {
+              const rejection = (task.rejections ?? []).find((entry) => entry.attempt === attempt.n)
+              return {
+                n: attempt.n,
+                outcome: attempt.outcome,
+                fingerprint: attempt.fingerprint ?? null,
+                replacedFingerprint: attempt.replacedFingerprint ?? null,
+                error: attempt.error ?? null,
+                // 这一版被谁打回过、为什么(谁说的也是历史的一部分)。
+                rejection: rejection === undefined ? null : { note: rejection.note, via: rejection.via, at: rejection.at },
+                at: attempt.finishedAt,
+              }
+            }),
             rejections: (task.rejections ?? []).map((entry) => ({ attempt: entry.attempt, note: entry.note, via: entry.via, at: entry.at })),
           })),
         }, null, 2)
@@ -307,13 +310,16 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
           state: task.state,
           prompt: task.prompt,
           attempts: task.attempts.length,
-          history: task.attempts.map((attempt) => ({
-            n: attempt.n,
-            outcome: attempt.outcome,
-            replaced: attempt.replacedFingerprint ?? null,
-            error: attempt.error ?? null,
-            rejection: (task.rejections ?? []).find((entry) => entry.attempt === attempt.n)?.note ?? null,
-          })),
+          history: task.attempts.map((attempt) => {
+            const rejection = (task.rejections ?? []).find((entry) => entry.attempt === attempt.n)
+            return {
+              n: attempt.n,
+              outcome: attempt.outcome,
+              replaced: attempt.replacedFingerprint ?? null,
+              error: attempt.error ?? null,
+              rejection: rejection === undefined ? null : { note: rejection.note, via: rejection.via, at: rejection.at },
+            }
+          }),
           lastError: task.lastError ?? null,
         }, null, 2)
       } catch (error) {
@@ -415,12 +421,26 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
       '读参考链与槽位对比视图(T16):每个角色的差分网格 —— 哪一格是**主视觉**',
       '(登记簿的参考链指到的那一格)、链上每张参考此刻在不在磁盘上、以及每一格历史上',
       '出过哪几版、哪一版被人打回、理由是什么(拒收注记)。',
-      '用来回答"这张差分是拿谁当锚生成的""链断在哪一张"。改链请让**人**在工作台的',
-      '角色视图里改(那是制作设定),本工具只读。',
+      '用来回答"这张差分是拿谁当锚生成的""链断在哪一张"。',
+      '**可以写链**:给了 `references` 就把这个角色的参考链整条换掉 —— 刚出好主视觉时,',
+      '把它的路径写进链,之后这个角色的差分才会自动携链。这是**设定改动**(写登记簿),',
+      '不是主观认可(审读戳仍然只能由人盖)。',
     ].join(' '),
     parameters: {
       project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
-      character: { type: 'string', description: '只看一个角色(省略 = 全部)' },
+      character: { type: 'string', description: '只看/只改一个角色(省略 = 全部只读)' },
+      references: {
+        type: 'array',
+        description: '要写进链的参考图(给 `character` 才有效;省略 = 只读)。每项 {path, note?};path 是项目内相对路径',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            path: { type: 'string', required: true, description: '项目内相对路径,如 game/images/xiao_tang-base.png' },
+            note: { type: 'string', description: '为什么挑它(制作备注)' },
+          },
+        },
+      },
     },
     output: {
       schema: { type: 'string' },
@@ -430,11 +450,30 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
       const active = await resolveProject(service, args.project)
       if (active === null) return '没有激活项目。'
       try {
+        const character = args.character ?? ''
+        const references = Array.isArray(args.references) ? args.references : null
+        if (references !== null) {
+          if (character === '') return '写参考链需要 `character`(要改哪个角色的链)。'
+          if (references.length === 0) return '写参考链至少要给一条 `{path}`;想清空就说清楚(本项目不支持空链写入)。'
+          const [record] = (await service.characters(active)).filter((candidate) => candidate.id === character)
+          if (record === undefined) {
+            return `登记簿里没有角色「${character}」:先用登记簿把它登记上(galfree_project_status 能看到登记簿里的 id)。`
+          }
+          await service.upsertCharacter(active, {
+            ...record,
+            references: references.map((entry) => {
+              const reference = (entry ?? {}) as { path?: unknown; note?: unknown }
+              return {
+                path: String(reference.path ?? ''),
+                ...(typeof reference.note === 'string' && reference.note !== '' ? { note: reference.note } : {}),
+              }
+            }),
+          })
+        }
         const grid = await service.differentialGrid(active)
-        const rows = args.character !== undefined && args.character !== ''
-          ? grid.characters.filter((entry) => entry.character === args.character)
-          : grid.characters
+        const rows = character !== '' ? grid.characters.filter((entry) => entry.character === character) : grid.characters
         return JSON.stringify({
+          wrote: references === null ? null : character,
           characters: rows.map((row) => ({
             character: row.character,
             name: row.name,
@@ -451,12 +490,13 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
               stamp: cell.stamp,
               awaitingReview: cell.awaitingReview,
               history: cell.history.map((entry) => ({
+                task: entry.taskId,
                 n: entry.n,
                 outcome: entry.outcome,
                 fingerprint: entry.fingerprint ?? null,
                 replacedFingerprint: entry.replacedFingerprint ?? null,
                 error: entry.error ?? null,
-                rejected: entry.rejection?.note ?? null,
+                rejected: entry.rejection === undefined ? null : { note: entry.rejection.note, via: entry.rejection.via },
               })),
               degradation: cell.degradation?.code ?? null,
               lastError: cell.lastError ?? null,
@@ -464,7 +504,7 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
           })),
         }, null, 2)
       } catch (error) {
-        return `读不到参考链:${describe(error)}`
+        return `参考链操作没执行:${describe(error)}`
       }
     },
   })))

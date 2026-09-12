@@ -280,8 +280,27 @@ describe('参考链一致性回路(T16)', () => {
     expect(after).toBe(before)
   })
 
-  it('AC1 差分批量先过渠道与模型两道门(没配渠道时如实拒绝,不产假任务)', async () => {
+  it('AC1 "补全全部待填"走同一条闸门:被引用者先出,差分建任务时链已经就绪(不报缺链)', async () => {
+    await registerChain([{ path: slotAssetPath('xiao_tang base'), slot: 'xiao_tang base', note: '主视觉' }])
     await ledgerFor()
+
+    const tasks = await service.createTasksForMissingSlots('chain', { model: 'full', run: true })
+    const order = tasks.map((task) => task.slot)
+    // 被引用者先出 —— 主视觉排在它的两个差分之前。
+    expect(order.indexOf('xiao_tang base')).toBeLessThan(order.indexOf('xiao_tang smile'))
+    expect(order.indexOf('xiao_tang base')).toBeLessThan(order.indexOf('xiao_tang angry'))
+
+    // 差分的链是**真的**:主视觉那一张先跑完了,所以差分没有"缺链"降级。
+    // (先建齐再统一跑的实现会在这里留下 reference-missing —— 那正是这条用例守的东西。)
+    for (const slot of ['xiao_tang smile', 'xiao_tang angry']) {
+      const task = tasks.find((candidate) => candidate.slot === slot)!
+      expect(task.state).toBe('awaiting-review')
+      expect(task.degradation).toBeUndefined()
+      expect(task.referenceImages.map((reference) => reference.path)).toEqual([slotAssetPath('xiao_tang base')])
+    }
+  })
+
+  it('AC1 差分批量先过渠道与模型两道门(没配渠道时如实拒绝,不产假任务)', async () => {    await ledgerFor()
     await registerChain([{ path: slotAssetPath('xiao_tang base') }])
     const bare = createProjectService({
       dataDir,
@@ -342,11 +361,21 @@ describe('参考链一致性回路(T16)', () => {
     await ledgerFor()
     const task = await service.createGenerationTask('chain', { slot: 'xiao_tang smile', model: 'full', prompt: '微笑', run: true })
 
+    // 三种"空":纯空白、空串、超长 —— 都是调用方的错,如实拒绝(不要静默记一条没理由的打回)。
     await expect(service.retryGenerationTask('chain', task.id, { run: false, note: '   ' }))
+      .rejects.toMatchObject({ code: 'empty-note' })
+    await expect(service.retryGenerationTask('chain', task.id, { run: false, note: '' }))
       .rejects.toMatchObject({ code: 'empty-note' })
     await expect(service.retryGenerationTask('chain', task.id, { run: false, note: '很'.repeat(601) }))
       .rejects.toMatchObject({ code: 'note-too-long' })
     // 被拒的调用什么都没改:历史还是干干净净。
     expect((await service.generationTask('chain', task.id))?.rejections).toEqual([])
+  })
+
+  it('AC3 不写 via 时默认记成**人**的话(人的判断是默认,agent 转述要显式标)', async () => {
+    await ledgerFor()
+    const task = await service.createGenerationTask('chain', { slot: 'xiao_tang smile', model: 'full', prompt: '微笑', run: true })
+    const rerolled = await service.retryGenerationTask('chain', task.id, { run: false, note: '光照太平' })
+    expect(rerolled.rejections[0]?.via).toBe('human')
   })
 })

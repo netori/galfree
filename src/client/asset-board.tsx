@@ -453,8 +453,8 @@ function CharacterView({ characters, api, busy, onBusy, onError, onChanged }: {
                   {busy ? <Spinner /> : '保存参考链'}
                 </button>
                 <span className={s.formHint}>
-                  链上的图是**差分的锚**:出这个角色的表情/姿势差分时会自动带上它(远端收到的是图片本体,不是项目内路径)。
-                  只登记**已经出好**的那张;引用了不存在的文件会在板上如实标"缺图"。
+                  链上的图是「差分的锚」:出这个角色的表情/姿势差分时会自动带上它(远端收到的是图片本体,不是项目内路径)。
+                  只登记「已经出好」的那张;引用了不存在的文件会在板上如实标「缺图」。
                 </span>
               </div>
             </div>

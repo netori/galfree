@@ -337,6 +337,8 @@ export interface DifferentialCellView {
   /** 这一格最近一个任务的 id(重 roll 从它走;没有任务 = 缺省)。 */
   taskId?: string
   history: Array<{
+    /** 这次尝试属于哪个任务(同一格可能先后有过多个任务)。 */
+    taskId: string
     n: number
     outcome: 'ok' | 'failed'
     at: string

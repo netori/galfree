@@ -208,6 +208,12 @@ export interface GenerationTaskDocument {
 export const IMAGE_TASKS_FILE = '.studio/image-tasks.json'
 export const IMAGE_TASKS_SCHEMA = 1
 
+/**
+ * 拒收注记的长度上限(与设定卡字段同一把尺子,但**单独取名**:
+ * "账本字段上限"与"设定卡字段上限"是两件事,改一个不该动另一个)。
+ */
+export const MAX_REJECTION_NOTE_CHARS = 600
+
 /** 新建任务的输入。 */
 export interface CreateGenerationTaskInput {
   /** 目标槽(必须在 `.rpy` 里被引用,推导板上的槽清单里有它)。 */
@@ -540,13 +546,10 @@ export function referenceField(referenceImages: Array<{ path: string; dataUrl?: 
   return referenceImages.map((reference) => ({ image_url: reference.dataUrl ?? reference.path }))
 }
 
-/** 路径 → MIME(判不出按 png;与 `imageFormatOf` 同一套后缀口径)。 */
+/** 路径 → MIME(判不出按 png;**建在 `imageFormatOf` 之上**,后缀口径只有一处)。 */
 export function mimeOfPath(path: string): string {
-  const ext = /\.([a-z0-9]+)$/i.exec(path)?.[1]?.toLowerCase()
-  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg'
-  if (ext === 'webp') return 'image/webp'
-  if (ext === 'gif') return 'image/gif'
-  return 'image/png'
+  const format = imageFormatOf('', path)
+  return format === 'jpg' ? 'image/jpeg' : `image/${format}`
 }
 
 /** 字节 → data URL(内联参考图用)。 */

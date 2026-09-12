@@ -472,7 +472,8 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
               ...(typeof reference.note === 'string' && reference.note !== '' ? { note: reference.note } : {}),
             }
           })
-        : [],      ...(typeof body.note === 'string' && body.note !== '' ? { note: body.note } : {}),
+        : [],
+      ...(typeof body.note === 'string' && body.note !== '' ? { note: body.note } : {}),
     })
     writeJson(res, 200, { ok: true })
     return
@@ -694,6 +695,7 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
   }
 
   // **差分批量**(T16):把一个角色的差分补齐 —— 主视觉先出,差分自动携登记簿的参考链。
+  // 提示词一律取槽账本里的(`.studio/slots.json` 是它的家),这里不开第二个入口。
   if (method === 'POST' && path === '/tasks/differentials') {
     const body = await readJsonBody(req)
     const active = await service.getActiveProject()
@@ -701,7 +703,6 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     const tasks = await service.createDifferentialTasks(active.id, {
       character: String(body.character ?? ''),
       model: String(body.model ?? ''),
-      ...(body.prompts !== undefined && typeof body.prompts === 'object' ? { prompts: body.prompts as Record<string, string> } : {}),
       ...(typeof body.run === 'boolean' ? { run: body.run } : {}),
     })
     writeJson(res, 201, { tasks })
@@ -853,7 +854,7 @@ export function makeRoutes(deps: RouteDeps): GalfreeRoute[] {
         } else if (error instanceof GalfreeError) {
           // 404 = 目标不存在(含"项目目录已被挪走"),与 5xx 的"服务端故障"严格区分。
           const status = error.code === 'no-active-project' || error.code === 'unknown-project' || error.code === 'unknown-scene' || error.code === 'project-missing' || error.code === 'unknown-task' ? 404
-            : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' || error.code === 'character-invalid' || error.code === 'slot-invalid' || error.code === 'bible-invalid' || error.code === 'invalid-slot' || error.code === 'unknown-slot' || error.code === 'unknown-image-model' ? 400
+            : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' || error.code === 'character-invalid' || error.code === 'slot-invalid' || error.code === 'bible-invalid' || error.code === 'invalid-slot' || error.code === 'unknown-slot' || error.code === 'unknown-image-model' || error.code === 'unknown-character' || error.code === 'empty-prompt' || error.code === 'empty-note' || error.code === 'note-too-long' ? 400
             : error.code === 'body-too-large' ? 413
             : error.code === 'picker-unsupported' ? 501
             : error.code === 'picker-timeout' ? 504

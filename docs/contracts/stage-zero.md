@@ -603,14 +603,20 @@ agent 的 `galfree_reroll_image {prompt}` 走的是同一个入口("把小棠的
 
 ### 差分批量:顺序由引用关系派生
 
-`createDifferentialTasks(ref,{character,model,run?})` —— 把一个角色还没出图的槽一次补齐:
+`createDifferentialTasks(ref,{character,model,run?})` —— 把一个角色还没出图的槽一次补齐。
+它与 **"补全全部待填"共用同一条闸门**(`#createOrderedTasks`),规矩因此是同一套:
 
 | 规矩 | 为什么 |
 |---|---|
 | 出图顺序 = **被引用者先出**(`sortSlotsByReference`) | 主视觉先落地,差分才有锚。依据是"谁的产物出现在别人的链里",**不是**槽名里带 `base` |
-| **建一个跑一个**(不是先建齐再统一跑) | 差分建任务时主视觉已在磁盘上,链才是真的 |
+| `run:true` 时**建一个跑一个**(不是先建齐再统一跑) | 差分建任务时主视觉已在磁盘上,链才是真的。先建齐的话,差分建任务那一刻主视觉还不存在,会被如实标成 `reference-missing` —— 诚实但回路没闭合 |
 | 三道门先过(渠道 / 模型 / 角色在登记簿),**一个槽都不缺也要拦** | "看着跑完了其实什么都没做"是最坏的一种失败 |
 | `run:false` 只入队 | 链按**建任务那一刻**的磁盘状态解析,主视觉没出时差分会被如实标成缺链(不假装) |
+
+`createDifferentialTasks` 默认 `run:true`(这条回路的全部意义就是顺序执行);
+`createTasksForMissingSlots` 保持 T15 的默认(只入队,由 `/tasks/run` 推进)。
+**提示词的家是槽账本**(`.studio/slots.json`),所以两条批量都不接受 `prompts` 覆盖 ——
+要单独改词用 `galfree_generate_image` / 「生成此槽」,不开第二个入口。
 
 ### 降级:改了参数就必须说(纪律不变,多一条来源)
 
@@ -628,9 +634,13 @@ agent 的 `galfree_reroll_image {prompt}` 走的是同一个入口("把小棠的
 
 - `retryGenerationTask(ref,id,{note,via})` 追加一条,并指向**被拒的那一版**(尝试号 + 产物指纹)
   —— 不是一句无主的话;
-- 空注记(`'   '`)→ `empty-note`;超长(> 600 字)→ `note-too-long`。**要么说清为什么,要么别记**;
-- `via` 是历史的一部分:工作台记 `human`,agent 替人转述记 `agent`(人的话别记成 agent 的话);
-- 注记是**制作信息**(脸太圆/眼神太凶),长度上限与设定卡同一把尺子 —— 不许把剧本抄进来。
+- 空注记(`'   '` 或 `''`)→ `empty-note`;超长(> `MAX_REJECTION_NOTE_CHARS` = 600 字)→
+  `note-too-long`。**要么说清为什么,要么别记**(静默记一条没理由的"打回"对下一个看历史的人毫无价值);
+  这两个码与 `unknown-character` 一起归 400(请求体不合法),不是 500;
+- `via` 是历史的一部分:工作台记 `human`,agent 替人转述记 `agent`(人的话别记成 agent 的话)。
+  缺省方向是 **`human`** —— 拒收注记本质上是人的判断,忘了标也不会把人的话记成机器的话;
+- 注记是**制作信息**(脸太圆/眼神太凶),长度上限与设定卡字段同一把尺子但**单独取名**
+  (`MAX_REJECTION_NOTE_CHARS`),不许把剧本抄进来。
 
 ### 对比视图:渲染自登记簿 + 槽位历史
 
@@ -639,13 +649,15 @@ agent 的 `galfree_reroll_image {prompt}` 走的是同一个入口("把小棠的
 ```
 DifferentialRow = { character, name, styleAnchor?, references[{path,exists,slot?,note?}], main, cells[] }
 DifferentialCell = { slot, assetPath, role:'main'|'variant', filled, stamp, awaitingReview,
-                     fingerprint, taskId?, history[{n,outcome,fingerprint?,replacedFingerprint?,error?,rejection?}],
+                     fingerprint, taskId?, history[{taskId,n,outcome,fingerprint?,replacedFingerprint?,error?,rejection?}],
                      degradation?, lastError? }
 ```
 
 - `role:'main'` = **登记簿的参考链指到了这一格的产物**(登记簿指认,不是槽名启发式),
   `main` = 那一格的槽名(没指认出来 = `null`,面板显示"没有主视觉");
-- `history` = 该槽**最近一个任务**的尝试史,拒收注记按尝试号对回对应那一版;
+- `history` = 该槽**全部任务**的尝试史(按任务创建时间老→新接起来,每条带着 `taskId`)——
+  不是"最近一个任务":同一格可能先后建过多个任务,只取最近一个会让旧任务上的**拒收注记
+  从视图里消失**,而那恰好是 AC3 要能回读的东西。`cell.taskId` 才是"重 roll 从哪个任务走";
 - 版本谱系靠 `replacedFingerprint` 串起来:当前版与"被它替换掉的那一版"能对上号,
   旧内容留在写批前的快照里(`snapshotHistory` 可回看/回滚)。
 
@@ -654,15 +666,19 @@ DifferentialCell = { slot, assetPath, role:'main'|'variant', filled, stamp, awai
 | 路由 | 语义 |
 |---|---|
 | `GET /reference-chain?slot=` | 链处境:就绪/缺图/自引用(纯读);缺 slot = 400 |
-| `POST /tasks/differentials` `{character,model,prompts?,run?}` | 差分批量 → 201 `{tasks}` |
+| `POST /tasks/differentials` `{character,model,run?}` | 差分批量 → 201 `{tasks}`(提示词取槽账本) |
 | `GET /differentials` | 同角色差分网格(纯读) |
 | `GET /asset?path=` | 素材**字节**(只读):`content-type` 按后缀,`ETag` = 内容指纹,`cache-control: no-cache`(重 roll 换图后旧图不许赖着)、缺文件 404 + `asset-missing` |
 
 `POST /tasks/retry` 多认一个 `note`(面板带 = `via:'human'`)。
 
 agent 工具面新增两个、扩了两个:**`galfree_character_art`**(差分批量)、
-**`galfree_reference_chain`**(链 + 网格,只读);`galfree_reroll_image` 多一个 `note`,
-`galfree_art_queue` 多回 `rejections` 与每次尝试的 `rejection`。
+**`galfree_reference_chain`**(链 + 网格;`references` 给了就**写链** —— 那是设定改动,
+与登记角色同级,不是主观认可)、`galfree_reroll_image` 多一个 `note`,
+`galfree_art_queue` 多回 `rejections` 与每次尝试的 `rejection{note,via,at}`。
+
+写链走 `upsertCharacter`(origin `agent`、自动快照),整条替换;**不给空链入口**
+(要清空得说清楚,免得"我改了一条"变成"链没了")。
 
 ### 真上游验证(慢带,默认不跑)
 

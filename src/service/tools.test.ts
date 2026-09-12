@@ -92,6 +92,9 @@ describe('agent 工具(T10)', () => {
     expect(batch.description).toContain('参考链')
     const chain = tools.find((tool) => tool.name === 'galfree_reference_chain')!
     expect(chain.parameters.properties.character?.type).toBe('string')
+    // 链写入口(T16):`references` 是可选的数组参数 —— 不给就只读。
+    expect(chain.parameters.properties.references?.type).toBe('array')
+    expect(chain.description).toContain('设定改动')
 
     const generate = tools.find((tool) => tool.name === 'galfree_generate_scene')!
     // 模型看到的参数契约:两个必填,其余可选。
