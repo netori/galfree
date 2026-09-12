@@ -159,8 +159,9 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
     name: 'galfree_art_queue',
     description: [
       '读 GALFree 的素材出图队列:每个任务的目标槽、状态(排队/执行/待复审/失败)、提示词、',
-      '降级说明、以及**完整重试历史**(含被替换掉的那一版的指纹)。',
-      '与工作台素材板**同源**(同一份任务账本),用来回答"哪些图还没出/出成什么样了"。',
+      '降级说明、**完整重试历史**(含被替换掉的那一版的指纹)、以及**拒收注记**',
+      '(人对某一版的否决理由,含是谁记的)。',
+      '与工作台素材板**同源**(同一份任务账本),用来回答"哪些图还没出/出成什么样了/这张为什么被打回"。',
     ].join(' '),
     parameters: {
       project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
@@ -187,6 +188,7 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
             model: task.model,
             prompt: task.prompt,
             outputPath: task.outputPath,
+            referenceImages: task.referenceImages.map((reference) => reference.path),
             degradation: task.degradation ?? null,
             lastError: task.lastError ?? null,
             attempts: task.attempts.map((attempt) => ({
@@ -195,8 +197,11 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
               fingerprint: attempt.fingerprint ?? null,
               replacedFingerprint: attempt.replacedFingerprint ?? null,
               error: attempt.error ?? null,
+              // 这一版被谁打回过、为什么(空 = 没人打回过)。
+              rejection: (task.rejections ?? []).find((entry) => entry.attempt === attempt.n)?.note ?? null,
               at: attempt.finishedAt,
             })),
+            rejections: (task.rejections ?? []).map((entry) => ({ attempt: entry.attempt, note: entry.note, via: entry.via, at: entry.at })),
           })),
         }, null, 2)
       } catch (error) {
@@ -261,12 +266,16 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
       '重 roll 一个已存在的出图任务(不满意就再来一次)。**保留完整重试历史** ——',
       '这一次会记下"被它覆盖掉的那一版"的指纹,所以两版可以对比、旧版能从快照找回。',
       '可只改词不改槽:`prompt` 给了就用新词(比如"把小棠的怒颜重 roll 得更夸张")。',
+      '**拒收注记**:人说了"这张为什么不行"(脸太圆/眼神太凶)就把它放进 `note` ——',
+      '注记只追加、指向被拒的那一版,之后人和 agent 读 `galfree_art_queue` 都看得到。',
+      '人没给理由就**不要**编一个:没理由就不记(note 省略)。',
     ].join(' '),
     parameters: {
       project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
       task_id: { type: 'string', description: '要重 roll 的任务 id(看 galfree_art_queue)' },
       slot: { type: 'string', description: '或者按槽名找最近一个任务(与 task_id 二选一)' },
       prompt: { type: 'string', description: '新的制作指令(省略 = 沿用原词)' },
+      note: { type: 'string', description: '**人的**拒收理由原话(省略 = 没给理由,不编)' },
       run: { type: 'boolean', description: '是否立刻执行(默认 true)' },
     },
     output: {
@@ -287,6 +296,8 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
         }
         const task = await service.retryGenerationTask(active, id, {
           ...(args.prompt === undefined || args.prompt === '' ? {} : { prompt: args.prompt }),
+          // 注记是**替人转述**(`via:'agent'`),历史里能分清谁说的。
+          ...(args.note === undefined || args.note.trim() === '' ? {} : { note: args.note, via: 'agent' as const }),
           run: args.run ?? true,
         })
         return JSON.stringify({
@@ -296,7 +307,13 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
           state: task.state,
           prompt: task.prompt,
           attempts: task.attempts.length,
-          history: task.attempts.map((attempt) => ({ n: attempt.n, outcome: attempt.outcome, replaced: attempt.replacedFingerprint ?? null, error: attempt.error ?? null })),
+          history: task.attempts.map((attempt) => ({
+            n: attempt.n,
+            outcome: attempt.outcome,
+            replaced: attempt.replacedFingerprint ?? null,
+            error: attempt.error ?? null,
+            rejection: (task.rejections ?? []).find((entry) => entry.attempt === attempt.n)?.note ?? null,
+          })),
           lastError: task.lastError ?? null,
         }, null, 2)
       } catch (error) {
@@ -335,6 +352,119 @@ export function registerGalfreeTools(ctx: Context & { tools: { register: (tool: 
         }, null, 2)
       } catch (error) {
         return `补全未执行:${describe(error)}`
+      }
+    },
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_character_art',
+    description: [
+      '把一个**角色**还没出的差分一次补齐(T16 的差分批量):主视觉先出,表情/姿势差分',
+      '**自动携登记簿的参考链**(跨批次"同一张脸"靠它)。顺序由引用关系派生 ——',
+      '谁的产物出现在别人的参考链里,谁先出;不是按槽名猜。',
+      '链上有图还不存在时,该次任务会**如实降级并列出丢了哪张**(降级不是失败)。',
+      '只想补全所有角色用 `galfree_fill_missing_art`;只想出一张用 `galfree_generate_image`。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      character: { type: 'string', required: true, description: '登记簿里的角色 id(如 "xiao_tang")' },
+      model: { type: 'string', required: true, description: '渠道里的模型 id(先看 galfree_image_channel)' },
+      run: { type: 'boolean', description: '是否立刻执行(默认 true)' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目。'
+      try {
+        const tasks = await service.createDifferentialTasks(active, {
+          character: args.character,
+          model: args.model,
+          run: args.run ?? true,
+        })
+        const grid = await service.differentialGrid(active)
+        const row = grid.characters.find((entry) => entry.character === args.character)
+        return JSON.stringify({
+          character: args.character,
+          created: tasks.length,
+          main: row?.main ?? null,
+          references: (row?.references ?? []).map((reference) => ({ path: reference.path, exists: reference.exists })),
+          tasks: tasks.map((task) => ({
+            id: task.id,
+            slot: task.slot,
+            state: task.state,
+            referenceImages: task.referenceImages.map((reference) => reference.path),
+            degradation: task.degradation?.code ?? null,
+            lastError: task.lastError ?? null,
+          })),
+          remaining: (row?.cells ?? []).filter((cell) => !cell.filled).map((cell) => cell.slot),
+          awaitingReview: (row?.cells ?? []).filter((cell) => cell.awaitingReview).map((cell) => cell.slot),
+        }, null, 2)
+      } catch (error) {
+        // 接缝的拒绝是可执行的指令(角色没登记 / 模型不在目录),原样交回。
+        return `差分批量未执行:${describe(error)}`
+      }
+    },
+  })))
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_reference_chain',
+    description: [
+      '读参考链与槽位对比视图(T16):每个角色的差分网格 —— 哪一格是**主视觉**',
+      '(登记簿的参考链指到的那一格)、链上每张参考此刻在不在磁盘上、以及每一格历史上',
+      '出过哪几版、哪一版被人打回、理由是什么(拒收注记)。',
+      '用来回答"这张差分是拿谁当锚生成的""链断在哪一张"。改链请让**人**在工作台的',
+      '角色视图里改(那是制作设定),本工具只读。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      character: { type: 'string', description: '只看一个角色(省略 = 全部)' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目。'
+      try {
+        const grid = await service.differentialGrid(active)
+        const rows = args.character !== undefined && args.character !== ''
+          ? grid.characters.filter((entry) => entry.character === args.character)
+          : grid.characters
+        return JSON.stringify({
+          characters: rows.map((row) => ({
+            character: row.character,
+            name: row.name,
+            main: row.main,
+            references: row.references.map((reference) => ({
+              path: reference.path,
+              exists: reference.exists,
+              note: reference.note ?? null,
+            })),
+            cells: row.cells.map((cell) => ({
+              slot: cell.slot,
+              role: cell.role,
+              filled: cell.filled,
+              stamp: cell.stamp,
+              awaitingReview: cell.awaitingReview,
+              history: cell.history.map((entry) => ({
+                n: entry.n,
+                outcome: entry.outcome,
+                fingerprint: entry.fingerprint ?? null,
+                replacedFingerprint: entry.replacedFingerprint ?? null,
+                error: entry.error ?? null,
+                rejected: entry.rejection?.note ?? null,
+              })),
+              degradation: cell.degradation?.code ?? null,
+              lastError: cell.lastError ?? null,
+            })),
+          })),
+        }, null, 2)
+      } catch (error) {
+        return `读不到参考链:${describe(error)}`
       }
     },
   })))

@@ -133,11 +133,30 @@ export interface GenerationAttempt {
 }
 
 /**
+ * **拒收注记**(T16):人对某一版的否决理由。
+ *
+ * 它是**制作信息**(为什么这张不行:脸太圆 / 眼神太凶),不是叙述内容 ——
+ * 长度有上限,超了会被挡在写入之前。注记只追加、永不改写,并指向**被拒的那一版**
+ * (尝试号 + 产物指纹),所以"这张为什么被打回"在历史里对得上号,而不是一句无主的话。
+ */
+export interface GenerationRejection {
+  /** 被拒的那一次尝试(第几次)。 */
+  attempt: number
+  /** 被拒那一版的产物指纹(可从快照历史精确找回那一版)。 */
+  fingerprint?: string
+  /** 人的原话(拒收理由)。 */
+  note: string
+  /** 谁记的:工作台上的人,还是替人转述的 agent。 */
+  via: 'human' | 'agent'
+  at: string
+}
+
+/**
  * 降级说明:**给出去的参数为什么与要求的不一样**。
  * 有它 = 请求被改了;没有 = 请求原样发出。不存在"改了但不说"的第三种。
  */
 export interface GenerationDegradation {
-  code: 'reference-chain-unsupported' | 'image-to-image-unsupported' | 'size-unsupported' | 'b64-unsupported'
+  code: 'reference-chain-unsupported' | 'image-to-image-unsupported' | 'size-unsupported' | 'b64-unsupported' | 'reference-missing'
   /** 面向人的一句话(中文;面板与 agent 直接显示)。 */
   message: string
   /** 被丢掉的参考图(给人确认"到底丢了什么")。 */
@@ -169,6 +188,11 @@ export interface GenerationTask {
   /** 被降级掉的事实(缺省 = 没降级)。 */
   degradation?: GenerationDegradation
   attempts: GenerationAttempt[]
+  /**
+   * **拒收注记**(T16,只追加):人对某一版的否决理由。
+   * 老账本里没有这个字段 —— 读的时候按空数组归一(`task.rejections ?? []`)。
+   */
+  rejections: GenerationRejection[]
   createdAt: string
   updatedAt: string
   /** 失败时的最后原因(与 attempts 末条一致,方便一眼看)。 */
@@ -289,8 +313,15 @@ export interface ImageAdapter {
     prompt: string
     size?: ImageSize
     quality?: string
-    /** 非空 = 走图生图端点(上游支持时才有值)。 */
-    referenceImages: Array<{ path: string }>
+    /**
+     * 非空 = 走图生图端点(上游支持时才有值)。
+     * `dataUrl` 给了就用它(**内联字节**),否则退回 `path`。
+     *
+     * 为什么要有 `dataUrl`:链上的参考图是**项目内的文件**,远端网关够不着一个
+     * 项目内相对路径;`image_url` 字段要的是可取的地址,于是发送前把字节内联进来。
+     * 账本里存的是路径(引用),不是图片内容 —— 铁律不变。
+     */
+    referenceImages: Array<{ path: string; dataUrl?: string }>
   }) => ImageRequestPlan
   /** 提交后的处理:同步适配器在这里就解码出字节;异步适配器只取 task id。 */
   onSubmit: (response: HttpResponse, model: ImageModelDescriptor) => SubmissionResult
@@ -320,9 +351,7 @@ const openAiCompatible: ImageAdapter = {
     if (size !== undefined && model.capabilities.aspectRatioParam) body.size = size
     if (quality !== undefined) body.quality = quality
     // 参考图链:模型支持时挂在 image 字段上(OpenAI 兼容的图生图口径)。
-    if (referenceImages.length > 0 && model.capabilities.imageToImage) {
-      body.image = referenceImages.map((reference) => ({ image_url: reference.path }))
-    }
+    if (referenceImages.length > 0 && model.capabilities.imageToImage) body.image = referenceField(referenceImages)
     return { request: { method: 'POST', url: `${base}${model.paths?.submit ?? '/images/generations'}`, headers, body }, adapter: 'openai-compatible' }
   },
 
@@ -385,9 +414,7 @@ const asyncTask: ImageAdapter = {
 
     const body: Record<string, unknown> = { model: model.id, prompt, n: 1 }
     if (size !== undefined && model.capabilities.aspectRatioParam) body.size = size
-    if (referenceImages.length > 0 && model.capabilities.imageToImage) {
-      body.image = referenceImages.map((reference) => ({ image_url: reference.path }))
-    }
+    if (referenceImages.length > 0 && model.capabilities.imageToImage) body.image = referenceField(referenceImages)
     return {
       request: { method: 'POST', url: `${base}${model.async?.submitPath ?? '/image/generations'}`, headers, body },
       adapter: 'async-task',
@@ -503,6 +530,30 @@ function summarize(text: string, limit = 300): string {
   return flat.length <= limit ? flat : `${flat.slice(0, limit)}…`
 }
 
+/**
+ * 参考图的线上形态:优先内联字节(`dataUrl`),退回路径。
+ *
+ * 退回路径是给"上游自己认项目内路径"这种自定义网关留的口子(以及既有调试用法);
+ * 常规远端网关只认可取的地址,所以生产路径上走的是内联。
+ */
+export function referenceField(referenceImages: Array<{ path: string; dataUrl?: string }>): Array<{ image_url: string }> {
+  return referenceImages.map((reference) => ({ image_url: reference.dataUrl ?? reference.path }))
+}
+
+/** 路径 → MIME(判不出按 png;与 `imageFormatOf` 同一套后缀口径)。 */
+export function mimeOfPath(path: string): string {
+  const ext = /\.([a-z0-9]+)$/i.exec(path)?.[1]?.toLowerCase()
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg'
+  if (ext === 'webp') return 'image/webp'
+  if (ext === 'gif') return 'image/gif'
+  return 'image/png'
+}
+
+/** 字节 → data URL(内联参考图用)。 */
+export function dataUrlOf(bytes: Uint8Array, path: string): string {
+  return `data:${mimeOfPath(path)};base64,${Buffer.from(bytes).toString('base64')}`
+}
+
 // ─── 降级(AC3:协议不合要如实说,不静默)────────────────────────────
 
 export interface DegradationResult {
@@ -519,36 +570,52 @@ export interface DegradationResult {
 /**
  * 按模型能力把"人要的参数"收敛成"上游能收的参数",并把每一次收敛都记下来。
  *
- * 三条规矩:
+ * 四条规矩(次序即优先级:"模型支不支持"是持久属性,先判;"文件在不在"是此刻的处境):
  *  - 参考图链不支持 → 丢参考图,**同时**说明(这是最容易让人误以为
  *    "跨批次同一张脸"生效的地方,不能含糊);
  *  - 图生图不支持但不带参考图 → 什么都不用说(文生图本来就是它的能力);
+ *  - **链上有图但文件还不存在** → 发不出去,丢掉并列出(`missingReferenceImages`,
+ *    T16 的"不假装链生效");模型支持参考链时它才是那条主要的说明;
  *  - 尺寸参数不支持 → 不发 size,并说明用了模型默认档。
  */
 export function degradeInput(
   model: ImageModelDescriptor,
-  input: { size?: ImageSize; quality?: string; referenceImages?: Array<{ path: string; note?: string }> },
+  input: {
+    size?: ImageSize
+    quality?: string
+    /** 这一次**要带**的参考图(含此刻还不存在的那些)。 */
+    referenceImages?: Array<{ path: string; note?: string }>
+    /** 其中此刻磁盘上还没有的那些(调用方读盘得出)。 */
+    missingReferenceImages?: Array<{ path: string; note?: string }>
+  },
 ): DegradationResult {
   const notes: string[] = []
   const dropped: Array<{ path: string; note?: string }> = []
-  const references = input.referenceImages ?? []
+  const requested = input.referenceImages ?? []
+  const absent = input.missingReferenceImages ?? []
+  const ready = requested.filter((reference) => !absent.some((missing) => missing.path === reference.path))
 
   let code: GenerationDegradation['code'] | undefined
   let message = ''
-  let keptReferences = references
-  if (references.length > 0 && !model.capabilities.referenceChain) {
+  let keptReferences: Array<{ path: string; note?: string }> = ready
+  if (requested.length > 0 && !model.capabilities.referenceChain) {
     code = 'reference-chain-unsupported'
     message = `模型 ${model.id} 不支持参考链(声明的能力:${capabilitySummary(model)});参考图已丢弃,本次按**文生图**发出`
-    dropped.push(...references)
+    dropped.push(...requested)
     notes.push('参考图链被丢弃:跨批次一致性这次只能靠 prompt 里的外观描述')
     keptReferences = []
-  } else if (references.length > 0 && !model.capabilities.imageToImage) {
+  } else if (requested.length > 0 && !model.capabilities.imageToImage) {
     // 声明了参考链却不能图生图 = 目录自相矛盾。如实说不一致,而不是挑一个默默用。
     code = 'image-to-image-unsupported'
     message = `模型 ${model.id} 的目录声明自相矛盾:说有参考链却不支持图生图;参考图已丢弃,本次按文生图发出`
-    dropped.push(...references)
+    dropped.push(...requested)
     notes.push('建议修正模型目录里的能力声明')
     keptReferences = []
+  } else if (absent.length > 0) {
+    code = 'reference-missing'
+    message = `参考链上有 ${absent.length} 张图此刻还不存在(登记簿里引用了,磁盘上没有);本次没带上它们`
+    dropped.push(...absent)
+    notes.push(`还不存在的参考图:${absent.map((reference) => reference.path).join('、')} —— 先把它出出来(或从登记簿的参考链里去掉),链才生效`)
   }
 
   let size = input.size
@@ -595,7 +662,8 @@ export function parseTasksDocument(text: string): GenerationTaskDocument {
   if (parsed.schemaVersion !== IMAGE_TASKS_SCHEMA || !Array.isArray(parsed.tasks)) {
     throw new Error(`${IMAGE_TASKS_FILE} 不是有效的任务账本(schemaVersion 应为 ${IMAGE_TASKS_SCHEMA})`)
   }
-  return { schemaVersion: IMAGE_TASKS_SCHEMA, tasks: parsed.tasks }
+  // 老账本没有 `rejections`(T16 才加):读的时候归一成空数组,不逼人去改历史文件。
+  return { schemaVersion: IMAGE_TASKS_SCHEMA, tasks: parsed.tasks.map((task) => ({ ...task, rejections: task.rejections ?? [] })) }
 }
 
 export function tasksDocument(document: GenerationTaskDocument): string {

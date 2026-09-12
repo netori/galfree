@@ -24,11 +24,13 @@ import type { DialectProblem } from './rpy/dialect.ts'
 import { computeProgress, sceneFingerprint, slotAssetPath, type ProgressSnapshot } from './progress.ts'
 import { readStamps, sceneTarget, slotTarget, stampsDocument, withStamp, type StampRecord } from './stamps.ts'
 import {
-  CHARACTERS_FILE, SLOTS_FILE, charactersDocument, readCharacters, readSlots, removeCharacter,
+  CHARACTERS_FILE, MAX_FIELD_CHARS, SLOTS_FILE, charactersDocument, readCharacters, readSlots, removeCharacter,
   removeSlot, slotsDocument, upsertCharacter, upsertSlot,
   type CharacterRecord, type SlotRecord,
 } from './characters.ts'
 import { deriveSlots } from './slots.ts'
+import { resolveReferenceChain, sortSlotsByReference, type ReferenceChainView } from './reference-chain.ts'
+import { buildDifferentialGrid, type DifferentialGrid } from './differentials.ts'
 import { deriveCompleteness, type CompletenessReport } from './completeness.ts'
 import {
   BIBLE_FILE, OUTLINE_FILE, applyBiblePatch, bibleDocument, bibleFingerprint, buildGenerationContext,
@@ -40,10 +42,10 @@ import { composeSceneFile, extractSceneBlock, gatewayPathOf, scenesPathOf } from
 import { applySceneEdit, buildSceneForm, type SceneEdit, type SceneFormModel } from './scene-form.ts'
 import { contentFingerprint, launchPlaytest, playtestDocument, readPlaytest, PLAYTEST_FILE, type PlaytestPorts, type PlaytestRun } from './playtest.ts'
 import {
-  IMAGE_TASKS_FILE, adapterFor, degradeInput, downloadResultImage, emptyTasksDocument, findTask, imageModels,
+  IMAGE_TASKS_FILE, adapterFor, dataUrlOf, degradeInput, downloadResultImage, emptyTasksDocument, findTask, imageModels,
   parseTasksDocument, tasksDocument, upsertTask,
-  type CreateGenerationTaskInput, type GenerationTask, type GenerationAttempt, type ImageChannelSettings,
-  type ImageHttpClient,
+  type CreateGenerationTaskInput, type GenerationTask, type GenerationAttempt, type GenerationRejection,
+  type ImageChannelSettings, type ImageHttpClient,
 } from './images.ts'
 import { ABSENT, fileFingerprint, fingerprint } from './hash.ts'
 import { WriteGateway, type ChangeEvent, type FileSnapshot, type GatewayError, type WriteLogEntry, type WriteOp, type WriteResult } from './write-gateway.ts'
@@ -274,6 +276,17 @@ export class ProjectService {
   /** 读项目文件 + 当前版本戳(网关口径:磁盘为真)。 */
   async readProjectFile(projectRef: string, relPath: string): Promise<FileSnapshot> {
     return (await this.#gatewayFor(projectRef)).read(relPath)
+  }
+
+  /**
+   * 按**字节**读一个项目文件(T16:面板要显示素材缩略图)。
+   *
+   * 走同一个网关口径(磁盘为真 + 内容哈希版本戳),只是不做 utf8 解码 ——
+   * 版本戳因此既能给缓存失效用(重 roll 换了一张 → 版本变了),也不会把 PNG 读坏。
+   * 这是**读**,不产生写,也不给写开旁路。
+   */
+  async readProjectBytes(projectRef: string, relPath: string): Promise<{ bytes: Uint8Array | null; version: string }> {
+    return await (await this.#gatewayFor(projectRef)).readBytes(relPath)
   }
 
   /** 经网关提交一个原子写批(串行 + CAS)。 */
@@ -899,6 +912,72 @@ export class ProjectService {
   }
 
   /**
+   * **参考链视图**(T16,纯读):这个槽这一次会带上哪些参考图、各自从哪个角色的登记簿来、
+   * 哪张文件还不存在、哪条被当成自引用排除了。
+   *
+   * 面板与 agent 读的是同一份判断 —— 链不是"账本上的一行字",而是可核查的处境。
+   */
+  async referenceChain(projectRef: string, slot: string): Promise<ReferenceChainView> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const [characters, ledger] = await Promise.all([readCharacters(entry.path), readSlots(entry.path)])
+    const record = ledger.find((candidate) => candidate.slot === slot)
+    return await this.#resolveChain(entry.path, slot, record?.requiresCharacters ?? [], characters)
+  }
+
+  /**
+   * **槽位对比视图**(T16,纯读):同角色差分网格 —— 格子、主视觉、链上的参考、
+   * 每一格的历史版本与拒收理由。
+   *
+   * 渲染自**登记簿 + 槽位历史**(票面 AC2),不产生任何写;面板与 agent 读同一份。
+   */
+  async differentialGrid(projectRef: string): Promise<DifferentialGrid> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const progress = await this.progress(projectRef)
+    const tasks = await this.generationTasks(projectRef)
+    // 链上的图在不在:一次问清(同一路径只查一次),再交给纯函数。
+    const existing = new Set<string>()
+    for (const path of new Set(progress.characters.flatMap((character) => character.references.map((reference) => reference.path)))) {
+      if ((await fileFingerprint(entry.path, path)) !== ABSENT) existing.add(path)
+    }
+    return buildDifferentialGrid({
+      characters: progress.characters,
+      slots: progress.slots,
+      tasks,
+      exists: (path) => existing.has(path),
+    })
+  }
+
+  /** 解析一个槽的参考链(存在性读盘;**只有这一处**判"链上的图在不在")。 */
+  async #resolveChain(
+    root: string,
+    slot: string,
+    requiresCharacters: string[],
+    characters: CharacterRecord[],
+  ): Promise<ReferenceChainView> {
+    // 链解析是**纯函数**,但"文件在不在"要读盘 —— 先把候选路径一次问清楚,
+    // 再把结果喂进去(这样同一条路径在一批里只查一次)。
+    const byId = new Map(characters.map((character) => [character.id, character]))
+    const candidates: string[] = []
+    for (const id of requiresCharacters) {
+      for (const reference of byId.get(id)?.references ?? []) {
+        if (!candidates.includes(reference.path)) candidates.push(reference.path)
+      }
+    }
+    const existing = new Set<string>()
+    for (const path of candidates) {
+      if ((await fileFingerprint(root, path)) !== ABSENT) existing.add(path)
+    }
+    return resolveReferenceChain({
+      slot,
+      requiresCharacters,
+      characters,
+      exists: (path) => existing.has(path),
+    })
+  }
+
+  /**
    * 建一个素材槽生成任务(全结构化对象)。
    *
    * 三道门如实拦:没配渠道 / 模型不在目录里 / 槽不在 `.rpy` 派生的清单里
@@ -931,11 +1010,31 @@ export class ProjectService {
       const requiresCharacters = input.requiresCharacters ?? ledgerRecord?.requiresCharacters ?? []
       const artStyleAnchor = input.artStyleAnchor ?? ledgerRecord?.artStyleAnchor
 
+      // **参考链(T16)**:显式给了就用给的;没给就从登记簿自动携链(主视觉 → 差分)。
+      const chain = input.referenceImages === undefined
+        ? await this.#resolveChain(entry.path, slot, requiresCharacters, characters)
+        : null
+
+      // 链上文件还不存在的那些**发不出去**:分成"要带的"与"此刻还没有的"两摞,
+      // 由 `degradeInput` 按如实降级的规矩记进任务(不假装链生效)。
+      const requested = input.referenceImages ?? (chain?.references ?? []).map((reference) => ({
+        path: reference.path,
+        ...(reference.note === undefined ? {} : { note: reference.note }),
+      }))
+      const absent: Array<{ path: string; note?: string }> = []
+      for (const reference of requested) {
+        const exists = chain === null
+          ? (await fileFingerprint(entry.path, reference.path)) !== ABSENT
+          : chain.ready.some((ready) => ready.path === reference.path)
+        if (!exists) absent.push(reference)
+      }
+
       // 协议不合 → 当场降级并留下说明(AC3)。
       const degraded = degradeInput(model, {
         ...(input.size === undefined ? {} : { size: input.size }),
         ...(input.quality === undefined ? {} : { quality: input.quality }),
-        referenceImages: input.referenceImages ?? [],
+        referenceImages: requested,
+        ...(absent.length === 0 ? {} : { missingReferenceImages: absent }),
       })
 
       const at = new Date().toISOString()
@@ -955,6 +1054,7 @@ export class ProjectService {
         referenceImages: degraded.effective.referenceImages,
         ...(degraded.degradation === undefined ? {} : { degradation: degraded.degradation }),
         attempts: [],
+        rejections: [],
         createdAt: at,
         updatedAt: at,
       }
@@ -1004,6 +1104,58 @@ export class ProjectService {
   }
 
   /**
+   * **差分批量**(T16):把一个角色在板上还没出图的槽一次补齐。
+   *
+   * 出图顺序由**派生事实**决定:谁的产物出现在别人的参考链里,谁先出 ——
+   * 主视觉先落地,表情/姿势差分才有锚可携(不是靠"槽名里带 base 的先出"这种猜)。
+   *
+   * 因此这里**建一个跑一个**(而不是先建齐再统一跑):差分建任务时主视觉已经在磁盘上,
+   * 链才是真的。`run:false` 只入队,链按**建任务那一刻**的磁盘状态解析 ——
+   * 主视觉还没出时,差分会被如实标成缺链(不假装)。
+   */
+  async createDifferentialTasks(
+    projectRef: string,
+    options: { character: string; model: string; prompts?: Record<string, string>; run?: boolean },
+  ): Promise<GenerationTask[]> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    // 三道门先过(没渠道 / 模型不在目录 / 角色不在登记簿),**一个槽都不缺也要拦** ——
+    // "看着跑完了其实什么都没做"是这套里最坏的一种失败。
+    this.#requireModel(options.model)
+    const [characters, ledger] = await Promise.all([readCharacters(entry.path), readSlots(entry.path)])
+    if (!characters.some((character) => character.id === options.character)) {
+      throw new GalfreeError('unknown-character', `角色登记簿里没有「${options.character}」:先把角色登记上,参考链才有家`, {
+        known: characters.map((character) => character.id),
+      })
+    }
+
+    const owned = new Set(ledger.filter((slot) => slot.requiresCharacters.includes(options.character)).map((slot) => slot.slot))
+    const progress = await this.progress(projectRef)
+    const missing = progress.slots.filter((slot) => owned.has(slot.slot) && !slot.filled).map((slot) => slot.slot)
+
+    const requiresOf = (slot: string): string[] =>
+      ledger.find((candidate) => candidate.slot === slot)?.requiresCharacters ?? [options.character]
+    const chains = new Map<string, ReferenceChainView>()
+    for (const slot of missing) chains.set(slot, await this.#resolveChain(entry.path, slot, requiresOf(slot), characters))
+    const ordered = sortSlotsByReference({
+      slots: missing,
+      referencesOf: (slot) => (chains.get(slot)?.references ?? []).map((reference) => reference.path),
+    })
+
+    const tasks: GenerationTask[] = []
+    for (const slot of ordered) {
+      const prompt = options.prompts?.[slot] ?? ledger.find((candidate) => candidate.slot === slot)?.prompt ?? `${slot} 的素材`
+      tasks.push(await this.createGenerationTask(projectRef, {
+        slot,
+        model: options.model,
+        prompt: prompt === '' ? `${slot} 的素材` : prompt,
+        run: options.run ?? true,
+      }))
+    }
+    return tasks
+  }
+
+  /**
    * 推进队列里**排队中**的任务(串行,一个跑完再跑下一个)。
    * 返回跑过之后的任务视图。失败的任务留在 `failed`,不会被队列反复重跑
    * —— 重试是人的动作(`retryGenerationTask`),不是自动重试循环。
@@ -1022,11 +1174,25 @@ export class ProjectService {
    * `prompt` 给了就**改词再出**(对话里"把小棠的怒颜重 roll 得更夸张"走的就是这条);
    * `size`/`referenceImages` 同理。被换掉的那一版记进历史(`replacedFingerprint`),
    * 所以"可对比"不是口头承诺。
+   *
+   * **拒收注记(T16)**:`note` 是"这一版为什么不行"的原话,它**只追加**进 `rejections`,
+   * 并指向被拒的那一版(尝试号 + 指纹)。给了空注记 = 拒(`empty-note`):要么说清为什么,
+   * 要么别记 —— 一条没有理由的"打回"对下一个看历史的人毫无价值。
    */
   async retryGenerationTask(
     projectRef: string,
     id: string,
-    options: { run?: boolean; prompt?: string; size?: string; quality?: string; referenceImages?: Array<{ path: string; note?: string }> ; note?: string } = {},
+    options: {
+      run?: boolean
+      prompt?: string
+      size?: string
+      quality?: string
+      referenceImages?: Array<{ path: string; note?: string }>
+      /** 拒收理由(人话;**不是**叙述内容,长度有上限)。 */
+      note?: string
+      /** 拒收注记是谁记的(工作台的人 or 替人转述的 agent)。 */
+      via?: GenerationRejection['via']
+    } = {},
   ): Promise<GenerationTask> {
     const reset = await this.#mutateTasks(projectRef, async (document, writers) => {
       const task = findTask(document, id)
@@ -1034,6 +1200,7 @@ export class ProjectService {
       if (options.prompt !== undefined && options.prompt.trim() === '') {
         throw new GalfreeError('empty-prompt', '重 roll 时给的提示词是空的:要么不给(沿用原词),要么给一句能用的')
       }
+      const at = new Date().toISOString()
       const next: GenerationTask = {
         ...task,
         state: 'queued',
@@ -1041,7 +1208,24 @@ export class ProjectService {
         ...(options.size === undefined ? {} : { size: options.size }),
         ...(options.quality === undefined ? {} : { quality: options.quality }),
         ...(options.referenceImages === undefined ? {} : { referenceImages: options.referenceImages }),
-        updatedAt: new Date().toISOString(),
+        updatedAt: at,
+      }
+      if (options.note !== undefined) {
+        const note = options.note.trim()
+        if (note === '') {
+          throw new GalfreeError('empty-note', '拒收注记是空的:要么不给(没有理由就不记),要么给一句能用的')
+        }
+        if (note.length > MAX_FIELD_CHARS) {
+          throw new GalfreeError('note-too-long', `拒收注记太长(${note.length} > ${MAX_FIELD_CHARS} 字):这里写制作理由,不写剧本`)
+        }
+        const rejected = task.attempts.at(-1)
+        next.rejections = [...(task.rejections ?? []), {
+          attempt: rejected?.n ?? 0,
+          ...(rejected?.fingerprint === undefined ? {} : { fingerprint: rejected.fingerprint }),
+          note,
+          via: options.via ?? 'agent',
+          at,
+        }]
       }
       delete next.lastError
       writers.push(next)
@@ -1074,19 +1258,21 @@ export class ProjectService {
     const { channel, model } = this.#requireModel(task.model)
 
     const adapter = adapterFor(model.adapter)
-    const plan = adapter.buildRequest({
-      channel,
-      model,
-      prompt: task.prompt,
-      ...(task.size === undefined ? {} : { size: task.size }),
-      ...(task.quality === undefined ? {} : { quality: task.quality }),
-      referenceImages: task.referenceImages,
-    })
 
     // 2) 出网。失败如实记账(上游原话进历史)。
     //    同步适配器一次就拿到字节;异步任务制只拿到 task id,要轮询到终态再取图。
     let bytes: Uint8Array
     try {
+      // 参考图内联成 data URL(远端够不着项目内相对路径)。文件若在建任务之后被删了,
+      // 这里**如实报错**而不是少发一张 —— "链看着生效了其实没有"正是要防的那种假象。
+      const plan = adapter.buildRequest({
+        channel,
+        model,
+        prompt: task.prompt,
+        ...(task.size === undefined ? {} : { size: task.size }),
+        ...(task.quality === undefined ? {} : { quality: task.quality }),
+        referenceImages: await this.#inlineReferences(projectRef, task.referenceImages),
+      })
       const http = this.#imagePorts!.http
       const response = await http.send(plan.request)
       const submission = adapter.onSubmit(response, model)
@@ -1187,6 +1373,33 @@ export class ProjectService {
       if (poll.intervalMs > 0) await new Promise((resolve) => setTimeout(resolve, poll.intervalMs))
     }
     throw new Error(`上游没在时限内给结果(轮询 ${poll.maxAttempts} 次,最后一次状态:${lastNote})`)
+  }
+
+  /**
+   * 把链上的参考图内联成 data URL。
+   *
+   * 为什么必须内联:链上的图是**项目内的文件**,远端网关拿一个 `game/images/x.png`
+   * 什么也取不到;`image_url` 要的是可取的地址。账本里存的仍是路径(引用),
+   * 图片内容**只在这一次出网里出现**,不落进 `.studio/`(铁律不变)。
+   *
+   * 建任务时已经筛过"文件在不在";这里若发现它在跑之前被删了,如实报错 ——
+   * 少发一张参考图而不吭声,就是"链看起来生效了其实没有"。
+   */
+  async #inlineReferences(
+    projectRef: string,
+    references: Array<{ path: string; note?: string }>,
+  ): Promise<Array<{ path: string; dataUrl?: string }>> {
+    if (references.length === 0) return []
+    const gateway = await this.#gatewayFor(projectRef)
+    const inlined: Array<{ path: string; dataUrl?: string }> = []
+    for (const reference of references) {
+      const current = await gateway.readBytes(reference.path)
+      if (current.bytes === null) {
+        throw new Error(`参考图 ${reference.path} 不在磁盘上(建任务时还在):链断了,先把它出出来或从登记簿的参考链里去掉`)
+      }
+      inlined.push({ path: reference.path, dataUrl: dataUrlOf(current.bytes, reference.path) })
+    }
+    return inlined
   }
 
   #attempt(

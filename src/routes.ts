@@ -10,6 +10,7 @@ import { createSubdirectory, describePath, listDirectories } from './service/dir
 import type { SceneEdit } from './service/scene-form.ts'
 import type { ProjectService } from './service/project-service.ts'
 import type { ImageModelCapabilities } from './service/images.ts'
+import { mimeOfPath } from './service/images.ts'
 import type { ProvisionStatus } from './service/sdk-provision.ts'
 
 export interface RouteDeps {
@@ -148,8 +149,12 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['/tasks', ['GET']],
   ['/tasks/create', ['POST']],
   ['/tasks/fill-missing', ['POST']],
+  ['/tasks/differentials', ['POST']],
   ['/tasks/run', ['POST']],
   ['/tasks/retry', ['POST']],
+  ['/differentials', ['GET']],
+  ['/reference-chain', ['GET']],
+  ['/asset', ['GET']],
   ['/events', ['GET']],
 ]
 
@@ -456,8 +461,18 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
       ...(typeof body.voice === 'string' && body.voice !== '' ? { voice: body.voice } : {}),
       appearance: (typeof body.appearance === 'object' && body.appearance !== null ? body.appearance : {}) as Record<string, string>,
       ...(typeof body.styleAnchor === 'string' && body.styleAnchor !== '' ? { styleAnchor: body.styleAnchor } : {}),
-      references: Array.isArray(body.references) ? body.references as Array<{ path: string }> : [],
-      ...(typeof body.note === 'string' && body.note !== '' ? { note: body.note } : {}),
+      // 参考链(T16):每条参考都带 path + 可选 slot/note —— 链上"这张从哪个槽来的、
+      // 为什么挑它"是制作信息,不该在面板存一次就被抹掉。
+      references: Array.isArray(body.references)
+        ? body.references.map((entry) => {
+            const reference = (entry ?? {}) as { path?: unknown; slot?: unknown; note?: unknown }
+            return {
+              path: String(reference.path ?? ''),
+              ...(typeof reference.slot === 'string' && reference.slot !== '' ? { slot: reference.slot } : {}),
+              ...(typeof reference.note === 'string' && reference.note !== '' ? { note: reference.note } : {}),
+            }
+          })
+        : [],      ...(typeof body.note === 'string' && body.note !== '' ? { note: body.note } : {}),
     })
     writeJson(res, 200, { ok: true })
     return
@@ -678,6 +693,58 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
+  // **差分批量**(T16):把一个角色的差分补齐 —— 主视觉先出,差分自动携登记簿的参考链。
+  if (method === 'POST' && path === '/tasks/differentials') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const tasks = await service.createDifferentialTasks(active.id, {
+      character: String(body.character ?? ''),
+      model: String(body.model ?? ''),
+      ...(body.prompts !== undefined && typeof body.prompts === 'object' ? { prompts: body.prompts as Record<string, string> } : {}),
+      ...(typeof body.run === 'boolean' ? { run: body.run } : {}),
+    })
+    writeJson(res, 201, { tasks })
+    return
+  }
+
+  // 槽位对比视图(T16,纯读):同角色差分网格 = 登记簿 + 槽位历史。
+  if (method === 'GET' && path === '/differentials') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    writeJson(res, 200, await service.differentialGrid(active.id))
+    return
+  }
+
+  // 参考链处境(T16,纯读):这个槽这次带哪些参考、哪张文件还没有。
+  if (method === 'GET' && path === '/reference-chain') {
+    const slot = url.searchParams.get('slot')
+    if (slot === null || slot === '') return writeJson(res, 400, { error: '需要 slot 查询参数' })
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    writeJson(res, 200, await service.referenceChain(active.id, slot))
+    return
+  }
+
+  // 素材字节(只读):面板用它显示缩略图。版本戳进 ETag,重 roll 换图后自动失效。
+  if (method === 'GET' && path === '/asset') {
+    const rel = url.searchParams.get('path')
+    if (rel === null || rel === '') return writeJson(res, 400, { error: '需要 path 查询参数' })
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const asset = await service.readProjectBytes(active.id, rel)
+    if (asset.bytes === null) return writeJson(res, 404, { error: `没有这个文件:${rel}`, code: 'asset-missing' })
+    res.writeHead(200, {
+      'content-type': mimeOfPath(rel),
+      etag: `"${asset.version}"`,
+      // 回环面板 + 版本戳:宁可每次条件请求,也不要缓存住重 roll 前的旧图。
+      'cache-control': 'no-cache',
+      'referrer-policy': 'no-referrer',
+    })
+    res.end(Buffer.from(asset.bytes))
+    return
+  }
+
   // 推进队列里排队中的任务(串行;失败留在 failed,等人的重试)。
   if (method === 'POST' && path === '/tasks/run') {
     const active = await service.getActiveProject()
@@ -698,6 +765,9 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
       // 改词重 roll(T15):面板/agent 都走这一个入口,没有第二条路。
       ...(typeof body.prompt === 'string' && body.prompt !== '' ? { prompt: body.prompt } : {}),
       ...(typeof body.size === 'string' && body.size !== '' ? { size: body.size } : {}),
+      // 拒收注记(T16):这一版为什么不行。面板带 `note` 时由**人**记(`via:'human'`)——
+      // "谁说的"是历史的一部分,别把人的话记成 agent 的话。
+      ...(typeof body.note === 'string' && body.note !== '' ? { note: body.note, via: 'human' as const } : {}),
     })
     writeJson(res, 200, { task })
     return

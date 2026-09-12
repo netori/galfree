@@ -117,6 +117,15 @@ export class WriteGateway {
     }
   }
 
+  /**
+   * 按**字节**读(参考链把项目内的图内联发给上游时要用;文本读取请用 `read`)。
+   * 版本戳口径与读/写/监听三处一致:原始字节的哈希。缺失 = `null` + `ABSENT`。
+   */
+  async readBytes(relPath: string): Promise<{ bytes: Uint8Array | null; version: string }> {
+    const raw = await this.#safeReadRaw(this.#abs(relPath))
+    return raw === null ? { bytes: null, version: ABSENT } : { bytes: raw, version: fingerprint(raw) }
+  }
+
   #abs(relPath: string): string {
     const abs = join(this.#root, ...relPath.split('/'))
     const rel = relative(this.#root, abs)

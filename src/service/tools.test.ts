@@ -70,16 +70,28 @@ describe('agent 工具(T10)', () => {
 
   it('注册出模型看到的契约:两个工具,参数与输出声明齐备', () => {
     const tools = register()
-    // 剧本环节两个 + 美术环节(T15)五个。
+    // 剧本环节两个 + 美术环节(T15)五个 + 参考链回路(T16)两个。
     expect(tools.map((tool) => tool.name).sort()).toEqual([
       'galfree_art_queue',
+      'galfree_character_art',
       'galfree_fill_missing_art',
       'galfree_generate_image',
       'galfree_generate_scene',
       'galfree_image_channel',
       'galfree_project_status',
+      'galfree_reference_chain',
       'galfree_reroll_image',
     ])
+
+    // T16:拒收注记是**可选**参数(人没给理由就不记),差分批量必须给角色与模型。
+    const reroll = tools.find((tool) => tool.name === 'galfree_reroll_image')!
+    expect(reroll.parameters.properties.note?.type).toBe('string')
+    expect(reroll.parameters.required).toBeUndefined()
+    const batch = tools.find((tool) => tool.name === 'galfree_character_art')!
+    expect(batch.parameters.required?.sort()).toEqual(['character', 'model'])
+    expect(batch.description).toContain('参考链')
+    const chain = tools.find((tool) => tool.name === 'galfree_reference_chain')!
+    expect(chain.parameters.properties.character?.type).toBe('string')
 
     const generate = tools.find((tool) => tool.name === 'galfree_generate_scene')!
     // 模型看到的参数契约:两个必填,其余可选。
