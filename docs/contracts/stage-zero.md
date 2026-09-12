@@ -575,8 +575,110 @@ agent 的 `galfree_reroll_image {prompt}` 走的是同一个入口("把小棠的
 **面板的进度是推出来的**:有任务处于 `queued|running` 时按 2.5s 轮询 `/tasks` 并重取推导,
 不在面板里攒状态。失败原因、降级说明都按接缝原话显示,不美化。
 
-## 模板的界面层(T7 之后补齐的一块,实测换来的)
+## 参考链一致性回路(T16 之后追加)
 
+跨批次"同一张脸"原本只是**声明**:登记簿里有 `references`,任务参数里有 `referenceImages`,
+但没有任何东西把这两端接起来。T16 接上这一条,并把它做成可核查的处境。
+
+### 链从登记簿自动来,不从人手抄
+
+建任务时 `referenceImages` **没显式给**就从登记簿推导(`resolveReferenceChain`,纯函数):
+
+- 槽账本的 `requiresCharacters` → 各自登记簿的 `references`(顺序 = 人挑的顺序,按路径去重);
+- **自引用被排除并标注**(槽把自己的产物当参考 = 循环,`excludedSelf` 如实列出);
+- **文件不存在的参考发不出去** → 进 `missing`,由降级机制如实记账。
+
+于是"主视觉 → 表情/姿势差分"不再靠人手抄路径:人把主视觉**登记进链**(面板角色视图 /
+`upsertCharacter`)之后,这个角色所有差分的任务都会自动带上它。
+
+### 链上的图以**内联字节**发出
+
+远端的 `image_url` 要的是可取的地址,而链上的图是**项目内的文件** —— 一个
+`game/images/x.png` 对面什么也取不到。因此发送前把字节内联成 data URL
+(`WriteGateway.readBytes` → `dataUrlOf`,与 b64 内联同一条口径)。
+
+- 账本里存的仍然是**路径**(引用),图片内容只在这一次出网里出现,不落 `.studio/`;
+- 建任务时筛过一遍"文件在不在";跑的时候若发现它**中途被删了**,如实报错(少发一张
+  而不吭声,就是"链看起来生效了其实没有")。
+
+### 差分批量:顺序由引用关系派生
+
+`createDifferentialTasks(ref,{character,model,run?})` —— 把一个角色还没出图的槽一次补齐:
+
+| 规矩 | 为什么 |
+|---|---|
+| 出图顺序 = **被引用者先出**(`sortSlotsByReference`) | 主视觉先落地,差分才有锚。依据是"谁的产物出现在别人的链里",**不是**槽名里带 `base` |
+| **建一个跑一个**(不是先建齐再统一跑) | 差分建任务时主视觉已在磁盘上,链才是真的 |
+| 三道门先过(渠道 / 模型 / 角色在登记簿),**一个槽都不缺也要拦** | "看着跑完了其实什么都没做"是最坏的一种失败 |
+| `run:false` 只入队 | 链按**建任务那一刻**的磁盘状态解析,主视觉没出时差分会被如实标成缺链(不假装) |
+
+### 降级:改了参数就必须说(纪律不变,多一条来源)
+
+`degradeInput` 现在多认一摞 `missingReferenceImages`(此刻磁盘上还没有的):
+
+- 模型不支持参考链 / 目录自相矛盾 → 原规矩(能力是第一判据,`requested` 才是"人要发的");
+- 能力够、但**某张文件不存在** → `code:'reference-missing'`,被丢的那张列进
+  `droppedReferenceImages` 并说明"先把它出出来(或从参考链里去掉)"。
+
+降级照旧**不是失败**:任务跑完,事实记在任务上,人和 agent 都读得到。
+
+### 拒收注记:变了的是"为什么重 roll"
+
+`GenerationTask.rejections[]`(**只追加**):`{attempt,fingerprint?,note,via:'human'|'agent',at}`。
+
+- `retryGenerationTask(ref,id,{note,via})` 追加一条,并指向**被拒的那一版**(尝试号 + 产物指纹)
+  —— 不是一句无主的话;
+- 空注记(`'   '`)→ `empty-note`;超长(> 600 字)→ `note-too-long`。**要么说清为什么,要么别记**;
+- `via` 是历史的一部分:工作台记 `human`,agent 替人转述记 `agent`(人的话别记成 agent 的话);
+- 注记是**制作信息**(脸太圆/眼神太凶),长度上限与设定卡同一把尺子 —— 不许把剧本抄进来。
+
+### 对比视图:渲染自登记簿 + 槽位历史
+
+`differentialGrid(ref)`(纯读,**不产生任何写**;快带里以网关写日志不变为断言):
+
+```
+DifferentialRow = { character, name, styleAnchor?, references[{path,exists,slot?,note?}], main, cells[] }
+DifferentialCell = { slot, assetPath, role:'main'|'variant', filled, stamp, awaitingReview,
+                     fingerprint, taskId?, history[{n,outcome,fingerprint?,replacedFingerprint?,error?,rejection?}],
+                     degradation?, lastError? }
+```
+
+- `role:'main'` = **登记簿的参考链指到了这一格的产物**(登记簿指认,不是槽名启发式),
+  `main` = 那一格的槽名(没指认出来 = `null`,面板显示"没有主视觉");
+- `history` = 该槽**最近一个任务**的尝试史,拒收注记按尝试号对回对应那一版;
+- 版本谱系靠 `replacedFingerprint` 串起来:当前版与"被它替换掉的那一版"能对上号,
+  旧内容留在写批前的快照里(`snapshotHistory` 可回看/回滚)。
+
+### 路由与工具面(与接缝同源)
+
+| 路由 | 语义 |
+|---|---|
+| `GET /reference-chain?slot=` | 链处境:就绪/缺图/自引用(纯读);缺 slot = 400 |
+| `POST /tasks/differentials` `{character,model,prompts?,run?}` | 差分批量 → 201 `{tasks}` |
+| `GET /differentials` | 同角色差分网格(纯读) |
+| `GET /asset?path=` | 素材**字节**(只读):`content-type` 按后缀,`ETag` = 内容指纹,`cache-control: no-cache`(重 roll 换图后旧图不许赖着)、缺文件 404 + `asset-missing` |
+
+`POST /tasks/retry` 多认一个 `note`(面板带 = `via:'human'`)。
+
+agent 工具面新增两个、扩了两个:**`galfree_character_art`**(差分批量)、
+**`galfree_reference_chain`**(链 + 网格,只读);`galfree_reroll_image` 多一个 `note`,
+`galfree_art_queue` 多回 `rejections` 与每次尝试的 `rejection`。
+
+### 真上游验证(慢带,默认不跑)
+
+`src/service/live-chain.slow.test.ts` —— 把"`referenceChain: true` 这条声明"拿到真上游面前对一次。
+T14 起契约里"能力声明是降级的唯一依据"一直靠一个**从未被真模型验过的声明**在跑,这条慢带就是补这个。
+
+- 只在给了 `GALFREE_LIVE_BASE_URL` / `GALFREE_LIVE_API_KEY` / `GALFREE_LIVE_MODEL`
+  (可选 `GALFREE_LIVE_ADAPTER`)时跑;**没给就跳过并出声**(打印怎么跑),不静默通过;
+- 它断言三件与上游态度无关的事:①链**真发出去了**(记录型出网客户端看到请求体里内联的字节,
+  且解出来正是主视觉那张);②文生图基线**真通**(端点/密钥/模型/协议有一样不对就红);
+  ③结论**如实**(`awaiting-review` ⟺ 文件在且是 PNG;`failed` ⟹ 原因非空且是上游原话);
+- 上游**不接受**这条链时,它不改判成"通过",而是把上游原话打印出来并明确报告:
+  该模型的 `referenceChain` 声明**未被证实**。这是这条慢带存在的意义,不是它的失败。
+- **它花钱**(真出 2 张图),所以默认不跑。
+
+## 模板的界面层(T7 之后补齐的一块,实测换来的)
 **新建项目必须整份带上 SDK 的 GUI 模板**(`screens.rpy` / `gui.rpy` / `guisupport.rpy` / `testcases.rpy`),
 外加一份**项目内**的中文字体。这不是"锦上添花",是"能不能跑"的问题 —— 下面三条都是实测:
 
