@@ -196,6 +196,48 @@ export interface CharacterRecordView {
   note?: string
 }
 
+/** 场景表单的一行(T11):可编辑字段按 kind 取用。 */
+export interface SceneRowView {
+  kind: string
+  line: number
+  raw: string
+  speaker?: string | null
+  text?: string
+  role?: 'show' | 'scene' | 'hide'
+  tag?: string
+  attributes?: string[]
+  target?: string
+  transition?: string
+  seconds?: number | null
+  channel?: string
+  file?: string | null
+  loop?: boolean
+  choices?: string[]
+  note?: string
+}
+
+/** 场景表单视图(行模型 + 源文本;两个视图同一份真相)。 */
+export interface SceneFormView {
+  label: string
+  path: string
+  file: string
+  startLine: number
+  endLine: number
+  rows: SceneRowView[]
+  readOnly: boolean
+  readOnlyReason?: string
+  source: string
+}
+
+/** 分支图(T12):派生骨架的只读视图。 */
+export interface BranchGraphView {
+  dialect: string
+  degraded: boolean
+  nodes: Array<{ label: string; file: string; line: number; readOnly: boolean; stamp: string; reason?: string }>
+  edges: Array<{ from: string; to: string; via: 'jump' | 'menu' | 'call'; prompt?: string }>
+  problems: Array<{ severity: string; file: string; line?: number; code: string; message: string }>
+}
+
 export interface ProgressView {
   scenes: SceneProgressView[]
   /** 素材板:`.rpy` 派生的槽清单(挂账本 + 推导状态)。 */
@@ -405,6 +447,32 @@ export class GalfreeApi {
   /** 盖「设定定稿」戳(只有人能盖)。 */
   async stampBible(): Promise<void> {
     await readJson<unknown>(await fetch('/api/galfree/bible/stamp', { method: 'POST' }))
+  }
+
+  /** 读一场的表单(逐行)+ 该文件源文本(T11 两个视图的数据源)。 */
+  async sceneForm(label: string): Promise<SceneFormView> {
+    return readJson(await fetch(`/api/galfree/scenes/form?label=${encodeURIComponent(label)}`))
+  }
+
+  /** 提交编辑(表单编辑或 replaceSource);返回编辑之后的判定 + 新表单。 */
+  async editScene(label: string, edit: Record<string, unknown>): Promise<{
+    path: string
+    label: string
+    parseOk: boolean
+    validation: { ok: boolean; validator: string }
+    issues: Array<{ severity: string; code: string; file: string; line?: number; message: string }>
+    form: SceneFormView
+  }> {
+    return readJson(await fetch('/api/galfree/scenes/edit', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ label, edit }),
+    }))
+  }
+
+  /** 分支图(只读):节点 + 跳转/选择边 + 子集外降级标记。 */
+  async sceneGraph(): Promise<BranchGraphView> {
+    return readJson(await fetch('/api/galfree/scenes/graph'))
   }
 
   /**

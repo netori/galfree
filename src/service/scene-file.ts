@@ -43,7 +43,19 @@ interface Block {
   body: string[]
 }
 
-/** 把一份 `.rpy` 拆成"顶层 label 段";段外的行归入其前面的段(或 preamble)。 */
+/** 是不是本生成器写的头部注释行(重写时要去掉旧的,避免越写越多)。 */
+function isGeneratedHeader(line: string): boolean {
+  return line.startsWith('# GALFree 生成场景:')
+    || line.startsWith('# 由工作台/agent 逐场生成')
+    || line.startsWith('# 手写改动请改 game/script.rpy')
+}
+
+/**
+ * 把一份 `.rpy` 拆成"顶层 label 段"。
+ *
+ * 段外的行**归属它前面那一段**(label 块体里的空行就是这种情况;丢掉它们等于偷偷删内容)。
+ * 第一个 label 之前的行是 preamble(生成器头 + 任何手写前言)。
+ */
 function splitBlocks(text: string): { preamble: string[]; blocks: Block[] } {
   const preamble: string[] = []
   const blocks: Block[] = []
@@ -82,13 +94,18 @@ export function composeSceneFile(label: string, source: string, existing: string
   }
   const generated = [...sceneHeaderLines(label), ...normalized.split('\n')]
   const { preamble, blocks } = splitBlocks(`${existing}\n`)
-  const kept = blocks.filter((block) => block.label !== label).flatMap((block) => trimTrailingBlank(block.body))
+  // 保住别的 label 段(逐字),但把**本生成器上一次写的头**滤掉 —— 否则每写一次就多一条。
+  const kept = blocks
+    .filter((block) => block.label !== label)
+    .flatMap((block) => trimTrailingBlank(block.body))
+    .filter((line) => !isGeneratedHeader(line))
 
   const sections: string[] = [trimTrailingBlank(generated).join('\n')]
   const keptText = trimTrailingBlank(kept).join('\n')
   if (keptText.trim() !== '') sections.push(keptText)
 
-  const head = trimTrailingBlank(preamble).join('\n')
+  // preamble 同样滤掉旧头(生成器的头由 sections[0] 重写)。
+  const head = trimTrailingBlank(preamble.filter((line) => !isGeneratedHeader(line))).join('\n')
   const body = sections.join('\n\n')
   return `${head.trim() === '' ? '' : `${head}\n\n`}${body}\n`
 }

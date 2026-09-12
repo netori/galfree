@@ -6,14 +6,15 @@
  * 没有第二处真相。
  */
 import type {
-  BibleChapterView, BibleProgressView, BibleView, CharacterBoardEntryView, ProgressView, SceneProgressView,
-  SdkView, SlotBoardEntryView, SlotLedgerView, SlotProgressView, SnapshotEntry, StateView, TreeNode,
+  BibleChapterView, BibleProgressView, BibleView, BranchGraphView, CharacterBoardEntryView, ProgressView,
+  SceneFormView, SceneProgressView, SceneRowView, SdkView, SlotBoardEntryView, SlotLedgerView,
+  SlotProgressView, SnapshotEntry, StateView, TreeNode,
 } from './api.ts'
 
 export type {
-  BibleChapterView, BibleProgressView, BibleView, CharacterBoardEntryView as CharacterBoardEntry,
-  ProgressView, SceneProgressView, SdkView, SlotBoardEntryView as SlotBoardEntry, SlotLedgerView,
-  SlotProgressView, SnapshotEntry, StateView, TreeNode,
+  BibleChapterView, BibleProgressView, BibleView, BranchGraphView, CharacterBoardEntryView as CharacterBoardEntry,
+  ProgressView, SceneFormView, SceneProgressView, SceneRowView, SdkView, SlotBoardEntryView as SlotBoardEntry,
+  SlotLedgerView, SlotProgressView, SnapshotEntry, StateView, TreeNode,
 }
 
 /** 盖戳目标:场景与素材槽共用一个判别联合,替代散落的 `scene:${x}` 魔法串。 */

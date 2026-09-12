@@ -22,7 +22,7 @@ function markTone(severity: string): 'warn' | 'bad' | 'none' {
   return MARK_TONE[severity] ?? 'none'
 }
 
-export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, onRelocate, hasProject }: {
+export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, onRelocate, onOpenScene, hasProject }: {
   progress: ProgressView | null
   /** 正在盖戳的目标 key(stampKey 的产物);null = 空闲。 */
   busyKey: string | null
@@ -31,6 +31,8 @@ export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, on
   onPlaytest: () => void
   /** 把手写文件里的段搬进生成目录(T10):搬完这一场才能被重生成。 */
   onRelocate: (label: string) => void
+  /** 打开场景编辑器定位到这一场(T11)。 */
+  onOpenScene: (label: string) => void
   hasProject: boolean
 }) {
   const summary = progress?.summary ?? null
@@ -115,6 +117,7 @@ export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, on
                     onToggle={() => setOpenScene(openScene === scene.label ? null : scene.label)}
                     onStamp={onStamp}
                     onRelocate={onRelocate}
+                    onOpen={() => onOpenScene(scene.label)}
                   />
                 ))}
               </div>
@@ -147,13 +150,14 @@ export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, on
   )
 }
 
-function SceneRow({ scene, open, busyKey, onToggle, onStamp, onRelocate }: {
+function SceneRow({ scene, open, busyKey, onToggle, onStamp, onRelocate, onOpen }: {
   scene: SceneProgressView
   open: boolean
   busyKey: string | null
   onToggle: () => void
   onStamp: (target: StampTarget) => void
   onRelocate: (label: string) => void
+  onOpen: () => void
 }) {
   const sceneTarget: StampTarget = { kind: 'scene', label: scene.label }
   const sceneBusy = busyKey === stampKey(sceneTarget)
@@ -239,6 +243,14 @@ function SceneRow({ scene, open, busyKey, onToggle, onStamp, onRelocate }: {
           </div>
           <div className={s.chips} style={{ marginTop: 8 }}>
             <Chip tone="quiet" num={scene.dialogueCount}>对白行</Chip>
+            <button
+              type="button"
+              className={`${s.button} ${s.ghost} ${s.tiny}`}
+              onClick={onOpen}
+              title="打开场景编辑器:逐行改对白/图像引用,或切到源文本直接改 .rpy(两路同走网关)"
+            >
+              编辑这一场
+            </button>
             {scene.file.startsWith('scenes/')
               ? <Chip tone="quiet" title="这一场住在生成目录,可以让 agent 重生成">可生成</Chip>
               : (

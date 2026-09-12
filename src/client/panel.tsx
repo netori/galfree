@@ -16,6 +16,7 @@ import { Chip, Notice, Spinner, relativeTime } from './ui.tsx'
 import { StageBoard } from './stage-board.tsx'
 import { AssetBoard } from './asset-board.tsx'
 import { BibleCard } from './bible-card.tsx'
+import { SceneWorkbench } from './scene-workbench.tsx'
 import { FileInspector } from './file-inspector.tsx'
 import { DirectoryPicker } from './directory-picker.tsx'
 import { ProjectSwitcher } from './project-switcher.tsx'
@@ -50,6 +51,8 @@ export function WorkbenchPanel() {
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
   const [ensuring, setEnsuring] = useState(false)
+  /** 点舞台板场景 → 打开场景编辑器定位到它(T11/T12 的联动)。 */
+  const [focusScene, setFocusScene] = useState<string | null>(null)
 
   const noticeSeq = useRef(0)
   const pushNotice = useCallback((tone: 'bad' | 'warn', text: string) => {
@@ -325,6 +328,7 @@ export function WorkbenchPanel() {
           onStamp={(target) => void stamp(target)}
           onPlaytest={() => void runPlaytest()}
           onRelocate={(label) => void relocate(label)}
+          onOpenScene={(label) => setFocusScene(label)}
           hasProject={hasProject}
         />
 
@@ -342,6 +346,16 @@ export function WorkbenchPanel() {
           slots={progress?.slots ?? []}
           api={api}
           hasProject={hasProject}
+          onChanged={() => refresh()}
+          onNotice={pushNotice}
+        />
+
+        <SceneWorkbench
+          api={api}
+          sceneLabels={(progress?.scenes ?? []).map((scene) => scene.label)}
+          hasProject={hasProject}
+          focus={focusScene}
+          onFocusHandled={() => setFocusScene(null)}
           onChanged={() => refresh()}
           onNotice={pushNotice}
         />

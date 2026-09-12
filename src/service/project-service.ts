@@ -36,6 +36,7 @@ import {
 } from './bible.ts'
 import { BIBLE_STAMP_TARGET } from './stamps.ts'
 import { composeSceneFile, extractSceneBlock, gatewayPathOf, scenesPathOf } from './scene-file.ts'
+import { applySceneEdit, buildSceneForm, type SceneEdit, type SceneFormModel } from './scene-form.ts'
 import { contentFingerprint, launchPlaytest, playtestDocument, readPlaytest, PLAYTEST_FILE, type PlaytestPorts, type PlaytestRun } from './playtest.ts'
 import { ABSENT, fileFingerprint, fingerprint } from './hash.ts'
 import { WriteGateway, type ChangeEvent, type FileSnapshot, type GatewayError, type WriteLogEntry, type WriteOp, type WriteResult } from './write-gateway.ts'
@@ -81,6 +82,27 @@ export interface GenerateSceneInput {
   requireContext?: boolean
   /** 生成物的目标路径;只接受规范路径(传别的就是归属违规)。 */
   targetPath?: string
+}
+
+/** 场景表单视图:行模型 + 源文本(T11 的两个视图,同一份真相)。 */
+export interface SceneFormView extends SceneFormModel {
+  /** 项目内相对路径(如 game/scenes/scene_one.rpy)。 */
+  path: string
+  /** `game/` 相对口径(与解析器的 file 一致)。 */
+  file: string
+  /** 该文件当前全文(源文本模式的输入)。 */
+  source: string
+}
+
+/** 编辑之后的结果:与 GenerateSceneReport 同形状(面板/agent 复用同一套判定)。 */
+export interface EditSceneReport {
+  path: string
+  label: string
+  parseOk: boolean
+  validation: ValidationReport
+  issues: DialectProblem[]
+  progress: ProgressSnapshot
+  editedAt: string
 }
 
 /** 逐场生成的结果:写完当场判定的全套事实。 */
@@ -521,7 +543,95 @@ export class ProjectService {
     }
   }
 
+  // ─── 场景编辑器(T11)────────────────────────────────────────────────
+
+  /**
+   * 读出一场的**表单**(逐行:说话人 / 文本 / 图像引用 / 结构行),附带源文本全文。
+   *
+   * 表单与源文本是两个视图,同一份真相(`.rpy`);表单里连注释与空行都如实列出来 ——
+   * 否则编辑一次就会把它们吃掉。
+   */
+  async sceneForm(projectRef: string, label: string): Promise<SceneFormView> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const parsed = await this.#parseScript(projectRef)
+    const scene = parsed.scenes.find((candidate) => candidate.label === label)
+    if (scene === undefined) throw new GalfreeError('unknown-scene', `场景 ${label} 不存在`)
+    const path = gatewayPathOf(scene.file)
+    const text = await readFile(join(entry.path, path), 'utf8')
+    const model = buildSceneForm(text, scene)
+    return { ...model, path, source: text, file: scene.file }
+  }
+
+  /**
+   * 编辑一场:**一个写批 = 一个快照**,写完当场判定(与 T10 同一形状)。
+   *
+   * 两条路:
+   *  - **表单编辑**(setDialogue / setImage / insert / delete):只对**生成目录**里的
+   *    场景开放 —— 结构编辑的前提是这一场归生成器管;手写文件的场景要先搬家。
+   *  - **源文本模式**(replaceSource):"直接改我自己的文件",不受归属限制,但同样走网关
+   *    (版本戳 + 快照 + 写日志),且写完如实报告解析/校验结果。
+   */
+  async editScene(projectRef: string, input: { label: string; edit: SceneEdit }): Promise<EditSceneReport> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const parsed = await this.#parseScript(projectRef)
+    const scene = parsed.scenes.find((candidate) => candidate.label === input.label)
+    if (scene === undefined) throw new GalfreeError('unknown-scene', `场景 ${input.label} 不存在`)
+
+    const canonical = scenesPathOf(input.label)
+    const isRaw = input.edit.kind === 'replaceSource'
+    if (!isRaw && scene.file !== canonical) {
+      throw new GalfreeError(
+        'scene-not-editable',
+        `${input.label} 住在 game/${scene.file}(手写文件),结构编辑只对生成目录里的场景开放。` +
+        `先把它搬进 game/${canonical},或用源文本模式直接改这个文件。`,
+      )
+    }
+    if (scene.readOnly && !isRaw) {
+      throw new GalfreeError(
+        'scene-read-only',
+        `这一场用了方言子集外的语法,编辑器降级只读:${scene.problems.find((p) => p.severity === 'warning')?.message ?? ''}`,
+      )
+    }
+
+    const path = gatewayPathOf(scene.file)
+    const gateway = await this.#gatewayFor(projectRef)
+    const current = await gateway.read(path)
+    const next = applySceneEdit(current.content, input.edit)
+
+    await gateway.writeBatch(
+      [{ path, content: next, expectVersion: current.version }],
+      { origin: 'workbench', reason: 'edit', scene: input.label },
+    )
+    return this.#sceneEditReport(projectRef, input.label, path)
+  }
+
   // ─── 设定集工作周期(T9)──────────────────────────────────────────────
+
+  /** 编辑之后的判定报告(与 T10 的 generateScene 同形状,面板/agent 可以复用)。 */
+  async #sceneEditReport(projectRef: string, label: string, path: string): Promise<EditSceneReport> {
+    const [validation, progress, parsedAfter] = await Promise.all([
+      this.validateActiveProject(),
+      this.progress(projectRef),
+      this.#parseScript(projectRef),
+    ])
+    const scene = parsedAfter.scenes.find((candidate) => candidate.label === label)
+    const relative = path.replace(/^game\//, '')
+    const issues: DialectProblem[] = [
+      ...parsedAfter.problems,
+      ...(scene?.problems ?? []),
+    ].filter((problem) => problem.file === relative || problem.code === 'no-start-label')
+    return {
+      path,
+      label,
+      parseOk: scene !== undefined && !scene.readOnly,
+      validation,
+      issues,
+      progress,
+      editedAt: new Date().toISOString(),
+    }
+  }
 
   /**
    * 把 `game/script.rpy` 里的一个 label 段**原样搬**进生成目录(`game/scenes/<label>.rpy`)。

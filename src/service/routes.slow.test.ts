@@ -551,6 +551,67 @@ describe('路由适配层(/api/galfree)', () => {
     expect((await postJson('/api/galfree/bible/import-outline', { text: '   ' })).status).toBe(400)
   })
 
+  it('场景编辑器路由:读表单 / 表单编辑守归属 / 源文本可改 / 坏输入 400', async () => {
+    await freshProject()
+
+    // 读表单:行模型 + 源文本。
+    const form = await req('/api/galfree/scenes/form?label=start')
+    expect(form.status).toBe(200)
+    expect(form.body.label).toBe('start')
+    expect(form.body.rows.length).toBeGreaterThan(0)
+    expect(form.body.source).toContain('label start:')
+    expect((await req('/api/galfree/scenes/form')).status).toBe(400)
+    expect((await req('/api/galfree/scenes/form?label=nope')).status).toBe(404)
+
+    // 表单编辑:停在手写文件的场景被拒(且理由是可执行的指令),源文本模式可以改。
+    const refused = await postJson('/api/galfree/scenes/edit', {
+      label: 'start', edit: { kind: 'setDialogue', line: 3, speaker: null, text: 'x' },
+    })
+    expect(refused.status).toBe(409)
+    expect(refused.body.error).toContain('script.rpy')
+
+    const raw = await postJson('/api/galfree/scenes/edit', {
+      label: 'start',
+      edit: { kind: 'replaceSource', source: 'label start:\n    "从源文本改的。"\n    return\n' },
+    })
+    expect(raw.status).toBe(200)
+    expect(raw.body.form.source).toContain('从源文本改的。')
+    expect(raw.body.validation.ok).toBe(true)
+
+    // 坏编辑(缺 kind)→ 400,不是 500。
+    expect((await postJson('/api/galfree/scenes/edit', { label: 'start', edit: {} })).status).toBe(400)
+    expect((await postJson('/api/galfree/scenes/edit', { label: 'start' })).status).toBe(400)
+  })
+
+  it('分支图路由:节点/边与接缝派生一致,子集外场景带只读与原因', async () => {
+    await freshProject()
+    const graph = await req('/api/galfree/scenes/graph')
+    expect(graph.status).toBe(200)
+    expect(graph.body.dialect).toBe('galfree-subset-1')
+
+    // 与接缝读出来的**同一份**派生对象(不是路由自己算的)。
+    const active = (await service.listProjects()).find((project) => project.active)!
+    const derived = await service.branchGraph(active.id)
+    expect(graph.body.nodes.map((node: { label: string }) => node.label))
+      .toEqual(derived.scenes.map((scene) => scene.label))
+    expect(graph.body.edges.map((edge: { from: string; to: string }) => `${edge.from}->${edge.to}`))
+      .toEqual(derived.edges.map((edge) => `${edge.from}->${edge.to}`))
+    // 节点带戳状态(来自推导,不在面板里自己判)。
+    expect(graph.body.nodes.every((node: { stamp: string }) => typeof node.stamp === 'string')).toBe(true)
+
+    // 子集外场景:图上带只读 + 原因。
+    await service.generateScene(active.id, {
+      label: 'scene_odd',
+      source: 'label scene_odd:\n    if flag:\n        "子集外。"\n    return\n',
+      outline: undefined,
+    })
+    const withOdd = await req('/api/galfree/scenes/graph')
+    const odd = withOdd.body.nodes.find((node: { label: string }) => node.label === 'scene_odd')
+    expect(odd.readOnly).toBe(true)
+    expect(typeof odd.reason).toBe('string')
+    expect(withOdd.body.degraded).toBe(true)
+  })
+
   it('停用开关:仅 /state 可读,其余 503', async () => {
     const offline = createProjectService({ dataDir: join(dataDir, 'disabled') })
     const routes = makeRoutes({ service: offline, config: () => ({ enabled: false, defaultProjectsRoot: '' }) })

@@ -7,6 +7,7 @@ import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { GalfreeError } from './service/error.ts'
 import { createSubdirectory, describePath, listDirectories } from './service/directory-listing.ts'
+import type { SceneEdit } from './service/scene-form.ts'
 import type { ProjectService } from './service/project-service.ts'
 import type { ProvisionStatus } from './service/sdk-provision.ts'
 
@@ -112,6 +113,9 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['/bible/stamp', ['POST']],
   ['/bible/context', ['GET']],
   ['/scenes/relocate', ['POST']],
+  ['/scenes/form', ['GET']],
+  ['/scenes/edit', ['POST']],
+  ['/scenes/graph', ['GET']],
   ['/picker', ['GET']],
   ['/picker/pick', ['POST']],
   ['/picker/list', ['GET']],
@@ -526,6 +530,61 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
+  // 场景编辑器(T11):读表单(行模型 + 源文本)/ 提交编辑(表单或源文本,同走网关)。
+  if (method === 'GET' && path === '/scenes/form') {
+    const label = url.searchParams.get('label')
+    if (label === null || label === '') return writeJson(res, 400, { error: '需要 label 查询参数' })
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    writeJson(res, 200, await service.sceneForm(active.id, label))
+    return
+  }
+
+  if (method === 'POST' && path === '/scenes/edit') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const label = String(body.label ?? '')
+    if (label === '') throw new GalfreeError('unknown-scene', '需要 label')
+    const edit = body.edit as SceneEdit | undefined
+    if (edit === undefined || typeof edit !== 'object' || typeof (edit as { kind?: unknown }).kind !== 'string') {
+      throw new GalfreeError('bad-json', '需要 edit(表单编辑或 replaceSource)')
+    }
+    const report = await service.editScene(active.id, { label, edit })
+    // 只回面板要用的部分:编辑之后的判定 + 新表单(免得它再拉一次)。
+    writeJson(res, 200, {
+      ...report,
+      form: await service.sceneForm(active.id, label),
+    })
+    return
+  }
+
+  // 分支图(T12):派生骨架的只读视图(节点 + 边 + 子集外降级标记)。
+  // 图上编辑**明确出范围**(spec);它只是导航 —— 点节点跳编辑器。
+  if (method === 'GET' && path === '/scenes/graph') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const graph = await service.branchGraph(active.id)
+    const progress = await service.progress(active.id)
+    const stampByLabel = new Map(progress.scenes.map((scene) => [scene.label, scene.stamp]))
+    writeJson(res, 200, {
+      dialect: graph.dialect,
+      degraded: graph.degraded,
+      nodes: graph.scenes.map((scene) => ({
+        label: scene.label,
+        file: scene.file,
+        line: scene.line,
+        readOnly: scene.readOnly,
+        stamp: stampByLabel.get(scene.label) ?? 'none',
+        // 只读原因:第一条警告(与舞台板同源)。
+        ...(scene.readOnly ? { reason: scene.problems.find((problem) => problem.severity === 'warning')?.message ?? '子集外语法' } : {}),
+      })),
+      edges: graph.edges.map((edge) => ({ from: edge.from, to: edge.to, via: edge.via, ...(edge.prompt === undefined ? {} : { prompt: edge.prompt }) })),
+      problems: graph.problems,
+    })
+    return
+  }
+
   // 一键试玩(T7):接缝同一控制器,无第二管线。
   if (method === 'POST' && path === '/playtest') {
     const active = await service.getActiveProject()
@@ -608,7 +667,9 @@ export function makeRoutes(deps: RouteDeps): GalfreeRoute[] {
             : error.code === 'picker-unsupported' ? 501
             : error.code === 'picker-timeout' ? 504
             : error.code === 'bible-not-final' ? 409
-            : error.code === 'version-drift' || error.code === 'expect-required' || error.code === 'path-escape' || error.code === 'stamp-forbidden' || error.code === 'slot-not-filled' || error.code === 'sdk-not-ready' ? 409
+            : error.code === 'version-drift' || error.code === 'expect-required' || error.code === 'path-escape' || error.code === 'stamp-forbidden' || error.code === 'slot-not-filled' || error.code === 'sdk-not-ready'
+              || error.code === 'scene-not-editable' || error.code === 'scene-read-only' || error.code === 'scene-label-elsewhere'
+              || error.code === 'scene-target-exists' || error.code === 'scene-already-canonical' ? 409
             : 500
           writeJson(res, status, { error: error.message, code: error.code })
         } else {
