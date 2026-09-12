@@ -134,6 +134,7 @@ export type NextActionCode =
   | 'art-awaiting-review'
   | 'publish-ready'
   | 'publish-stale'
+  | 'publish-failed'
 
 /** 面板据此跳转(工作台上的锚点;agent 可以据此决定先动哪一场/哪个槽)。 */
 export type NextActionTarget =
@@ -200,11 +201,16 @@ export function deriveNextActions(input: {
   // ── 设定集:先有内容,再等人拍板 ────────────────────────────────────
   const bibleEmpty = input.bible.chapters === 0 && !input.bible.hasOutline
   if (bibleEmpty) {
+    // 措辞要跟着**实际有什么**走:已经写了世界观 / 角色卡但还没章节骨架时,
+    // 说"还没有设定集"是假话(而且会让人以为前面白写了)。
+    const started = input.bible.characters > 0
     actions.push({
       code: 'bible-missing',
       actor: 'agent',
       label: '写设定集(世界观 / 角色 / 章节大纲)',
-      detail: '还没有设定集 —— 它是下游所有生成的唯一记忆源',
+      detail: started
+        ? '设定集还没有章节骨架 —— 下游生成要有它才站得住'
+        : '还没有设定集 —— 它是下游所有生成的唯一记忆源',
       target: { kind: 'bible' },
     })
   } else if (input.bible.stamp !== 'approved') {
@@ -244,7 +250,9 @@ export function deriveNextActions(input: {
     actions.push({
       code: 'lint-errors',
       actor: 'agent',
-      label: `修结构问题(lint 有 ${input.lint.errors} 个 error)`,
+      // 说"板上的 error"而不是"结构问题":这个清单里既有结构问题(structural),
+      // 也有悬空音频引用这类**内容引用**的问题 —— 一律叫结构问题是在替它们归类。
+      label: `修板上的 error(${input.lint.errors} 处)`,
       detail: listOf(errors.slice(0, 6).map((problem) => `${problem.file}${problem.line === undefined ? '' : `:${problem.line}`} ${problem.message}`)),
       ...(scene === undefined ? {} : { target: { kind: 'scene' as const, label: scene.label } }),
     })
@@ -300,23 +308,20 @@ export function deriveNextActions(input: {
   }
 
   // ── 等人:审读戳只有人能盖 ──────────────────────────────────────────
-  const unstampedScenes = input.scenes.filter((scene) => scene.stamp === 'none')
+  // 两种"等人"共用一条动作:戳失效了(stale,改过之后要重看)与还没盖过(none)。
+  // 同时只会出现一种 —— 所以合成一条,而不是写两遍同样的 push。
   const staleScenes = input.scenes.filter((scene) => scene.stamp === 'stale')
-  if (staleScenes.length > 0) {
+  const unstampedScenes = input.scenes.filter((scene) => scene.stamp === 'none')
+  const pendingScenes = staleScenes.length > 0 ? staleScenes : unstampedScenes
+  if (pendingScenes.length > 0) {
     actions.push({
       code: 'scenes-awaiting-review',
       actor: 'human',
-      label: `请人复审改动过的场景(${staleScenes.length} 场戳失效了)`,
-      detail: listOf(staleScenes.map((scene) => scene.label)),
-      target: { kind: 'scene', label: staleScenes[0]!.label },
-    })
-  } else if (unstampedScenes.length > 0) {
-    actions.push({
-      code: 'scenes-awaiting-review',
-      actor: 'human',
-      label: `请人读一遍并盖场景戳(${unstampedScenes.length} 场还没定稿)`,
-      detail: listOf(unstampedScenes.map((scene) => scene.label)),
-      target: { kind: 'scene', label: unstampedScenes[0]!.label },
+      label: staleScenes.length > 0
+        ? `请人复审改动过的场景(${staleScenes.length} 场戳失效了)`
+        : `请人读一遍并盖场景戳(${unstampedScenes.length} 场还没定稿)`,
+      detail: listOf(pendingScenes.map((scene) => scene.label)),
+      target: { kind: 'scene', label: pendingScenes[0]!.label },
     })
   }
   const unreviewed = input.slots.filter((slot) => slot.awaitingReview)
@@ -331,22 +336,36 @@ export function deriveNextActions(input: {
   }
 
   // ── 收尾:板上没有拦路的东西了,才谈"发不发"(而那是人拍板)──────────
+  //
+  // 这一格的措辞要**准**:它推的是"板上的推导不再挡着发布",不是"发布会成功" ——
+  // SDK 供给 / 输出目录 / 界面图这些前置不在这份推导里(那是 `publishReadiness()` 的事),
+  // 所以 detail 里必须点明去哪看真正的准备度。上一次构建**失败**也要如实说,
+  // 不能因为 `stale:false` 就说成"产物就是当前这一版"(那时根本没有产物)。
   const boardClear = input.lint.ok && missingSlots.length === 0 && input.audio.missing.length === 0
   if (boardClear) {
-    if (input.publish !== null && input.publish.stale) {
+    const readinessNote = '能不能真发以发布前置检查为准(SDK 供给 / 输出目录 / 界面图那些不在这份推导里)'
+    if (input.publish !== null && !input.publish.ok) {
+      actions.push({
+        code: 'publish-failed',
+        actor: 'agent',
+        label: '上一次构建失败了:看日志修完再发',
+        detail: (input.publish.logTail.trim() === '' ? '(没有日志尾巴)' : input.publish.logTail.trim()).split('\n').slice(-6).join('\n'),
+        target: { kind: 'publish' },
+      })
+    } else if (input.publish !== null && input.publish.stale) {
       actions.push({
         code: 'publish-stale',
         actor: 'human',
         label: '上次发布的产物已过期(内容又改了)—— 问人要不要重发',
-        detail: input.publish.destination,
+        detail: `${input.publish.destination};${readinessNote}`,
         target: { kind: 'publish' },
       })
     } else if (input.publish === null) {
       actions.push({
         code: 'publish-ready',
         actor: 'human',
-        label: '板上齐了:问人要不要发第一版',
-        detail: '产物会落在项目源树之外;平台上传与在线分发不做',
+        label: '挡着发布的东西都没了:问人要不要发第一版',
+        detail: `产物会落在项目源树之外,平台上传不做;${readinessNote}`,
         target: { kind: 'publish' },
       })
     } else {
@@ -354,7 +373,7 @@ export function deriveNextActions(input: {
         code: 'publish-ready',
         actor: 'human',
         label: '产物就是当前这一版 —— 问人还要不要发别的包',
-        detail: input.publish.destination,
+        detail: `${input.publish.destination};${readinessNote}`,
         target: { kind: 'publish' },
       })
     }

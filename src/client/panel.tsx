@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { GalfreeApi, GalfreeApiError } from './api.ts'
-import type { ProgressView, SdkView, StateView, StampTarget } from './types.ts'
+import type { NextActionView, ProgressView, SdkView, StateView, StampTarget } from './types.ts'
 import { stampKey } from './types.ts'
 import { Chip, Notice, Spinner, relativeTime } from './ui.tsx'
 import { StageBoard } from './stage-board.tsx'
@@ -66,33 +66,33 @@ export function WorkbenchPanel() {
    * 「下一步」上那颗按钮:把推导给的 `target` 翻译成"滚到哪一格 / 打开哪一场"(T21)。
    *
    * 面板**不判断该做什么**(那是 `nextActions` 的事),只负责把人带到他该看的地方:
-   * 场景 → 场景编辑器;槽 → 素材板;设定集 → 设定集卡;试玩 → 舞台板那颗按钮;
-   * 发布 → 发布卡。找不到锚点时静默不跳(界面改版不该变成一次报错)。
+   * 场景 / 音频 → 场景编辑器;槽 → 素材板;设定集 → 设定集卡;试玩 → 那颗按钮;
+   * 发布 → 发布卡。认不出的 kind **明说**,不静默什么都不做 —— 静默失败会让人以为界面坏了。
    */
-  const jumpTo = useCallback((target: { kind: string; label?: string; scene?: string } | undefined) => {
+  const jumpTo = useCallback((target: NextActionView['target']) => {
     if (target === undefined) return
-    if (target.kind === 'scene' && target.label !== undefined) {
-      setFocusScene(target.label)
-      document.getElementById('gf-scene-workbench')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-      return
-    }
-    if (target.kind === 'audio' && target.scene !== undefined) {
-      setFocusScene(target.scene)
-      document.getElementById('gf-scene-workbench')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-      return
-    }
-    const anchor = target.kind === 'slot' ? 'gf-asset-board'
+    // 场景 / 音频两类都"打开那一场"(音频的行号给 agent 用,面板不做行内高亮)。
+    const sceneLabel = target.kind === 'scene' ? target.label : target.kind === 'audio' ? target.scene : null
+    if (sceneLabel !== null) setFocusScene(sceneLabel)
+    const anchor = target.kind === 'scene' || target.kind === 'audio' ? 'gf-scene-workbench'
+      : target.kind === 'slot' ? 'gf-asset-board'
       : target.kind === 'bible' ? 'gf-bible-card'
       : target.kind === 'publish' ? 'gf-publish-card'
       : target.kind === 'playtest' ? 'gf-playtest-button'
       : null
-    if (anchor === null) return
+    if (anchor === null) {
+      pushNotice('warn', `这一步没有可跳转的位置(${String(target.kind)})—— 在上面那条里照着做就行。`)
+      return
+    }
     const element = document.getElementById(anchor)
-    element?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    if (element === null) return
+    element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    // 锚点都带 `tabIndex={-1}`,所以程序化 focus 有意义(首屏阅读器会跟过去)。
     if (element instanceof HTMLElement) element.focus({ preventScroll: true })
-  }, [])
+  }, [pushNotice])
 
-  const refresh = useCallback(async (options?: { quiet?: boolean }) => {    try {
+  const refresh = useCallback(async (options?: { quiet?: boolean }) => {
+    try {
       const next = await api.state()
       setState(next)
       if (next.activeId === null || next.activeMissing) {

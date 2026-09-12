@@ -26,6 +26,22 @@ function markTone(severity: string): 'warn' | 'bad' | 'none' {
 }
 
 /**
+ * 跳转按钮的措辞:按 `target.kind` 给一个人话动词。
+ *
+ * 这是**表现层映射**(对一个场景目标,我们会打开场景编辑器),不是领域判断 ——
+ * "该做什么"是 `progress.nextActions` 给的。所以映射只有这一处,认不出来的 kind
+ * 退回一句中性的话,而不是让按钮点了没反应(`panel.tsx` 那边对认不出的 kind 会明说)。
+ */
+const JUMP_CAPTION: Record<string, string> = {
+  scene: '打开这一场',
+  audio: '打开这一场', // 音频的 target 带 scene + line:面板打开那一场(行内高亮不做,行号给 agent 用)
+  slot: '看这个槽',
+  bible: '看设定集',
+  playtest: '看试玩',
+  publish: '看发布',
+}
+
+/**
  * 「下一步」那一行(T21):把推导出来的行动清单摆出来。
  *
  * 只画 `progress.nextActions` 给的东西 —— 文案、`actor`、`target` 全是接缝推导的
@@ -41,14 +57,14 @@ function NextActions({ actions, onJump }: { actions: NextActionView[]; onJump: (
       </div>
       {actions.map((action, index) => (
         <div key={`${action.code}-${index}`} className={s.nextActionRow}>
-          <Chip tone={action.actor === 'human' ? 'warn' : 'ok'} title={action.actor === 'human' ? '要人来做的:主观判断 / 认可 / 拍板' : 'agent 能自己做的'}>
+          <Chip tone={action.actor === 'human' ? 'warn' : 'ok'} title={action.actor === 'human' ? '这条归人做' : '这条 agent 能做'}>
             {action.actor === 'human' ? '请人' : 'agent'}
           </Chip>
           <span className={s.nextActionLabel}>{action.label}</span>
           {action.detail !== undefined ? <span className={s.nextActionDetail}>{action.detail}</span> : null}
           {action.target !== undefined ? (
             <button type="button" className={`${s.button} ${s.ghost} ${s.tiny}`} onClick={() => onJump(action.target)}>
-              {action.target.kind === 'scene' ? '打开这一场' : action.target.kind === 'slot' ? '看这个槽' : '去处理'}
+              {JUMP_CAPTION[action.target.kind] ?? '去处理'}
             </button>
           ) : null}
         </div>

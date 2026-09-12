@@ -4,8 +4,9 @@
  * 契约来源(`netori/galfree#29`):
  *  1. **纯推导**:同一份输入两次调用结果相同,而且**不产生任何写**(网关写日志长度不变);
  *  2. **顺序稳定**:阻塞生成的在前,打磨在后;
- *  3. **actor 是推导的一部分**:要人主观判断的一律 `human`(盖戳 / 试玩认读 / 发布拍板),
- *     生成 / 补素材 / 接线这类 `agent`;
+ *  3. **actor 是推导的一部分**:要人主观判断的一律 `human`(盖戳 / 认可 / 发布拍板),
+ *     生成 / 补素材 / 接线 / 跑试玩是 `agent`(跑试玩有工具入口,`human` 的那一份是
+ *     **认同**"玩过了、行",由场景戳承载);
  *  4. **不是"哪里坏了"的第二份**:`problems` 说哪里坏了,`nextActions` 说接着做什么 ——
  *     两边可以同时出现同一件事,但措辞与用途不同(一个定位缺陷,一个给动作);
  *  5. 板上没毛病时给一条 `publish-ready`(**不是空数组**)。
@@ -227,12 +228,53 @@ describe('板上的「下一步」(T21)', () => {
     expect(action((await service.progress('next')).nextActions, 'lint-errors')).toBeUndefined()
   })
 
-  it('板上没毛病 → 给一条 publish-ready(而不是空数组)', async () => {
+  it('板上没毛病 → 给一条 publish-ready(而不是空数组);措辞不许说成"板上齐了"', async () => {
     await makeGreen()
     const progress = await service.progress('next')
-    // 这一档里还剩"人还没盖场景戳 / 槽戳"这类打磨项,但不该妨碍"可以发了"这件事的形态。
+    // 这一档里还剩"人还没盖场景戳 / 槽戳"这类打磨项 —— 它挡不住发布,但也不该被说成
+    // "板上齐了"(那会跟同一行里的"请人盖戳"自相矛盾)。措辞说的是"挡着发布的东西都没了"。
     expect(progress.nextActions.length).toBeGreaterThan(0)
-    expect(action(progress.nextActions, 'publish-ready')).toBeDefined()
+    const ready = action(progress.nextActions, 'publish-ready')!
+    expect(ready).toBeDefined()
+    expect(ready.label).not.toMatch(/板上齐了/)
+    // 而且如实说清:真能不能发要以发布前置检查为准(那份检查不在这份推导里)。
+    expect(ready.detail).toMatch(/前置检查|SDK|界面图/)
+  })
+
+  it('上一次构建**失败** → 推的是 publish-failed(不是"产物就是当前这一版")', async () => {
+    await makeGreen()
+    // 造一次失败:构建端口返回非 0 → 账本里 ok:false 且**没有产物**。
+    service = createProjectService({
+      dataDir: dataDir + '-fail',
+      uiTemplate: fakeUiTemplate(sdkDir),
+      playtest: { resolveLauncher: async () => '/fake/renpy.exe', spawn: async () => ({ code: 0, log: "Ren'Py 8.5.3 starting\n" }) },
+      publish: {
+        ports: { resolveLauncher: async () => join(sdkDir, 'renpy.exe'), run: async () => ({ code: 1, log: 'Error: 打包时炸了\n' }) },
+        destination: () => join(outDir, 'dist-fail'),
+      },
+    })
+    await service.createProject({ projectsRoot, name: 'next-bad', title: '失败' })
+    await service.writeBible('next-bad', { theme: '雨天', chapters: [{ id: 'ch1', title: '一', scenes: [] }] }, { via: 'agent' })
+    await service.stampBible('next-bad', { via: 'human' })
+    const script = await service.readProjectFile('next-bad', 'game/script.rpy')
+    await service.writeProjectFiles('next-bad', [{
+      path: 'game/script.rpy',
+      content: `label start:\n    jump scene_one\n\n${script.content.slice(script.content.indexOf('label prologue:'))}`,
+      expectVersion: script.version,
+    }], { origin: 'agent', reason: 'scenario' })
+    await service.generateScene('next-bad', { label: 'scene_one', source: 'label scene_one:\n    "雨。"\n    jump prologue\n', outline: undefined })
+    await service.playtestStart('next-bad')
+    const published = await service.publish('next-bad')
+    expect(published.ok).toBe(false)
+    expect(published.run?.artifacts).toEqual([])
+
+    const progress = await service.progress('next-bad')
+    expect(action(progress.nextActions, 'publish-ready'), '"产物就是当前这一版"是假话:那次构建没产出任何东西').toBeUndefined()
+    const failed = action(progress.nextActions, 'publish-failed')!
+    expect(failed).toBeDefined()
+    expect(failed.actor).toBe('agent')
+    // 失败原因原话带上(照着修),而不是一句"失败了"。
+    expect(failed.detail).toContain('打包时炸了')
   })
 
   it('发布过之后内容又改了 → 动作换成 publish-stale(产物代表的不再是这一版)', async () => {

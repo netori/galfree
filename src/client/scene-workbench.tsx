@@ -123,7 +123,7 @@ export function SceneWorkbench({ api, sceneLabels, hasProject, focus, onFocusHan
   }
 
   return (
-    <section className={s.card} id="gf-scene-workbench" aria-label="场景编辑器与分支图">
+    <section className={s.card} id="gf-scene-workbench" tabIndex={-1} aria-label="场景编辑器与分支图">
       <div className={s.cardHead}>
         <span className={s.cardTitle}>场景</span>
         <span className={s.cardCount}>

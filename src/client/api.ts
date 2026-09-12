@@ -2,6 +2,10 @@
  * /api/galfree 路由族的浏览器端客户端 —— 唯一数据通道(同源 fetch)。
  * 视图类型与 src/routes.ts 的响应形状对齐(接缝状态的呈现层)。
  */
+// 只借类型:推导引擎的那两个联合(码 / 跳转目标)不在客户端手抄第二份 —— type-only import
+// 构建时被擦掉,产物里不会多出服务端代码。
+import type { NextActionCode, NextActionTarget } from '../service/progress.ts'
+
 export interface ProjectView {
   id: string
   name: string
@@ -319,14 +323,21 @@ export interface CompletenessView {
   endingReachable: boolean
 }
 
+/**
+ * 「下一步」的一条(T21)。
+ *
+ * **码与目标类型直接引用接缝的那两个联合**(`NextActionCode` / `NextActionTarget`),
+ * 不再在客户端手抄一份 —— 抄一份的代价是:接缝多一种 target,这里不会报错,
+ * 面板只会静默不跳(那正是这份 doc 想防的漂移)。type-only import 在构建时被擦掉,
+ * 客户端产物里不会多出服务端代码。
+ */
 export interface NextActionView {
-  /** 稳定机器码(面板按它决定要不要跳转,不依赖中文文案)。 */
-  code: string
+  code: NextActionCode
   /** 面向人的一句话(与 agent 读的是同一份)。 */
   label: string
   actor: 'agent' | 'human'
   detail?: string
-  target?: { kind: 'bible' | 'scene' | 'slot' | 'audio' | 'playtest' | 'publish'; label?: string; slot?: string; scene?: string; line?: number }
+  target?: NextActionTarget
 }
 
 export interface ProgressView {
