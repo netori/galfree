@@ -802,6 +802,46 @@ describe('路由适配层(/api/galfree)', () => {
     expect([409, 200]).toContain(noBody.status)
   })
 
+  it('T20 同一条写路:面板路由与 agent 工具落到**同一份账本与推导**(互相看得见)', async () => {
+    // 为什么值得一条:AC2 说的是"同一个动作从面板与从工具走,落到同一份账本/推导"。
+    // 结构上两者都只调 `ProjectService`,但"结构上"要靠一条**跨两条入口**的断言来兜底 ——
+    // 只断言"工具调了接缝"证明不了面板那条路也一样。
+    const project = await freshProject()
+    const { registerGalfreeTools } = await import('./tools.ts')
+    const tools: Array<{ name: string; execute: (args: Record<string, unknown>) => Promise<string> }> = []
+    registerGalfreeTools(
+      { tools: { register: (tool: unknown) => { tools.push(tool as never); return () => {} } } } as never,
+      service,
+      { defaultProjectsRoot: () => projectsRoot, sdkDir: () => sdkDir },
+    )
+    const tool = (name: string) => tools.find((candidate) => candidate.name === name)!
+
+    // ① 面板那条路写设定集(路由 → 接缝)。
+    const patched = await postJson('/api/galfree/bible/patch', { project: project.id, theme: '面板写的主题', chapters: [{ id: 'ch1', title: '一章', scenes: [] }] })
+    expect(patched.status).toBe(200)
+    // ② 工具那条路**读**到的就是它(同一份文件、同一份推导)。
+    const readBack = JSON.parse(await tool('galfree_story_bible').execute({ project: project.id, action: 'read' })) as {
+      bible: { theme?: string; chapters: Array<{ id: string }> }
+      board: { stamp: string }
+    }
+    expect(readBack.bible.theme).toBe('面板写的主题')
+    expect(readBack.bible.chapters.map((chapter) => chapter.id)).toEqual(['ch1'])
+    expect(readBack.board.stamp).toBe('none')
+
+    // ③ 反过来:工具写,面板读得到(而且板上的处境一模一样)。
+    const written = await tool('galfree_story_bible').execute({ project: project.id, action: 'write', world: '工具写的世界观。' })
+    expect(written).toContain('"ok": true')
+    const panelView = await req(`/api/galfree/bible?project=${project.id}`)
+    expect(panelView.body.bible.world).toBe('工具写的世界观。')
+    const progress = await req(`/api/galfree/progress?project=${project.id}`)
+    expect(progress.body.bible.stamp).toBe('none')
+    // ④ 快照也同一份:两条路各留下一条,作者都是 GALFree(一次写批一条)。
+    const history = await tool('galfree_snapshot').execute({ project: project.id, action: 'history', path: '.studio/bible/bible.json' })
+    const entries = (JSON.parse(history) as { entries: Array<{ author: string; subject: string }> }).entries
+    expect(entries.length).toBeGreaterThanOrEqual(2)
+    expect(entries.every((entry) => entry.author === 'GALFree')).toBe(true)
+  })
+
   it('停用开关:仅 /state 可读,其余 503', async () => {
     const offline = createProjectService({ dataDir: join(dataDir, 'disabled'), uiTemplate: fakeUiTemplate(sdkDir) })
     const routes = makeRoutes({ service: offline, config: () => ({ enabled: false, defaultProjectsRoot: '' }) })

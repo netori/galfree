@@ -841,9 +841,19 @@ export class ProjectService {
         `这一场用了方言子集外的语法,编辑器降级只读:${scene.problems.find((p) => p.severity === 'warning')?.message ?? ''}`,
       )
     }
-    // 音频接线(T17):`play` 必须给文件 —— 宁可当场拒绝,也不落一行 `play music ""` 的坏语法。
-    if (input.edit.kind === 'setAudio' && input.edit.action === 'play' && (input.edit.file ?? '').trim() === '') {
-      throw new GalfreeError('invalid-audio', 'play 需要一个音频文件(相对 game/ 的路径,如 audio/rain.ogg);要停声道请用 stop')
+    // 音频接线的闸门(T17/T20):**枚举与必填都在这里判** —— 写进 `.rpy` 的每一行都要是
+    // 引擎认的语法,而工具面与面板路由都可能把自由 JSON 送进来(路由就是 `body as never`)。
+    // 规则只住在某一个适配器里 = 另一条路能把坏行写进项目。
+    if (input.edit.kind === 'setAudio') {
+      if (!['music', 'sound', 'voice'].includes(input.edit.channel)) {
+        throw new GalfreeError('invalid-audio', `声道只能是 music / sound / voice:${String(input.edit.channel)}`)
+      }
+      if (input.edit.action !== 'play' && input.edit.action !== 'stop') {
+        throw new GalfreeError('invalid-audio', `音频动作只能是 play / stop:${String(input.edit.action)}`)
+      }
+      if (input.edit.action === 'play' && (input.edit.file ?? '').trim() === '') {
+        throw new GalfreeError('invalid-audio', 'play 需要一个音频文件(相对 game/ 的路径,如 audio/rain.ogg);要停声道请用 stop')
+      }
     }
 
     const path = gatewayPathOf(scene.file)

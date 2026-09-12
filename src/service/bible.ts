@@ -68,10 +68,32 @@ export async function readBible(root: string): Promise<BibleDocument> {
   try {
     const doc = JSON.parse(await readFile(join(root, BIBLE_FILE), 'utf8')) as BibleDocument
     if (doc.schemaVersion !== 1 || !Array.isArray(doc.chapters)) throw new Error('shape')
-    return { ...emptyBible(), ...doc, characters: doc.characters ?? [], outline: doc.outline ?? null }
+    const document = { ...emptyBible(), ...doc, characters: doc.characters ?? [], outline: doc.outline ?? null }
+    assertBibleReadable(document)
+    return document
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyBible()
+    if (error instanceof GalfreeError) throw error
     throw new GalfreeError('bible-corrupt', `设定集无法解析:${String(error)}`)
+  }
+}
+
+/**
+ * **读盘时的最小形状闸门**:只拦"会让推导炸掉"的东西。
+ *
+ * 写的闸门(`assertBibleValid`)拦的是领域规则(标题、长度、引用形状);这里拦的是**崩溃点**:
+ * 指纹计算要遍历 `chapter.scenes`,缺了它每次读板都抛内部 `TypeError`
+ * (板、试玩、发布全炸),而人只看到一句 `chapter.scenes is not iterable`。
+ * 所以盘上已经有坏文档时,至少要在这里说清"是这个文件坏了、去修它"。
+ */
+function assertBibleReadable(doc: BibleDocument): void {
+  for (const chapter of doc.chapters) {
+    if (!Array.isArray((chapter as { scenes?: unknown }).scenes)) {
+      throw new GalfreeError(
+        'bible-corrupt',
+        `设定集文件里的章节形状不对(缺 scenes 数组):${JSON.stringify(chapter)} —— 请人修 .studio/bible/bible.json`,
+      )
+    }
   }
 }
 

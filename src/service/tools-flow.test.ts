@@ -141,6 +141,15 @@ describe('全流程工具面(T20)', () => {
       expect(out.project.root).toBe(join(other, 'elsewhere'))
     })
 
+    it('create:没有 SDK 界面模板 → 如实拒绝(不假装拷到了界面文件)', async () => {
+      // 生产里没有 `uiTemplate` 端口:界面文件只能从 SDK 拷(缺了项目连关窗都崩)。
+      service = createProjectService({ dataDir: dataDir + '-nodb' })
+      tools = register({ defaultProjectsRoot: () => projectsRoot })
+      const out = await find('galfree_create_project').execute({ action: 'create', name: 'nodb' })
+      expect(out).toContain('sdk-ui-missing')
+      expect(await service.listProjects()).toEqual([])
+    })
+
     it('list / activate:列出全部项目、切激活位(同一个注册表)', async () => {
       await find('galfree_create_project').execute({ action: 'create', name: 'one' })
       await find('galfree_create_project').execute({ action: 'create', name: 'two' })
@@ -171,7 +180,7 @@ describe('全流程工具面(T20)', () => {
         action: 'write',
         theme: '雨天的天台',
         world: '只有两个人的放学后。',
-        chapters: [{ id: 'ch1', title: '第一场雨' }],
+        chapters: [{ id: 'ch1', title: '第一场雨', scenes: [] }],
         characters: [{
           id: 'xiao_tang',
           name: '小棠',
@@ -230,16 +239,50 @@ describe('全流程工具面(T20)', () => {
       expect(out).toMatch(/太长/)
     })
 
-    it('write:章节形状坏掉也如实拒绝(不是内部 TypeError)', async () => {
+    it('write:改角色设定卡**不会**抹掉参考链(链归 galfree_reference_chain)', async () => {
+      await find('galfree_create_project').execute({ action: 'create', name: 'chain' })
+      await find('galfree_story_bible').execute({
+        action: 'write',
+        characters: [{ id: 'xiao_tang', name: '小棠', voice: 'xiao_tang', appearance: { hair: '黑色短发' } }],
+      })
+      // 先经**另一个工具**把链写上(那是链的唯一入口)。
+      await service.writeProjectFiles('chain', [{ path: 'game/images/xiao_tang-base.png', content: Buffer.from([0x89, 0x50]), expectVersion: 'absent' }], { origin: 'workbench', reason: 'asset' })
+      await find('galfree_reference_chain').execute({
+        project: 'chain', character: 'xiao_tang',
+        references: [{ path: 'game/images/xiao_tang-base.png', note: '主视觉' }],
+      })
+      expect((await service.characters('chain'))[0]!.references.map((reference) => reference.path)).toEqual(['game/images/xiao_tang-base.png'])
+
+      // 再改设定卡(登记簿是**整条替换**的语义,所以适配器必须把链带回去)。
+      const out = await find('galfree_story_bible').execute({
+        action: 'write',
+        characters: [{ id: 'xiao_tang', name: '小棠', voice: 'xiao_tang', appearance: { hair: '改成银色短发' } }],
+      })
+      expect(out).toContain('"ok": true')
+      const record = (await service.characters('chain'))[0]!
+      expect(record.appearance.hair).toBe('改成银色短发')
+      // 链还在(契约:「不给空链入口」—— 更新设定卡不是清链的手段)。
+      expect(record.references.map((reference) => reference.path)).toEqual(['game/images/xiao_tang-base.png'])
+    })
+
+    it('write:章节形状不对 → 参数契约当场拒绝(不是写下去之后内部 TypeError)', async () => {
       await find('galfree_create_project').execute({ action: 'create', name: 'bible-shape' })
-      const out = await find('galfree_story_bible').execute({ action: 'write', chapters: [{ id: 'c1' }] })
-      expect(out).toContain('bible-invalid')
-      expect(out).toMatch(/标题/)
+      // `scenes` 在接缝那边是必填数组,所以工具契约也要求它 —— 模型在**参数**这一层就拿到
+      // 拒绝(而不是写进盘、之后每次读板都炸)。两种坏形状都拒:
+      await expect(find('galfree_story_bible').execute({ action: 'write', chapters: [{ id: 'c1', title: '缺 scenes' }] }))
+        .rejects.toThrow(/scenes/)
+      await expect(find('galfree_story_bible').execute({ action: 'write', chapters: [{ id: 'c1', title: 'x', scenes: 'start' }] }))
+        .rejects.toThrow(/scenes/)
+      // 一个字节都没写进去。
+      expect((await service.bible('bible-shape')).chapters).toEqual([])
+      // 接缝那一侧的领域规则仍在(别的调用方 —— 面板路由 —— 可以绕过工具契约)。
+      await expect(service.writeBible('bible-shape', { chapters: [{ id: 'c2', title: 'x', scenes: [] }, { id: 'c2', title: 'y', scenes: [] }] }, { via: 'agent' }))
+        .rejects.toMatchObject({ code: 'bible-invalid' })
     })
 
     it('read:给主题/世界观/章节/角色引用/大纲原文,以及板上的定稿处境', async () => {
       await find('galfree_create_project').execute({ action: 'create', name: 'bible4' })
-      const written = await find('galfree_story_bible').execute({ action: 'write', theme: '主题', chapters: [{ id: 'ch1', title: '一章' }] })
+      const written = await find('galfree_story_bible').execute({ action: 'write', theme: '主题', chapters: [{ id: 'ch1', title: '一章', scenes: [] }] })
       expect(written, 'write 就没成,后面读的当然也成不了').toContain('"ok": true')
       const out = JSON.parse(await find('galfree_story_bible').execute({ action: 'read' })) as {
         bible: { theme?: string; chapters: Array<{ id: string }> }
@@ -394,10 +437,30 @@ describe('全流程工具面(T20)', () => {
       expect(out).toMatch(/越界/)
     })
 
-    it('没有 relocate 这个动作(搬家只能由人发起:它重写的是人的手写文件)', () => {
+    it('没有 relocate 这个动作(搬家只能由人发起:它重写的是人的手写文件)', async () => {
       const tool = find('galfree_edit_scene')
       expect(tool.description).toMatch(/搬家|搬进生成目录/)
       expect(tool.parameters.properties.action?.description ?? '').not.toContain('relocate')
+      // **行为**上也不放行:传 relocate 会被当成不认识的 action,而且真的什么都没搬。
+      await seedScene()
+      const out = await find('galfree_edit_scene').execute({ project: 'flow', action: 'relocate', label: 'start' })
+      expect(out).toMatch(/不认识的 action/)
+      expect((await service.progress('flow')).scenes.find((scene) => scene.label === 'start')!.file).toBe('script.rpy')
+      expect((await service.progress('flow')).scenes.find((scene) => scene.label === 'scene_one')!.file).toBe('scenes/scene_one.rpy')
+    })
+
+    it('audio 那一行不在这里改 → 指到 galfree_wire_audio(同一个动作不给两条入口)', async () => {
+      await seedScene()
+      const out = await find('galfree_edit_scene').execute({
+        project: 'flow', action: 'edit', label: 'scene_one',
+        edit: { kind: 'setAudio', line: 6 },
+      })
+      expect(out).toContain('galfree_wire_audio')
+      // 认不出来的 kind 也给出可用清单。
+      const bogus = await find('galfree_edit_scene').execute({
+        project: 'flow', action: 'edit', label: 'scene_one', edit: { kind: 'setMusic' },
+      })
+      expect(bogus).toMatch(/不认识的 edit.kind/)
     })
   })
 
@@ -490,12 +553,22 @@ describe('全流程工具面(T20)', () => {
       expect(out).toContain('invalid-audio')
     })
 
-    it('wire:声道 / 行号给错 → 当场说清要什么(不猜一个声道写下去)', async () => {
+    it('wire:声道 / 行号给错 → 接缝当场拒,原话带回(不猜一个声道写下去)', async () => {
       await seedScene()
-      expect(await find('galfree_wire_audio').execute({ project: 'flow', action: 'wire', label: 'scene_one', line: 6, channel: 'bgm' }))
-        .toMatch(/music \/ sound \/ voice/)
-      expect(await find('galfree_wire_audio').execute({ project: 'flow', action: 'wire', label: 'scene_one', channel: 'music' }))
-        .toMatch(/line/)
+      await dropAudio('flow', 'audio/rain.ogg')
+      // 声道是枚举:闸门在接缝上(别的适配器也吃同一套判断)。
+      const badChannel = await find('galfree_wire_audio').execute({
+        project: 'flow', action: 'wire', label: 'scene_one', line: 6, channel: 'bgm', file: 'audio/rain.ogg',
+      })
+      expect(badChannel).toContain('invalid-audio')
+      expect(badChannel).toMatch(/music \/ sound \/ voice/)
+      // 行号:缺了 / 不是正整数 → 不能"改了个不存在的位置还说成功"。
+      const badLine = await find('galfree_wire_audio').execute({
+        project: 'flow', action: 'wire', label: 'scene_one', channel: 'music', file: 'audio/rain.ogg',
+      })
+      expect(badLine).toMatch(/行号/)
+      // 一个字节都没落盘。
+      expect((await service.readProjectFile('flow', 'game/scenes/scene_one.rpy')).content).not.toContain('play music')
     })
   })
 
@@ -652,8 +725,10 @@ describe('全流程工具面(T20)', () => {
 
   describe('AC1 端到端:只凭工具面走完全流程', () => {
     it('建项目 → 写设定集 →(人盖定稿戳)→ 逐场生成 → 补素材 → 接线音频 → 试玩 → 发布', async () => {
-      // 全程只经**工具调用**;唯一不经工具的是"人"的两步(盖定稿戳、把音频文件丢进 game/),
-      // 那两步在下面显式标出来 —— 它们本来就不该有 agent 入口(ADR-0008)。
+      // 全程只经**工具调用**收场;不经工具的东西只有三类,每一类都在下面显式标出来:
+      //  ① **人的两步**(盖定稿戳、把音频文件丢进 game/)—— 它们本来就不该有 agent 入口(ADR-0008);
+      //  ② 测试自己的**读盘核对**(fs 直接看磁盘终态)—— 那是断言,不是干活;
+      //  ③ 断言用的 `service.*` 读方法(板 / 列表)—— 与工具读的是同一份推导。
       const out = {} as Record<string, unknown>
 
       // ① 建项目
@@ -668,11 +743,12 @@ describe('全流程工具面(T20)', () => {
       })) as never
       // ③ 生成先要定稿戳 —— **人**盖(这里就是人那一步)。
       await service.stampBible('e2e', { via: 'human' })
-      // ④ 让这一场可达:把模板的 start 接到它(源文本模式,手写文件也开放)
-      const script = await service.readProjectFile('e2e', 'game/script.rpy')
+      // ④ 让这一场可达:把模板的 start 接到它(源文本模式,手写文件也开放)。
+      //    源文本本身也是经**工具**读的(edit_scene 的 read 给的就是那一份)。
+      const startSource = (await readScene('e2e', 'start')).source
       out.wireStart = JSON.parse(await find('galfree_edit_scene').execute({
         project: 'e2e', action: 'edit', label: 'start',
-        edit: { kind: 'replaceSource', source: `label start:\n    jump scene_one\n\n${script.content.slice(script.content.indexOf('label prologue:'))}` },
+        edit: { kind: 'replaceSource', source: `label start:\n    jump scene_one\n\n${startSource.slice(startSource.indexOf('label prologue:'))}` },
       })) as never
       // ⑤ 逐场生成(这一场引用了一个立绘槽 → 板上会出现待填槽)
       out.scene = JSON.parse(await find('galfree_generate_scene').execute({

@@ -196,8 +196,17 @@ export function applySceneEdit(text: string, edit: SceneEdit): string {
   if (edit.kind === 'replaceSource') return edit.source.replace(/\r\n/g, '\n')
   const lines = text.split('\n')
   const at = (line: number): string => lines[line - 1] ?? ''
+  /**
+   * 行号闸门:**正整数 + 在范围内**。
+   *
+   * 正面看是"越界要拒",背面才是要害:`NaN` 与小数会让 `line < 1` / `line > length`
+   * 两个比较**全部为假**(NaN 与任何数比都是 false),于是守卫整个空过,
+   * 接着 `lines[NaN - 1] = …` 会在数组上挂一个莫名其妙的属性 —— 写批算成功,文件没变,
+   * 而调用方以为改好了。所以先判"是不是行号",再判"在不在范围内"。
+   */
   const guard = (line: number): void => {
-    if (line < 1 || line > lines.length) throw new Error(`行号越界:${line}(文件共 ${lines.length} 行)`)
+    if (!Number.isInteger(line) || line < 1) throw new Error(`行号必须是正整数:${String(line)}`)
+    if (line > lines.length) throw new Error(`行号越界:${line}(文件共 ${lines.length} 行)`)
   }
 
   switch (edit.kind) {
@@ -208,6 +217,10 @@ export function applySceneEdit(text: string, edit: SceneEdit): string {
     }
     case 'setImage': {
       guard(edit.line)
+      // role 是枚举:写进去的必须是引擎认的三种之一(自由 JSON 进来时静态类型挡不住)。
+      if (edit.role !== 'show' && edit.role !== 'scene' && edit.role !== 'hide') {
+        throw new Error(`图像动作只能是 show / scene / hide:${String(edit.role)}`)
+      }
       lines[edit.line - 1] = serializeImage(indentOf(at(edit.line)), edit.role, edit.tag, edit.attributes)
       return lines.join('\n')
     }

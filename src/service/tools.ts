@@ -632,9 +632,11 @@ export function registerGalfreeTools(
         if (action === 'activate') {
           const ref = String(args.project ?? '')
           if (ref === '') return 'activate 需要 `project`(项目 id 或唯一 name);先 action: "list" 看一眼。'
-          const hit = (await service.listProjects()).find((project) => project.id === ref || project.name === ref)
+          // 一次解析(id 或唯一 name,与别的工具的 `project` 同口径),不自己另立一套匹配规则。
+          const projects = await service.listProjects()
+          const hit = projects.find((project) => project.id === ref || project.name === ref)
           if (hit === undefined) {
-            const known = (await service.listProjects()).map((project) => project.name)
+            const known = projects.map((project) => project.name)
             return `没有这个项目:${ref}${known.length === 0 ? '(现在一个项目都没有,先 action: "create")' : `(现有:${known.join('、')})`}`
           }
           await service.setActive(hit.id)
@@ -693,9 +695,9 @@ export function registerGalfreeTools(
           additionalProperties: false,
           properties: {
             id: { type: 'string', required: true, description: '章节 id(slug,如 ch1)' },
-            title: { type: 'string', description: '章节标题' },
+            title: { type: 'string', required: true, description: '章节标题' },
             outline: { type: 'string', description: '这一章的梗概(存意图,不抄正文)' },
-            scenes: { type: 'array', description: '这一章包含的场景 label', items: { type: 'string' } },
+            scenes: { type: 'array', required: true, description: '这一章覆盖的场景 label(还没有就填空数组 —— 接缝要求它是数组)', items: { type: 'string' } },
           },
         },
       },
@@ -770,31 +772,14 @@ export function registerGalfreeTools(
         }
 
         // 有给的字段才写(缺省 = 不动那一格);章节**整段替换**(接缝的口径,不做逐字段合并)。
+        const records = args.characters === undefined
+          ? undefined
+          : await mergeCharacterCards(service, active, args.characters as Array<Record<string, unknown>>)
         await service.writeBible(active, {
           ...(args.theme === undefined ? {} : { theme: String(args.theme) }),
           ...(args.world === undefined ? {} : { world: String(args.world) }),
-          ...(args.chapters === undefined ? {} : {
-            // `scenes` 在这张工具契约里是可选(章节先立着、场景还没定是常态);
-            // 接缝那边它是必填数组,所以这里补个空数组 —— 形状判断仍归接缝。
-            chapters: (args.chapters as Array<Record<string, unknown>>).map((chapter) => ({
-              ...chapter,
-              scenes: Array.isArray(chapter.scenes) ? chapter.scenes : [],
-            })) as BibleChapter[],
-          }),
-          // 角色设定卡:工具面用 snake_case(`style_anchor`)对外,登记簿用 camelCase(`styleAnchor`);
-          // 映射住在这里,判断(什么算合法记录)仍在接缝(`upsertCharacter`)。参考链不在这里写
-          // —— 那是 `galfree_reference_chain` 的事(同一张脸只有一条链)。
-          ...(args.characters === undefined ? {} : {
-            characters: (args.characters as Array<Record<string, unknown>>).map((entry) => ({
-              id: String(entry.id ?? ''),
-              name: String(entry.name ?? ''),
-              ...(entry.voice === undefined ? {} : { voice: String(entry.voice) }),
-              appearance: (entry.appearance ?? {}) as Record<string, string>,
-              ...(entry.style_anchor === undefined ? {} : { styleAnchor: String(entry.style_anchor) }),
-              references: [],
-              ...(entry.note === undefined ? {} : { note: String(entry.note) }),
-            })) as never,
-          }),
+          ...(args.chapters === undefined ? {} : { chapters: args.chapters as BibleChapter[] }),
+          ...(records === undefined ? {} : { characters: records as never }),
         }, { via: 'agent' })
 
         const progress = await service.progress(active)
@@ -870,19 +855,22 @@ export function registerGalfreeTools(
           }, null, 2)
         }
         if (String(args.action ?? '') !== 'edit') {
-          return `不认识的 action:${String(args.action ?? '') || '(空)'} —— 只有 read / edit。`
+          return `不认识的 action:${String(args.action ?? '') || '(空)'} —— 只有 read / edit(搬家只能由人发起,没有这个动作)。`
         }
-        const edit = sceneEditOf(args.edit)
-        if (edit === null) return '需要 `edit`(一条结构化编辑指令,kind 决定其余字段;先 action: "read" 看行号)。'
-        const report = await service.editScene(active, { label, edit })
+        const parsed = sceneEditOf(args.edit)
+        if ('problem' in parsed) return parsed.problem
+        const report = await service.editScene(active, { label, edit: parsed.edit })
+        const scene = report.progress.scenes.find((candidate) => candidate.label === label) ?? null
         return JSON.stringify({
-          ok: report.parseOk && report.issues.every((issue) => issue.severity !== 'error'),
+          // `ok` 说的是**这次编辑**(解析 + 这一场的校验,都是接缝给的布尔,适配器不重算规则);
+          // 整块板的处境看 `lint` 与 `scene.marks` —— 项目别处的毛病不算这次编辑的账。
+          ok: report.parseOk && report.validation.ok,
           path: report.path,
           parseOk: report.parseOk,
           validation: { validator: report.validation.validator, ok: report.validation.ok },
           issues: report.issues.map((issue) => ({ severity: issue.severity, code: issue.code, file: issue.file, line: issue.line, message: issue.message })),
           lint: report.progress.lint,
-          scene: report.progress.scenes.find((scene) => scene.label === label) ?? null,
+          scene: scene === null ? null : { stamp: scene.stamp, readOnly: scene.readOnly, marks: scene.marks },
           next: '改完请人读一遍、盖场景戳才算这一幕定稿(戳只有人能盖)。',
         }, null, 2)
       } catch (error) {
@@ -924,10 +912,7 @@ export function registerGalfreeTools(
         if (action === 'pool') {
           const pool = await service.audioPool(active)
           return JSON.stringify({
-            files: pool.files.map((file) => file.path),
-            references: pool.references.map((reference) => ({ ref: reference.ref, scene: reference.scene, line: reference.line, channel: reference.channel, found: reference.found })),
-            missing: pool.missing.map((reference) => ({ ref: reference.ref, scene: reference.scene, line: reference.line })),
-            unused: pool.unused,
+            ...audioViewOf(pool),
             note: '接线的写法:`play music "audio/rain.ogg" [loop]` / `stop music`;引用是**相对 game/ 的路径**。',
           }, null, 2)
         }
@@ -936,36 +921,28 @@ export function registerGalfreeTools(
         }
         const label = String(args.label ?? '')
         if (label === '') return `${action} 需要 \`label\`(写在哪一场)。`
-        const channel = String(args.channel ?? '')
-        if (!['music', 'sound', 'voice'].includes(channel)) return '`channel` 只能是 music / sound / voice。'
-        const line = Number(args.line ?? 0)
-        if (!Number.isInteger(line) || line < 1) return '`line` 需要行号(先 galfree_edit_scene 的 read 看 rows)。'
-
+        // 声道 / 动作 / 必填文件的闸门在**接缝**上(`editScene` → invalid-audio):这里只搬运,
+        // 规则不在这条路上单独存在,面板走同一条路也吃同一套判断。
         await service.editScene(active, {
           label,
           edit: {
             kind: 'setAudio',
-            line,
+            line: Number(args.line ?? 0),
             action: action === 'stop' ? 'stop' : 'play',
-            channel: channel as 'music' | 'sound' | 'voice',
+            channel: String(args.channel ?? '') as 'music' | 'sound' | 'voice',
             file: action === 'stop' ? null : String(args.file ?? ''),
             loop: args.loop === true,
           },
         })
         const pool = await service.audioPool(active)
-        const missing = pool.missing.map((reference) => ({ ref: reference.ref, scene: reference.scene, line: reference.line }))
+        const view = audioViewOf(pool)
         return JSON.stringify({
           ok: true,
-          wrote: action === 'stop' ? `stop ${channel}` : `play ${channel} "${String(args.file ?? '')}"${args.loop === true ? ' loop' : ''}`,
-          audio: {
-            files: pool.files.map((file) => file.path),
-            references: pool.references.map((reference) => ({ ref: reference.ref, scene: reference.scene, line: reference.line, channel: reference.channel, found: reference.found })),
-            missing,
-            unused: pool.unused,
-          },
-          next: missing.length === 0
+          wrote: action === 'stop' ? `stop ${String(args.channel ?? '')}` : `play ${String(args.channel ?? '')} "${String(args.file ?? '')}"${args.loop === true ? ' loop' : ''}`,
+          audio: view,
+          next: view.missing.length === 0
             ? '引用都落地了。试听靠试玩(galfree_playtest);认可靠人盖场景戳。'
-            : `**悬空引用**:${missing.map((entry) => `${entry.ref}(${entry.scene}:${entry.line})`).join('、')} —— 把文件放进 game/(相对路径照上面写的那个),或改成池里已有的路径。`,
+            : `**悬空引用**:${view.missing.map((entry) => `${entry.ref}(${entry.scene}:${entry.line})`).join('、')} —— 把文件放进 game/(相对路径照上面写的那个),或改成池里已有的路径。`,
         }, null, 2)
       } catch (error) {
         return `音频操作未执行:${describe(error)}`
@@ -1087,37 +1064,89 @@ export function registerGalfreeTools(
 /**
  * 工具面的 `edit` → 接缝的 `SceneEdit`。
  *
- * 这是**参数搬运**(适配器的本职):认不出来的 kind 返回 null(工具给出"怎么给"的说明),
- * 形状/行号/归属这些判断一律留给接缝 —— 那边才是唯一真相。
+ * 这是**参数搬运**(适配器的本职):认不出来的 kind 返回 null,由调用方给出"怎么给"的说明。
+ * **枚举与范围一律不在这里判** —— 声道 / role / 行号这些规则住在接缝(`editScene` 与
+ * `applySceneEdit`),因为写进 `.rpy` 的每一行都要是引擎认的语法,而别的适配器(面板路由)
+ * 也走同一条路。适配器自己判一遍,就等于规则只活在一条路上。
  */
-function sceneEditOf(raw: unknown): SceneEdit | null {
-  if (raw === null || typeof raw !== 'object') return null
+function sceneEditOf(raw: unknown): { edit: SceneEdit } | { problem: string } {
+  if (raw === null || typeof raw !== 'object') return { problem: '需要 `edit`(一条结构化编辑指令,kind 决定其余字段;先 action: "read" 看行号)。' }
   const edit = raw as Record<string, unknown>
-  const line = Number(edit.line ?? 0)
   switch (String(edit.kind ?? '')) {
     case 'setDialogue':
-      return { kind: 'setDialogue', line, speaker: String(edit.speaker ?? '') === '' ? null : String(edit.speaker), text: String(edit.text ?? '') }
+      return { edit: { kind: 'setDialogue', line: Number(edit.line ?? 0), speaker: String(edit.speaker ?? '') === '' ? null : String(edit.speaker), text: String(edit.text ?? '') } }
     case 'setImage':
       return {
-        kind: 'setImage',
-        line,
-        role: String(edit.role ?? 'show') as 'show' | 'scene' | 'hide',
-        tag: String(edit.tag ?? ''),
-        attributes: Array.isArray(edit.attributes) ? edit.attributes.map(String) : [],
+        edit: {
+          kind: 'setImage',
+          line: Number(edit.line ?? 0),
+          role: String(edit.role ?? '') as 'show' | 'scene' | 'hide',
+          tag: String(edit.tag ?? ''),
+          attributes: Array.isArray(edit.attributes) ? edit.attributes.map(String) : [],
+        },
       }
     case 'insertStatement':
       return {
-        kind: 'insertStatement',
-        ...(edit.anchor === undefined ? {} : { anchor: String(edit.anchor) }),
-        ...(edit.after_line === undefined ? {} : { afterLine: Number(edit.after_line) }),
-        source: String(edit.source ?? ''),
+        edit: {
+          kind: 'insertStatement',
+          ...(edit.anchor === undefined ? {} : { anchor: String(edit.anchor) }),
+          ...(edit.after_line === undefined ? {} : { afterLine: Number(edit.after_line) }),
+          source: String(edit.source ?? ''),
+        },
       }
     case 'deleteStatement':
-      return { kind: 'deleteStatement', line }
+      return { edit: { kind: 'deleteStatement', line: Number(edit.line ?? 0) } }
     case 'replaceSource':
-      return { kind: 'replaceSource', source: String(edit.source ?? '') }
+      return { edit: { kind: 'replaceSource', source: String(edit.source ?? '') } }
+    // 音频那一行**不在这里改**:它有自己的工具(池 + 悬空引用的回执都在那边),
+    // 免得同一个动作有两条入口、两套回执。
+    case 'setAudio':
+      return { problem: '改音频那一行请用 `galfree_wire_audio`(它会顺带把音频池与悬空引用报回来);这里只管对白 / 图像 / 插入 / 删除 / 整段换源。' }
     default:
-      return null
+      return { problem: `不认识的 edit.kind:${String(edit.kind ?? '') || '(空)'} —— 只有 setDialogue / setImage / insertStatement / deleteStatement / replaceSource(音频用 galfree_wire_audio)。` }
+  }
+}
+
+/**
+ * 角色设定卡:**读-改-写**,保住参考链。
+ *
+ * 为什么必须在这里合并:登记簿的 `upsertCharacter` 是**整条替换**,而这张工具契约里
+ * 根本没有 `references` 这个字段(链归 `galfree_reference_chain`)。若照直送一个空数组,
+ * 写一次设定卡就会把 T16 攒起来的链**静默抹掉** —— 而契约明写"不给空链入口"。
+ * 所以:没给链 = 不动它(拿现有记录的那条填回去);给了 `references` 的调用方另有其人。
+ */
+async function mergeCharacterCards(
+  service: ProjectService,
+  project: string,
+  cards: Array<Record<string, unknown>>,
+): Promise<Array<Record<string, unknown>>> {
+  const existing = new Map((await service.characters(project)).map((record) => [record.id, record]))
+  return cards.map((card) => {
+    const keep = existing.get(String(card.id ?? ''))
+    return {
+      id: String(card.id ?? ''),
+      name: String(card.name ?? ''),
+      ...(card.voice === undefined ? {} : { voice: String(card.voice) }),
+      appearance: (card.appearance ?? {}) as Record<string, string>,
+      ...(card.style_anchor === undefined ? {} : { styleAnchor: String(card.style_anchor) }),
+      references: keep?.references ?? [],
+      ...(card.note === undefined ? {} : { note: String(card.note) }),
+    }
+  })
+}
+
+/** 音频池 → 工具面那份视图(两个 action 用的是同一份投影,不写两遍)。 */
+function audioViewOf(pool: Awaited<ReturnType<ProjectService['audioPool']>>): {
+  files: string[]
+  references: Array<{ ref: string; scene: string; line: number; channel: string; found: boolean }>
+  missing: Array<{ ref: string; scene: string; line: number }>
+  unused: string[]
+} {
+  return {
+    files: pool.files.map((file) => file.path),
+    references: pool.references.map((reference) => ({ ref: reference.ref, scene: reference.scene, line: reference.line, channel: reference.channel, found: reference.found })),
+    missing: pool.missing.map((reference) => ({ ref: reference.ref, scene: reference.scene, line: reference.line })),
+    unused: pool.unused,
   }
 }
 

@@ -101,6 +101,32 @@ describe('对话流结构化编辑器(T11)', () => {
     })).rejects.toMatchObject({ code: 'invalid-edit' })
   })
 
+  it('枚举字段的闸门在**接缝**上:坏声道 / 坏 role / 坏行号一律拒(不落一行坏语法)', async () => {
+    // 为什么在接缝上:`.rpy` 是唯一真相,写进去的每一行都要是引擎认的语法。
+    // 工具面与面板都可能把自由 JSON 送进来(面板路由就是 `body as never`),
+    // 规则只住在某一个适配器里 = 另一条路能把坏行写进项目。
+    await expect(service.editScene('edit', {
+      label: 'scene_one',
+      edit: { kind: 'setAudio', line: 3, action: 'play', channel: 'bgm' as never, file: 'audio/x.ogg', loop: false },
+    })).rejects.toMatchObject({ code: 'invalid-audio' })
+    await expect(service.editScene('edit', {
+      label: 'scene_one',
+      edit: { kind: 'setAudio', line: 3, action: 'fade' as never, channel: 'music', file: 'audio/x.ogg', loop: false },
+    })).rejects.toMatchObject({ code: 'invalid-audio' })
+    await expect(service.editScene('edit', {
+      label: 'scene_one',
+      edit: { kind: 'setImage', line: 3, role: 'fadein' as never, tag: 'bg', attributes: [] },
+    })).rejects.toMatchObject({ code: 'invalid-edit' })
+    // 行号:缺失 / 不是正整数也当场拒(NaN 会让"越界"检查整个空过)。
+    for (const line of [0, -1, 2.5, Number.NaN]) {
+      await expect(service.editScene('edit', {
+        label: 'scene_one', edit: { kind: 'deleteStatement', line },
+      })).rejects.toMatchObject({ code: 'invalid-edit' })
+    }
+    // 坏指令一个字节都没写进去。
+    expect(await readFile(join(root, 'game', 'scenes', 'scene_one.rpy'), 'utf8')).not.toContain('bgm')
+  })
+
   it('改一句对白 → git diff 只有那一行(不断言全文件重写)', async () => {    const before = await readFile(join(root, 'game', 'scenes', 'scene_one.rpy'), 'utf8')
     const form = await service.sceneForm('edit', 'scene_one')
     const row = form.rows.find((entry) => entry.kind === 'dialogue' && entry.speaker === 'xiao_tang')!
