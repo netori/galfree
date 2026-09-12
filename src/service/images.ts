@@ -82,6 +82,18 @@ export interface ImageModelDescriptor {
   paths?: ImageModelPaths
   /** 异步任务制的轮询参数(仅 `adapter: 'async-task'` 用)。 */
   async?: ImageAsyncOptions
+  /**
+   * **参考图挂在 `image` 字段上的形状**(缺省 `'array'` = OpenAI 兼容的 `[{image_url}]`)。
+   *
+   * 这一条是**实测换来的**,不是猜的:seedance / one-api 系的 Go 网关里那个字段是
+   * `string`,发数组会被原样拒掉 ——
+   * `400 invalid_request: json: cannot unmarshal array into Go struct field .Alias.image of type string`
+   * (见 `docs/contracts/stage-zero.md` 的 T16 节与慢带 `live-chain.slow.test.ts`)。
+   *
+   * `'string'` 形状**一次只收一张**:链上有多张时按登记簿顺序取第一张,其余走
+   * "如实降级"(`reference-truncated`)记进任务 —— 绝不静默少发。
+   */
+  referenceField?: 'array' | 'string'
 }
 
 /**
@@ -156,7 +168,7 @@ export interface GenerationRejection {
  * 有它 = 请求被改了;没有 = 请求原样发出。不存在"改了但不说"的第三种。
  */
 export interface GenerationDegradation {
-  code: 'reference-chain-unsupported' | 'image-to-image-unsupported' | 'size-unsupported' | 'b64-unsupported' | 'reference-missing'
+  code: 'reference-chain-unsupported' | 'image-to-image-unsupported' | 'size-unsupported' | 'b64-unsupported' | 'reference-missing' | 'reference-truncated'
   /** 面向人的一句话(中文;面板与 agent 直接显示)。 */
   message: string
   /** 被丢掉的参考图(给人确认"到底丢了什么")。 */
@@ -356,20 +368,17 @@ const openAiCompatible: ImageAdapter = {
     // 尺寸只在模型声明"认这个参数"时才发 —— 否则宁可不发,也不发一个会被忽略的值。
     if (size !== undefined && model.capabilities.aspectRatioParam) body.size = size
     if (quality !== undefined) body.quality = quality
-    // 参考图链:模型支持时挂在 image 字段上(OpenAI 兼容的图生图口径)。
-    if (referenceImages.length > 0 && model.capabilities.imageToImage) body.image = referenceField(referenceImages)
+    // 参考图链:模型支持时挂在 image 字段上(形状按目录声明:数组 / 单个字符串)。
+    if (model.capabilities.imageToImage) {
+      const image = referenceField(referenceImages, model.referenceField ?? 'array')
+      if (image !== undefined) body.image = image
+    }
     return { request: { method: 'POST', url: `${base}${model.paths?.submit ?? '/images/generations'}`, headers, body }, adapter: 'openai-compatible' }
   },
 
   onSubmit: (response, model) => {
     if (response.status < 200 || response.status >= 300) {
-      // 404 是"这条路走不通"的强信号:多数异步任务制网关的提交路径是**单数**
-      // `/image/generations`。如实指出来,别让人对着一个 404 猜。
-      const hint = response.status === 404
-        ? '(注意:异步任务制网关的提交路径常是单数 `/image/generations`,不是 OpenAI 的复数;'
-          + '若上游是那种网关,请把该模型 adapter 改成 async-task 并配 paths/async)'
-        : ''
-      throw new Error(`上游返回 ${response.status}:${summarize(response.text)}${hint}`)
+      throw new Error(`上游返回 ${response.status}:${summarize(response.text)}${protocolHint(response)}`)
     }
     let parsed: unknown
     try {
@@ -420,7 +429,10 @@ const asyncTask: ImageAdapter = {
 
     const body: Record<string, unknown> = { model: model.id, prompt, n: 1 }
     if (size !== undefined && model.capabilities.aspectRatioParam) body.size = size
-    if (referenceImages.length > 0 && model.capabilities.imageToImage) body.image = referenceField(referenceImages)
+    if (model.capabilities.imageToImage) {
+      const image = referenceField(referenceImages, model.referenceField ?? 'array')
+      if (image !== undefined) body.image = image
+    }
     return {
       request: { method: 'POST', url: `${base}${model.async?.submitPath ?? '/image/generations'}`, headers, body },
       adapter: 'async-task',
@@ -429,7 +441,7 @@ const asyncTask: ImageAdapter = {
 
   onSubmit: (response) => {
     if (response.status < 200 || response.status >= 300) {
-      throw new Error(`上游返回 ${response.status}:${summarize(response.text)}`)
+      throw new Error(`上游返回 ${response.status}:${summarize(response.text)}${protocolHint(response)}`)
     }
     let parsed: unknown
     try {
@@ -519,6 +531,33 @@ export async function downloadResultImage(
   return { bytes: response.bytes, format: imageFormatOf(response.contentType, url) }
 }
 
+/**
+ * **协议错配要给可执行的指引**,不能只说"失败了"。这里每一条都是被真实的上游拒绝教出来的
+ * (见契约 T16 节的实测记录):
+ *
+ *  - 404:异步任务制网关的提交路径常是**单数** `/image/generations`;
+ *  - 参考图是数组但字段是字符串:Go 系网关的 `image` 字段只收一个字符串;
+ *  - 要求"公网 HTTP(S) URL":那类上游**不收内联字节、也不收项目内路径** ——
+ *    在插件能给出公网可取的地址之前,这个模型的参考链是不可用的,如实说清楚,
+ *    别让人对着 400 反复重试。
+ */
+function protocolHint(response: HttpResponse): string {
+  if (response.status === 404) {
+    return '(注意:异步任务制网关的提交路径常是单数 `/image/generations`,不是 OpenAI 的复数;'
+      + '若上游是那种网关,请把该模型 adapter 改成 async-task 并配 paths/async)'
+  }
+  if (/cannot unmarshal .*image/i.test(response.text) && /string/i.test(response.text)) {
+    return '(上游的参考图字段是**单个字符串**,不是数组:到「设置 → GALFREE」把该模型的'
+      + '「参考图字段」改成「单个字符串」—— 那个字段一次只收一张,多张会按链上顺序取第一张并如实记降级)'
+  }
+  if (/public HTTP\(S\) URLs|must contain public/i.test(response.text)) {
+    return '(这个上游**只收公网可取的 HTTP(S) 图片地址**:项目内的图与内联字节它都不收 ——'
+      + '在能给出公网地址之前,该模型的参考链不可用;建议把目录里它的「参考链」关掉,'
+      + '让任务改成如实降级(一致性退回 prompt 描述),而不是每次出图都撞 400)'
+  }
+  return ''
+}
+
 /** 从 content-type / 扩展名判图片格式(判不出就按 png)。 */
 export function imageFormatOf(contentType: string, url: string): string {
   const type = contentType.toLowerCase()
@@ -537,13 +576,20 @@ function summarize(text: string, limit = 300): string {
 }
 
 /**
- * 参考图的线上形态:优先内联字节(`dataUrl`),退回路径。
+ * 参考图的线上形态。
  *
- * 退回路径是给"上游自己认项目内路径"这种自定义网关留的口子(以及既有调试用法);
- * 常规远端网关只认可取的地址,所以生产路径上走的是内联。
+ * - `'array'`(缺省,OpenAI 兼容):`[{image_url}]`,`image_url` 优先取内联字节(`dataUrl`),
+ *   退回路径(给"上游自己认项目内路径"这种自定义网关留的口子);
+ * - `'string'`:**这个字段只收一张**(实测的 Go 网关形状),取链上第一张。
+ *   多张的截断由 `degradeInput` 记成 `reference-truncated` —— 这里不静默丢东西。
  */
-export function referenceField(referenceImages: Array<{ path: string; dataUrl?: string }>): Array<{ image_url: string }> {
-  return referenceImages.map((reference) => ({ image_url: reference.dataUrl ?? reference.path }))
+export function referenceField(
+  referenceImages: Array<{ path: string; dataUrl?: string }>,
+  shape: 'array' | 'string' = 'array',
+): Array<{ image_url: string }> | string | undefined {
+  if (referenceImages.length === 0) return undefined
+  const urls = referenceImages.map((reference) => reference.dataUrl ?? reference.path)
+  return shape === 'string' ? urls[0]! : urls.map((image_url) => ({ image_url }))
 }
 
 /** 路径 → MIME(判不出按 png;**建在 `imageFormatOf` 之上**,后缀口径只有一处)。 */
@@ -619,6 +665,19 @@ export function degradeInput(
     message = `参考链上有 ${absent.length} 张图此刻还不存在(登记簿里引用了,磁盘上没有);本次没带上它们`
     dropped.push(...absent)
     notes.push(`还不存在的参考图:${absent.map((reference) => reference.path).join('、')} —— 先把它出出来(或从登记簿的参考链里去掉),链才生效`)
+  }
+
+  // 4) 字段形状的容量:`referenceField:'string'` 的上游那个字段**只收一张**
+  //    (实测的 Go 网关形状)。按登记簿顺序取第一张,其余如实降级 —— 不静默少发。
+  if (keptReferences.length > 1 && model.referenceField === 'string') {
+    const truncated = keptReferences.slice(1)
+    dropped.push(...truncated)
+    notes.push(`模型声明 image 字段为单个字符串(只收一张):按参考链顺序取了第一张 ${keptReferences[0]!.path},其余 ${truncated.length} 张本次没发`)
+    if (code === undefined) {
+      code = 'reference-truncated'
+      message = `模型 ${model.id} 的 image 字段只收一张参考图;链上 ${keptReferences.length} 张里只发了第一张`
+    }
+    keptReferences = keptReferences.slice(0, 1)
   }
 
   let size = input.size

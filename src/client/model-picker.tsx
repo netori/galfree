@@ -61,6 +61,11 @@ export interface ModelRow {
   manual?: boolean
   /** 这个模型走哪个上游协议。 */
   adapter: AdapterChoice
+  /**
+   * 参考图挂在 `image` 字段上的形状(缺省 = 数组,OpenAI 兼容)。
+   * `string` = 那个字段只收一张(实测的 Go 网关形状)。
+   */
+  referenceField?: 'string'
 }
 
 export interface DiscoveredModelView {
@@ -108,6 +113,9 @@ export function rowsFromCatalog(text: string): ModelRow[] {
         basis: '已保存的目录',
         imageLikely: true,
         adapter: entry.adapter === 'async-task' ? 'async-task' as const : 'openai-compatible' as const,
+        // 实测换来的声明必须**原样带回来**:面板保存时若把它吃掉,人下次就莫名其妙地
+        // 又收到 400(而且看不出是面板吃掉的)。
+        ...(entry.referenceField === 'string' ? { referenceField: 'string' as const } : {}),
       }))
   } catch {
     return []
@@ -133,6 +141,8 @@ export function catalogFromRows(rows: ModelRow[]): string {
         pollMaxAttempts: 60,
       },
     }),
+    // 参考图字段形状:只在选了"单个字符串"时写下来(缺省不写 = OpenAI 兼容的数组)。
+    ...(row.referenceField === 'string' ? { referenceField: 'string' } : {}),
   })), null, 2)
 }
 
@@ -223,6 +233,18 @@ export function ModelPicker({
     commit(rows.map((row) => (row.id === id ? { ...row, adapter } : row)))
   }
 
+  /** 换参考图字段形状(缺省 = 数组;选回数组就把这条声明去掉,不留 `"array"` 噪声)。 */
+  const setReferenceField = (id: string, referenceField: 'string' | undefined): void => {
+    commit(rows.map((row) => {
+      if (row.id !== id) return row
+      if (referenceField === undefined) {
+        const { referenceField: _drop, ...rest } = row
+        return rest
+      }
+      return { ...row, referenceField }
+    }))
+  }
+
   const addManual = (): void => {
     const id = extra.trim()
     if (id === '') return
@@ -292,6 +314,20 @@ export function ModelPicker({
                         {(Object.keys(ADAPTER_INFO) as AdapterChoice[]).map((key) => (
                           <option key={key} value={key}>{ADAPTER_INFO[key].label}</option>
                         ))}
+                      </select>
+                    </label>
+                    <label className={s.capItem} title="参考图挂在 image 字段上的形状。发数组被上游以 `cannot unmarshal array … of type string` 拒掉时,改成「单个字符串」—— 那个字段一次只收一张,多张会按链上顺序取第一张并如实记降级">
+                      <span>参考图字段</span>
+                      <select
+                        className={s.input}
+                        style={{ maxWidth: 200 }}
+                        value={row.referenceField ?? 'array'}
+                        disabled={disabled}
+                        onChange={(event) => setReferenceField(row.id, event.target.value === 'string' ? 'string' : undefined)}
+                        aria-label={`${row.id} 的参考图字段形状`}
+                      >
+                        <option value="array">数组(OpenAI 兼容)</option>
+                        <option value="string">单个字符串</option>
                       </select>
                     </label>
                   </div>

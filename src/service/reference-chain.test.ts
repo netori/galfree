@@ -52,6 +52,8 @@ interface UpstreamCall {
 class FakeUpstream {
   readonly calls: UpstreamCall[] = []
   payloads = [PNG_A, PNG_B]
+  /** 让上游按这个应答(errors:测"失败原因可执行"那几条)。 */
+  rejectWith: { status: number; body: string } | null = null
   #server: Server | null = null
   #served = 0
 
@@ -82,6 +84,11 @@ class FakeUpstream {
     let body: Record<string, unknown> = {}
     try { body = JSON.parse(raw) as Record<string, unknown> } catch { body = {} }
     this.calls.push({ path: req.url ?? '', body, raw })
+    if (this.rejectWith !== null) {
+      res.writeHead(this.rejectWith.status, { 'content-type': 'application/json' })
+      res.end(this.rejectWith.body)
+      return
+    }
     const payload = this.payloads[Math.min(this.#served++, this.payloads.length - 1)]!
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ created: 1, data: [{ b64_json: payload }] }))
@@ -105,6 +112,15 @@ function channel(baseUrl: string, models?: ImageModelDescriptor[]): ImageChannel
         label: '不支持参考链',
         adapter: 'openai-compatible',
         capabilities: { textToImage: true, imageToImage: false, referenceChain: false, aspectRatioParam: true, b64Json: true },
+      },
+      {
+        // 实测形状(`live-chain.slow.test.ts` 在真上游上撞出来的那个 400):
+        // 这个网关的 `image` 字段是 **string**,发数组会被原样拒掉。
+        id: 'string-field',
+        label: '参考图字段只收单个字符串',
+        adapter: 'openai-compatible',
+        referenceField: 'string',
+        capabilities: { textToImage: true, imageToImage: true, referenceChain: true, aspectRatioParam: true, b64Json: true },
       },
     ],
   }
@@ -298,6 +314,60 @@ describe('参考链一致性回路(T16)', () => {
       expect(task.degradation).toBeUndefined()
       expect(task.referenceImages.map((reference) => reference.path)).toEqual([slotAssetPath('xiao_tang base')])
     }
+  })
+
+  it('AC1 上游那个字段只收**字符串**时:按声明发单个字符串,多张按链上顺序取第一张并如实降级', async () => {
+    // 这是真上游教出来的一条(慢带在 seedance 上撞到的 400:
+    // `json: cannot unmarshal array into Go struct field .Alias.image of type string`)。
+    await ledgerFor()
+    await service.createGenerationTask('chain', { slot: 'xiao_tang base', model: 'string-field', prompt: '主视觉', run: true })
+    await service.createGenerationTask('chain', { slot: 'xiao_tang smile', model: 'string-field', prompt: '微笑', run: true })
+    await registerChain([
+      { path: slotAssetPath('xiao_tang base'), slot: 'xiao_tang base', note: '主视觉' },
+      { path: slotAssetPath('xiao_tang smile'), slot: 'xiao_tang smile', note: '第一个差分' },
+    ])
+
+    const task = await service.createGenerationTask('chain', { slot: 'xiao_tang angry', model: 'string-field', prompt: '生气', run: true })
+
+    // 发出去的是**字符串**(不是数组)—— 形状按目录声明,不猜。
+    const call = upstream.calls.at(-1)!
+    expect(typeof call.body.image).toBe('string')
+    const image = call.body.image as string
+    expect(image.startsWith('data:image/png;base64,')).toBe(true)
+    const decoded = Buffer.from(image.slice('data:image/png;base64,'.length), 'base64')
+    expect(decoded.equals(Buffer.from(await readFile(join(root, ...slotAssetPath('xiao_tang base').split('/')))))).toBe(true)
+
+    // 那个字段只收一张 → 第二张按链上顺序被截掉,并**如实记进降级**(不静默少发)。
+    expect(task.referenceImages.map((reference) => reference.path)).toEqual([slotAssetPath('xiao_tang base')])
+    expect(task.degradation?.code).toBe('reference-truncated')
+    expect(task.degradation?.droppedReferenceImages.map((reference) => reference.path)).toEqual([slotAssetPath('xiao_tang smile')])
+    expect(task.degradation?.notes.join(' ')).toContain('只收一张')
+    expect(task.state).toBe('awaiting-review')
+  })
+
+  it('AC1 上游拒掉参考图时,失败原因要**可执行**(不是一句"失败了")', async () => {
+    // 实测两种拒绝(慢带在 seedance 上撞到的原话)+ 一种顺带断言的形状错配指引。
+    await ledgerFor()
+    await service.createGenerationTask('chain', { slot: 'xiao_tang base', model: 'full', prompt: '主视觉', run: true })
+    await registerChain([{ path: slotAssetPath('xiao_tang base'), slot: 'xiao_tang base' }])
+
+    upstream.rejectWith = {
+      status: 400,
+      body: JSON.stringify({ code: 'invalid_parameter', message: 'images must contain public HTTP(S) URLs' }),
+    }
+    const task = await service.createGenerationTask('chain', { slot: 'xiao_tang smile', model: 'full', prompt: '微笑', run: true })
+    expect(task.state).toBe('failed')
+    // 上游原话照旧带着(不吞),外加一句"接下来该做什么"。
+    expect(task.lastError).toContain('public HTTP(S) URLs')
+    expect(task.lastError).toContain('公网可取的 HTTP(S) 图片地址')
+    expect(task.lastError).toContain('参考链')
+
+    upstream.rejectWith = {
+      status: 400,
+      body: JSON.stringify({ code: 'invalid_request', message: 'json: cannot unmarshal array into Go struct field .Alias.image of type string' }),
+    }
+    const second = await service.createGenerationTask('chain', { slot: 'xiao_tang angry', model: 'full', prompt: '生气', run: true })
+    expect(second.lastError).toContain('单个字符串')
   })
 
   it('AC1 差分批量先过渠道与模型两道门(没配渠道时如实拒绝,不产假任务)', async () => {    await ledgerFor()

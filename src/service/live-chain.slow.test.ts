@@ -39,6 +39,8 @@ const BASE_URL = process.env.GALFREE_LIVE_BASE_URL ?? ''
 const API_KEY = process.env.GALFREE_LIVE_API_KEY ?? ''
 const MODEL = process.env.GALFREE_LIVE_MODEL ?? ''
 const ADAPTER = process.env.GALFREE_LIVE_ADAPTER ?? 'openai-compatible'
+/** 参考图字段形状(缺省数组)。seedance/one-api 系的 Go 网关是 `string`(实测)。 */
+const REFERENCE_FIELD = process.env.GALFREE_LIVE_REFERENCE_FIELD === 'string' ? 'string' as const : 'array' as const
 
 const LIVE = BASE_URL !== '' && API_KEY !== '' && MODEL !== ''
 if (!LIVE) {
@@ -114,6 +116,7 @@ describe.skipIf(!LIVE)('参考链真上游验证(慢带,真模型,花钱)', () =
         id: MODEL,
         adapter: ADAPTER === 'async-task' ? 'async-task' : 'openai-compatible',
         capabilities: { textToImage: true, imageToImage: true, referenceChain: true, aspectRatioParam: true, b64Json: true },
+        ...(REFERENCE_FIELD === 'string' ? { referenceField: 'string' as const } : {}),
         ...(ADAPTER === 'async-task'
           ? { paths: { submit: '/image/generations' }, async: { submitPath: '/image/generations', pollPath: '/image/generations/{taskId}', pollIntervalMs: 3000, pollMaxAttempts: 60 } }
           : {}),
@@ -170,12 +173,15 @@ describe.skipIf(!LIVE)('参考链真上游验证(慢带,真模型,花钱)', () =
 
     // 3a) **链真的发出去了**(与上游支不支持无关,是我们自己的形状):
     //     提交请求体里能看到内联的图片字节,而且解出来正是主视觉那张。
+    //     形状按目录声明:`array`(OpenAI 兼容)或 `string`(实测的 Go 网关,只收一张)。
     const submitted = requests.slice(before).filter((request) => request.method === 'POST')
     expect(submitted.length, '差分这一次没有发出提交请求').toBeGreaterThan(0)
     const body = JSON.stringify(submitted[0]!.body ?? {})
     expect(body, '请求体里没有内联的参考图 —— 链没发出去').toContain('data:image/png;base64,')
     const inlineBase64 = /data:image\/png;base64,([A-Za-z0-9+/=]+)/.exec(body)?.[1] ?? ''
     expect(Buffer.from(inlineBase64, 'base64').equals(baseBytes), '发出去的参考图不是主视觉那张').toBe(true)
+    const shape = (submitted[0]!.body as { image?: unknown }).image
+    expect(Array.isArray(shape) ? 'array' : typeof shape, `声明的是 ${REFERENCE_FIELD},发出去的是 ${Array.isArray(shape) ? 'array' : typeof shape}`).toBe(REFERENCE_FIELD)
 
     // 3b) **结论如实**:状态与磁盘事实必须一致(这条与上游支不支持无关)。
     console.info(`[live] 差分(state=${variant.state}):${variant.lastError ?? '(无失败原因)'}`)

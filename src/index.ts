@@ -157,6 +157,7 @@ export function parseModelCatalog(text: string): ImageModelDescriptor[] {
       adapter?: unknown
       paths?: { submit?: unknown }
       async?: Record<string, unknown>
+      referenceField?: unknown
       capabilities?: Record<string, unknown>
     }
     if (typeof candidate.id !== 'string' || candidate.id === '') continue
@@ -195,6 +196,8 @@ export function parseModelCatalog(text: string): ImageModelDescriptor[] {
       },
       ...(paths === undefined ? {} : { paths }),
       ...(async === undefined ? {} : { async }),
+      // 参考图字段形状:**只在声明为 string 时写下来**(缺省 = OpenAI 兼容的数组)。
+      ...(candidate.referenceField === 'string' ? { referenceField: 'string' as const } : {}),
       ...(Array.isArray(candidate.sizes) ? { sizes: candidate.sizes.filter((size): size is string => typeof size === 'string') } : {}),
     })
   }

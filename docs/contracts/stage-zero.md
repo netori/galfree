@@ -686,13 +686,32 @@ agent 工具面新增两个、扩了两个:**`galfree_character_art`**(差分批
 T14 起契约里"能力声明是降级的唯一依据"一直靠一个**从未被真模型验过的声明**在跑,这条慢带就是补这个。
 
 - 只在给了 `GALFREE_LIVE_BASE_URL` / `GALFREE_LIVE_API_KEY` / `GALFREE_LIVE_MODEL`
-  (可选 `GALFREE_LIVE_ADAPTER`)时跑;**没给就跳过并出声**(打印怎么跑),不静默通过;
+  (可选 `GALFREE_LIVE_ADAPTER`、`GALFREE_LIVE_REFERENCE_FIELD`)时跑;
+  **没给就跳过并出声**(打印怎么跑),不静默通过;
 - 它断言三件与上游态度无关的事:①链**真发出去了**(记录型出网客户端看到请求体里内联的字节,
   且解出来正是主视觉那张);②文生图基线**真通**(端点/密钥/模型/协议有一样不对就红);
   ③结论**如实**(`awaiting-review` ⟺ 文件在且是 PNG;`failed` ⟹ 原因非空且是上游原话);
 - 上游**不接受**这条链时,它不改判成"通过",而是把上游原话打印出来并明确报告:
   该模型的 `referenceChain` 声明**未被证实**。这是这条慢带存在的意义,不是它的失败。
 - **它花钱**(真出 2 张图),所以默认不跑。
+
+#### 实测记录:用户渠道(seedance / `zhenzhen-image-g-v2.5-flare`,2026-09-12)
+
+| 观察 | 上游原话 | 结论 |
+|---|---|---|
+| 文生图 | — | **通**(产物落盘、是 PNG) |
+| 参考图发**数组** | `400 invalid_request: json: cannot unmarshal array into Go struct field .Alias.image of type string` | 这个网关的 `image` 字段是**单个字符串** → 目录里要声明 `"referenceField": "string"`(面板:模型行的「参考图字段」) |
+| 参考图发**内联 data URL**(改对形状后) | `400 invalid_parameter: images must contain public HTTP(S) URLs` | 它**只收公网可取的 HTTP(S) 地址**:内联字节与项目内路径都不收 |
+
+**因此**:对这类上游,`referenceChain: true` 这条声明**在当前实现下达不成** ——
+参考图是项目内的本地文件,插件拿不出公网地址。诚实的做法是**把该模型的「参考链」关掉**:
+任务会在建的时候就如实降级("参考链被丢弃,本次按文生图发出"),而不是每次出图撞 400。
+要让链真正生效,需要"公网可取的地址"这一环(上游自带的文件上传接口 / 用户自己的图床),
+那是**下一张票**的事,不是把内联换成别的东西就能绕过去的。
+
+对应的三条**可执行指引**已经焊在适配器里(`protocolHint`,都被真实拒绝教出来):
+404 → 可能是单数路径、该换 `async-task`;数组进了字符串字段 → 去设置改「参考图字段」;
+要求公网 URL → 说清"该模型的参考链在你的渠道上不可用",并给出下一步。
 
 ## 模板的界面层(T7 之后补齐的一块,实测换来的)
 **新建项目必须整份带上 SDK 的 GUI 模板**(`screens.rpy` / `gui.rpy` / `guisupport.rpy` / `testcases.rpy`),
