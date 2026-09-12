@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { GalfreeError } from './error.ts'
+import { GATE } from './gates.ts'
 import { runGit } from './git.ts'
 import { ProjectRegistry, type RegistryEntry } from './registry.ts'
 import { commitSnapshot, fileDiff, fileHistory, rollbackFile, type SnapshotEntry } from './snapshot.ts'
@@ -562,7 +563,7 @@ export class ProjectService {
     try {
       const entry = await this.#resolve(projectRef)
       const launcher = await publishPorts.ports.resolveLauncher()
-      if (launcher === null) throw new GalfreeError('sdk-not-ready', '钉版 SDK 尚未就绪,无法发布')
+      if (launcher === null) throw new GalfreeError(GATE.sdkNotReady, '钉版 SDK 尚未就绪,无法发布')
       const destination = readiness.destination
       const before = await snapshotDir(destination)
       const result = await publishPorts.ports.run({
@@ -1027,9 +1028,9 @@ export class ProjectService {
       this.stampRecords(projectRef),
     ])
     const record = stamps.find((stamp) => stamp.target === BIBLE_STAMP_TARGET)
-    if (record === undefined) throw new GalfreeError('bible-not-final', '设定集还没有盖"设定定稿"戳:下游生成只用定稿版')
+    if (record === undefined) throw new GalfreeError(GATE.bibleNotFinal, '设定集还没有盖"设定定稿"戳:下游生成只用定稿版')
     if (record.fingerprint !== bibleFingerprint(doc)) {
-      throw new GalfreeError('bible-not-final', '设定集盖过定稿戳,但之后又改过(待复审):请人重新审读后再生成')
+      throw new GalfreeError(GATE.bibleNotFinal, '设定集盖过定稿戳,但之后又改过(待复审):请人重新审读后再生成')
     }
     void entry
     return buildGenerationContext({ bible: doc, characters, outlineText })
@@ -1609,7 +1610,7 @@ export class ProjectService {
   #requireModel(modelId: string): { channel: ImageChannelSettings; model: ReturnType<typeof imageModels>[number] } {
     const channel = this.#imagePorts?.channel() ?? null
     if (channel === null) {
-      throw new GalfreeError('no-image-channel', '还没有配置图像渠道(设置 → 插件 → GALFree):先填端点、密钥与模型目录')
+      throw new GalfreeError(GATE.noImageChannel, '还没有配置图像渠道(设置 → 插件 → GALFree):先填端点、密钥与模型目录')
     }
     const model = channel.models.find((candidate) => candidate.id === modelId)
     if (model === undefined) {
@@ -1663,7 +1664,7 @@ export class ProjectService {
 
   #requireHuman(actor: { via: 'human' | 'agent' }): void {
     if (actor.via !== 'human') {
-      throw new GalfreeError('stamp-forbidden', '审读戳只能由人盖(工作台真实动作),agent 无权设置')
+      throw new GalfreeError(GATE.stampForbidden, '审读戳只能由人盖(工作台真实动作),agent 无权设置')
     }
   }
 

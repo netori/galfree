@@ -12,6 +12,7 @@ import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { GalfreeError } from './error.ts'
+import { GATE } from './gates.ts'
 import { fingerprint } from './hash.ts'
 import { spawnWithLog } from './spawn-log.ts'
 import type { BranchGraph } from './rpy/dialect.ts'
@@ -130,7 +131,7 @@ export async function launchPlaytest(
   fromLabel: string | null = null,
 ): Promise<PlaytestRun> {
   const launcher = await ports.resolveLauncher()
-  if (launcher === null) throw new GalfreeError('sdk-not-ready', '钉版 SDK 尚未就绪,无法试玩(先到工作台/设置完成 SDK 供给)')
+  if (launcher === null) throw new GalfreeError(GATE.sdkNotReady, '钉版 SDK 尚未就绪,无法试玩(先到工作台/设置完成 SDK 供给)')
 
   let runRoot = projectRoot
   let temporary: string | null = null

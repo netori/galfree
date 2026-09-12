@@ -21,6 +21,7 @@
 import { mkdir, readdir, readFile, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { GalfreeError } from './error.ts'
+import { GATE } from './gates.ts'
 import { spawnWithLog } from './spawn-log.ts'
 import type { ProgressSnapshot } from './progress.ts'
 
@@ -123,7 +124,7 @@ export function publishBlockers(progress: ProgressSnapshot, options: { sdkReady:
     blockers.push({ code: 'publish-unavailable', label: '这台宿主没有装配发布端口:装不上就老实说,不假装能出片' })
   }
   if (!options.sdkReady) {
-    blockers.push({ code: 'sdk-not-ready', label: '钉版 SDK 尚未就绪(先完成 SDK 供给),没有它就没有构建器' })
+    blockers.push({ code: GATE.sdkNotReady, label: '钉版 SDK 尚未就绪(先完成 SDK 供给),没有它就没有构建器' })
   }
   if (!progress.lint.ok) {
     blockers.push({

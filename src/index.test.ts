@@ -4,8 +4,11 @@
  * 这一步值得单独测:它是**密钥与项目之间的唯一闸门**(密钥只能留在设置里),
  * 也是"能力声明"进入系统的入口(参考链支不支持由它决定,而不是运行时猜)。
  */
-import { describe, expect, it } from 'vitest'
-import { channelFromSettings, parseModelCatalog, type Config } from './index.ts'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { apply, channelFromSettings, parseModelCatalog, type Config } from './index.ts'
+import { WORKFLOW_SECTION } from './service/playbook.ts'
+import { cleanupTempDirs, makeTempDir } from './testing/tmp.ts'
+import type { Context } from '@deepseek-ai/cordis'
 
 /** 一份填齐的设置文档(密钥明文,这是 ADR-0010 的知情选择)。 */
 function settings(overrides: Partial<Required<Config>> = {}): Required<Config> {
@@ -88,5 +91,106 @@ describe('图像渠道设置(T14)', () => {
   it('认不出来的 adapter 值退回默认(不静默用一个不存在的协议)', () => {
     const models = parseModelCatalog(JSON.stringify([{ id: 'x', adapter: '不认识的协议' }]))
     expect(models[0]!.adapter).toBe('openai-compatible')
+  })
+})
+
+/**
+ * 入口装配(T19 / #27):流程指引是**可选席位**上的一段提示。
+ *
+ * 这一组守的是"懒注入"这条契约:宿主有 `systemPrompt` 就多一段 playbook,
+ * 没有就少一段 —— **插件照常起来、工具照常注册**(与工具席位、目录选择席位同一个态度)。
+ * 假 ctx 只实现 `apply()` 真正碰到的那几个面;工具/提示词席位按需装上。
+ */
+describe('插件入口装配(T19)', () => {
+  let home: string | undefined
+
+  beforeEach(async () => {
+    home = process.env.DSH_HOME
+    process.env.DSH_HOME = await makeTempDir('galfree-t19-home-')
+  })
+
+  afterEach(async () => {
+    if (home === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = home
+    await cleanupTempDirs()
+  })
+
+  interface FakeSeats {
+    systemPrompt?: { section: (section: { name: string; order: number; text: string | (() => string) }) => () => void }
+    tools?: { register: (tool: unknown) => () => void }
+  }
+
+  /** 收下 apply() 装配出来的东西(路由 / 提示词段 / 工具)。 */
+  function fakeHost(seats: FakeSeats): {
+    ctx: Context
+    routes: unknown[]
+    sections: Array<{ name: string; order: number; text: string | (() => string) }>
+    tools: Array<{ name: string }>
+  } {
+    const routes: unknown[] = []
+    const sections: Array<{ name: string; order: number; text: string | (() => string) }> = []
+    const tools: Array<{ name: string }> = []
+    const ctx = {
+      settings: {
+        register: () => ({
+          get: () => ({
+            enabled: true, defaultProjectsRoot: '', sdkPath: '',
+            imageBaseUrl: '', imageApiKey: '', imageChannelName: '', imageModels: '', publishDir: '',
+          }),
+        }),
+      },
+      webServer: { register: (route: unknown) => { routes.push(route); return () => {} } },
+      // cordis 的 effect 是"立刻执行、返回 disposer";这里照做,装配行为才被测到。
+      effect: (callback: () => unknown) => { callback(); return () => {} },
+      // cordis 的 inject 是"席位齐了才跑回调";缺席位就永远不跑(这正是懒注入)。
+      inject: (deps: string[], callback: (inner: unknown) => void) => {
+        if (deps.every((dep) => (seats as Record<string, unknown>)[dep] !== undefined)) callback(ctx)
+        return undefined
+      },
+      ...(seats.systemPrompt === undefined ? {} : {
+        systemPrompt: {
+          section: (section: { name: string; order: number; text: string | (() => string) }) => {
+            sections.push(section)
+            return seats.systemPrompt!.section(section)
+          },
+        },
+      }),
+      ...(seats.tools === undefined ? {} : {
+        tools: {
+          register: (tool: unknown) => { tools.push(tool as { name: string }); return seats.tools!.register(tool) },
+          // 真宿主的工具注册表两边都有(`ToolRuntime.register` / `.get`):
+          // 指引的 `hasTool` 走的就是 `get`。
+          get: (toolName: string) => tools.find((tool) => tool.name === toolName),
+        },
+      }),
+    }
+    return { ctx: ctx as unknown as Context, routes, sections, tools }
+  }
+
+  const seats = (withSystemPrompt: boolean): FakeSeats => ({
+    ...(withSystemPrompt ? { systemPrompt: { section: () => () => {} } } : {}),
+    tools: { register: () => () => {} },
+  })
+
+  it('宿主有 systemPrompt 席位 → 会话里多一段 galfree-workflow', () => {
+    const host = fakeHost(seats(true))
+    apply(host.ctx)
+    expect(host.sections.map((section) => section.name)).toEqual([WORKFLOW_SECTION])
+    const section = host.sections[0]!
+    expect(typeof section.order).toBe('number')
+    // 文本是**每次组装现算**的:工具面可能晚于这段就位,固化下来就会报一个不存在的入口。
+    const text = typeof section.text === 'function' ? section.text() : section.text
+    expect(text).toContain('GALFree')
+    // 有工具席位时,真的注册了的工具会被点名(装配出来的那 10 个里有发布)。
+    expect(text).toContain('galfree_publish')
+  })
+
+  it('宿主没有 systemPrompt 席位 → 插件照常起、工具照常注册(少一段提示而已)', () => {
+    const host = fakeHost(seats(false))
+    expect(() => apply(host.ctx)).not.toThrow()
+    expect(host.sections).toEqual([])
+    // "照常工作"的可观察形态:路由装配了、agent 工具一个不少。
+    expect(host.routes.length).toBeGreaterThan(0)
+    expect(host.tools.map((tool) => tool.name)).toContain('galfree_project_status')
   })
 })

@@ -6,6 +6,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { GalfreeError } from './service/error.ts'
+import { GATE } from './service/gates.ts'
 import { createSubdirectory, describePath, listDirectories } from './service/directory-listing.ts'
 import type { SceneEdit } from './service/scene-form.ts'
 import type { ProjectService } from './service/project-service.ts'
@@ -902,10 +903,10 @@ export function makeRoutes(deps: RouteDeps): GalfreeRoute[] {
             : error.code === 'body-too-large' ? 413
             : error.code === 'picker-unsupported' ? 501
             : error.code === 'picker-timeout' ? 504
-            : error.code === 'bible-not-final' ? 409
+            : error.code === GATE.bibleNotFinal ? 409
             // 没配图像渠道 = 能力未就绪(与 SDK 未就绪同性质),不是服务端故障。
-            : error.code === 'no-image-channel' ? 503
-            : error.code === 'version-drift' || error.code === 'expect-required' || error.code === 'path-escape' || error.code === 'stamp-forbidden' || error.code === 'slot-not-filled' || error.code === 'sdk-not-ready'
+            : error.code === GATE.noImageChannel ? 503
+            : error.code === 'version-drift' || error.code === 'expect-required' || error.code === 'path-escape' || error.code === GATE.stampForbidden || error.code === 'slot-not-filled' || error.code === GATE.sdkNotReady
               || error.code === 'scene-not-editable' || error.code === 'scene-read-only' || error.code === 'scene-label-elsewhere'
               || error.code === 'scene-target-exists' || error.code === 'scene-already-canonical' ? 409
             : 500

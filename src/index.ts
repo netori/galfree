@@ -9,6 +9,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from 'schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-settings'
+// 只为类型:流程指引注册用的 section 形状与宿主那一份对齐(运行时不 import —— 席位按名取用)。
+import type {} from '@deepseek-ai/dsh-system-prompt'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createProjectService } from './service/project-service.ts'
@@ -23,6 +25,7 @@ import { realSpawn } from './service/playtest.ts'
 import { realDistribute } from './service/publish.ts'
 import { createCompositeValidator } from './service/validation/composite-validator.ts'
 import { registerGalfreeTools } from './service/tools.ts'
+import { registerGalfreePlaybook } from './service/playbook.ts'
 
 /** 稳定的 cordis 插件名(与 cordis.patch.yml 的 insert id 对齐)。 */
 export const name = 'galfree'
@@ -58,6 +61,20 @@ interface DirectoryPickerSeam {
 
 function directoryPickerSeam(ctx: Context): DirectoryPickerSeam | undefined {
   return (ctx as unknown as { directoryPicker?: DirectoryPickerSeam }).directoryPicker
+}
+
+/**
+ * agent 工具注册表的席位(可选,只用到 `get`):流程指引靠它回答"这一步有没有 agent 入口"。
+ *
+ * 与目录选择同一个态度 —— 按名取用、容忍缺席:缺工具席位时指引如实说"请人在工作台做",
+ * 而不是报一个调不通的工具名。
+ */
+interface ToolRegistrySeam {
+  get?: (name: string, scope?: unknown) => unknown
+}
+
+function toolRegistrySeam(ctx: Context): ToolRegistrySeam | undefined {
+  return (ctx as unknown as { tools?: ToolRegistrySeam }).tools
 }
 
 export interface Config {
@@ -369,6 +386,21 @@ export function apply(ctx: Context, config?: Config): void {
         service,
       ),
       'dsh-galfree: agent tools',
+    )
+  })
+
+  // 流程指引(T19 / #27):往会话的 system prompt 注入一段 playbook(顺序 / 闸门 / 判据 /
+  // 谁来做)。**与工具面同一个懒注入态度**:宿主没有 systemPrompt 席位就少一段提示,
+  // 插件不崩、工具照常。
+  ctx.inject(['systemPrompt'], (promptCtx) => {
+    promptCtx.effect(
+      () => registerGalfreePlaybook(promptCtx.systemPrompt, {
+        // 工具面是**可选席位**,而且可能晚于本段就位:每次组装现问一次"这个工具在不在",
+        // 于是"还没做的入口"会如实显示成"请人在工作台做",不报一个调不通的工具名。
+        // 探不到就**当没有**:这段提示是锦上添花,绝不能把整段系统提示搞崩。
+        hasTool: (toolName) => toolRegistrySeam(ctx)?.get?.(toolName) !== undefined,
+      }),
+      'dsh-galfree: workflow playbook',
     )
   })
 }
