@@ -60,7 +60,9 @@ import {
 // 任务账本的**通用层**(T27):图像与音频共用"读-改-写 + 串行"那一套纪律。
 import { makeTaskLedger } from './tasks.ts'
 import {
-  AUDIO_TASK_KIND_DESCRIPTOR, AUDIO_TASKS_FILE, assertAudioOutputPath, audioModels, purposeOfPath,
+  adapterFor as audioAdapterFor,
+  AUDIO_POLL_INTERVAL_MS, AUDIO_POLL_TIMEOUT_MS,
+  AUDIO_TASK_KIND_DESCRIPTOR, AUDIO_TASKS_FILE, assertAudioOutputPath, audioModels, decodeBase64OrRaw, purposeOfPath,
   type AudioChannelSettings, type AudioModelDescriptor, type AudioPorts, type AudioTask, type CreateAudioTaskInput,
 } from './audio-generation.ts'
 import { ABSENT, fileFingerprint, fingerprint, pathExists } from './hash.ts'
@@ -1874,24 +1876,204 @@ export class ProjectService {
   }
 
   /**
-   * 跑一个音频任务(执行那一片)。
+   * 跑一个音频任务(T27 的执行那一片):适配器翻译 → 出网 → **经写网关落盘** → 记账。
    *
-   * **还没接适配器**(T28/T29 的活):此刻如实报"这个协议还没实现",
-   * 而不是把任务标成成功、也不是静默什么都不做。
+   * 与图像的 `runGenerationTask` 同一形状(同一套账本纪律):
+   *  - 先置 `running`(状态机对外可见);失败如实记 `failed`(**上游原话**进历史,不吞);
+   *  - 成功 → `awaiting-review`(等人听),并记下**被覆盖那一版**的指纹;
+   *  - 适配器没实现就抛 → 记一条失败并指名道姓(不假装成功、也不静默不动)。
    */
   async runAudioTask(projectRef: string, id: string): Promise<AudioTask | null> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+
+    const started = new Date().toISOString()
+    const task = await this.#audioLedger.mutate(projectRef, (document, writers) => {
+      const found = document.tasks.find((candidate) => candidate.id === id)
+      if (found === undefined) throw new GalfreeError('unknown-task', `没有这个音频任务:${id}`)
+      const next: AudioTask = { ...found, state: 'running', updatedAt: started }
+      writers.push(next)
+      return Promise.resolve(next)
+    })
+    const { channel, model } = this.#requireAudioModel(task.model)
+
+    let bytes: Uint8Array
+    try {
+      const adapter = audioAdapterFor(model.adapter)
+      const plan = adapter.buildRequest({
+        channel,
+        model,
+        task: {
+          purpose: task.purpose,
+          prompt: task.prompt,
+          ...(task.format === undefined ? {} : { format: task.format }),
+          ...(task.sampleRate === undefined ? {} : { sampleRate: task.sampleRate }),
+          ...(task.loop === undefined ? {} : { loop: task.loop }),
+          dialogueId: task.dialogueId,
+          ...(task.voiceId === undefined ? {} : { voiceId: task.voiceId }),
+          referenceAudio: task.referenceAudio,
+        },
+      })
+      const response = await this.#audioPorts!.http.send(plan.request)
+      const submission = adapter.onSubmit(response, model)
+      if (submission.kind === 'failed') throw new Error(submission.error)
+      if (submission.kind === 'bytes') {
+        bytes = submission.bytes
+      } else {
+        // 异步制:轮询到终态。**没实现 poll 的适配器如实拒绝**,不空转。
+        if (adapter.poll === undefined || adapter.buildPollRequest === undefined) {
+          throw new Error(`协议「${model.adapter}」返回了一个任务 id(${submission.taskId}),但这个适配器没有实现轮询 —— 拿不到产物`)
+        }
+        bytes = await this.#awaitAudioResult({ adapter, model, channel, task, taskId: submission.taskId })
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return await this.#audioLedger.mutate(projectRef, (document, writers) => {
+        const found = document.tasks.find((candidate) => candidate.id === id)!
+        const failed: AudioTask = {
+          ...found,
+          state: 'failed',
+          lastError: message,
+          attempts: [...found.attempts, this.#audioAttempt(found.attempts.length + 1, started, 'failed', { error: message })],
+          updatedAt: new Date().toISOString(),
+        }
+        writers.push(failed)
+        return Promise.resolve(failed)
+      })
+    }
+
+    // 产物经写网关落盘(自动快照)。CAS 用现读的版本戳:外部刚动过就如实报漂移,不盖掉。
+    const gateway = await this.#gatewayFor(projectRef)
+    const current = await gateway.read(task.outputPath)
+    const replacedFingerprint = current.missing ? undefined : current.version
+    const result = await gateway.writeBatch(
+      [{ path: task.outputPath, content: bytes, expectVersion: current.version }],
+      { origin: 'agent', reason: 'queue' },
+    )
+    const written = result.versions[task.outputPath] ?? fingerprint(bytes)
+
     return await this.#audioLedger.mutate(projectRef, (document, writers) => {
-      const task = document.tasks.find((candidate) => candidate.id === id)
-      if (task === undefined) throw new GalfreeError('unknown-task', `没有这个音频任务:${id}`)
-      const failed: AudioTask = {
-        ...task,
-        state: 'failed',
-        lastError: `还没接上「${task.model}」的协议适配器(${task.purpose})—— 见 #36(音乐)/ #37(TTS)`,
+      const found = document.tasks.find((candidate) => candidate.id === id)!
+      const done: AudioTask = {
+        ...found,
+        state: 'awaiting-review',
+        attempts: [...found.attempts, this.#audioAttempt(found.attempts.length + 1, started, 'ok', {
+          fingerprint: written,
+          bytes: bytes.byteLength,
+          ...(replacedFingerprint === undefined ? {} : { replacedFingerprint }),
+        })],
         updatedAt: new Date().toISOString(),
       }
-      writers.push(failed)
-      return Promise.resolve(failed)
+      writers.push(done)
+      return Promise.resolve(done)
     })
+  }
+
+  /** 异步制的轮询回路(与图像那条同形:有界、失败如实回传)。 */
+  async #awaitAudioResult(input: {
+    adapter: ReturnType<typeof audioAdapterFor>
+    model: AudioModelDescriptor
+    channel: AudioChannelSettings
+    task: AudioTask
+    taskId: string
+  }): Promise<Uint8Array> {
+    const http = this.#audioPorts!.http
+    const poll = input.adapter.poll!
+    const deadline = Date.now() + AUDIO_POLL_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, AUDIO_POLL_INTERVAL_MS))
+      const request = input.adapter.buildPollRequest!(
+        {
+          channel: input.channel,
+          model: input.model,
+          task: {
+            purpose: input.task.purpose,
+            prompt: input.task.prompt,
+            dialogueId: input.task.dialogueId,
+            referenceAudio: input.task.referenceAudio,
+          },
+        },
+        input.taskId,
+      )
+      const response = await http.send(request)
+      const step = poll(response, input.taskId)
+      if (step.kind === 'failed') throw new Error(step.error)
+      if (step.kind === 'done') {
+        if (step.bytes !== undefined) return step.bytes
+        if (step.url === undefined) throw new Error('上游说完成了,但既没给字节也没给 URL')
+        const download = await http.send({ url: step.url, method: 'GET', headers: {}, body: '' })
+        if (download.status < 200 || download.status >= 300) {
+          throw new Error(`下载音频失败(HTTP ${download.status}):${download.text.slice(0, 300)}`)
+        }
+        return decodeBase64OrRaw(download.text)
+      }
+    }
+    throw new Error(`等了 ${Math.round(AUDIO_POLL_TIMEOUT_MS / 1000)} 秒还没等到音频(上游一直在跑)—— 这次不算成功`)
+  }
+
+  /**
+   * 重 roll 一个音频任务(与图像那条同一语义):保留历史、追加一次尝试,可改词;
+   * **拒收注记**只追加并指向被拒那一版(空注记/超长都拒)。
+   */
+  async retryAudioTask(
+    projectRef: string,
+    id: string,
+    options: { run?: boolean; prompt?: string; note?: string; via?: 'human' | 'agent' },
+  ): Promise<AudioTask | null> {
+    const reset = await this.#audioLedger.mutate(projectRef, (document, writers) => {
+      const task = document.tasks.find((candidate) => candidate.id === id)
+      if (task === undefined) throw new GalfreeError('unknown-task', `没有这个音频任务:${id}`)
+      if (options.prompt !== undefined && options.prompt.trim() === '') {
+        throw new GalfreeError('empty-prompt', '重 roll 时给的提示词是空的:要么不给(沿用原词),要么给一句能用的')
+      }
+      const at = new Date().toISOString()
+      const next: AudioTask = {
+        ...task,
+        state: 'queued',
+        ...(options.prompt === undefined ? {} : { prompt: options.prompt }),
+        updatedAt: at,
+      }
+      if (options.note !== undefined) {
+        const note = options.note.trim()
+        if (note === '') {
+          throw new GalfreeError('empty-note', '拒收注记是空的:要么不给(没有理由就不记),要么给一句能用的')
+        }
+        if (note.length > MAX_REJECTION_NOTE_CHARS) {
+          throw new GalfreeError('note-too-long', `拒收注记太长(${note.length} > ${MAX_REJECTION_NOTE_CHARS} 字):这里写制作理由,不写剧本`)
+        }
+        const rejected = task.attempts.at(-1)
+        next.rejections = [...(task.rejections ?? []), {
+          attempt: rejected?.n ?? 0,
+          ...(rejected?.fingerprint === undefined ? {} : { fingerprint: rejected.fingerprint }),
+          note,
+          // 人的判断是默认;agent 转述要**显式**标出来(与图像那条同一口径)。
+          via: options.via ?? 'human',
+          at,
+        }]
+      }
+      writers.push(next)
+      return Promise.resolve(next)
+    })
+    if (options.run !== true) return reset
+    return await this.runAudioTask(projectRef, id)
+  }
+
+  #audioAttempt(
+    n: number,
+    startedAt: string,
+    outcome: 'ok' | 'failed',
+    extra: { error?: string; fingerprint?: string; bytes?: number; replacedFingerprint?: string },
+  ): GenerationAttempt {
+    return {
+      n,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      outcome,
+      ...(extra.error === undefined ? {} : { error: extra.error }),
+      ...(extra.fingerprint === undefined ? {} : { fingerprint: extra.fingerprint }),
+      ...(extra.bytes === undefined ? {} : { bytes: extra.bytes }),
+      ...(extra.replacedFingerprint === undefined ? {} : { replacedFingerprint: extra.replacedFingerprint }),
+    }
   }
 
   #requireHuman(actor: { via: 'human' | 'agent' }): void {

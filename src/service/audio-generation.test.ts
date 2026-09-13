@@ -14,7 +14,7 @@ import { join } from 'node:path'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
 import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
-import { assertAudioOutputPath, AUDIO_TASKS_FILE, purposeOfPath } from './audio-generation.ts'
+import { assertAudioOutputPath, AUDIO_TASKS_FILE, clearAudioAdapters, purposeOfPath, registerAudioAdapter, type AudioHttpRequest } from './audio-generation.ts'
 
 /** 一条能用假的音频渠道(端点是假的,快带不出网)。 */
 const CHANNEL = {
@@ -167,5 +167,127 @@ describe('音频生成通道骨架(T27)', () => {
     await service.createAudioTask('audio', { outputPath: 'game/audio/bgm/b.ogg', model: 'music-3.0', prompt: '第二首' })
     const tasks = await service.audioTasks('audio')
     expect(tasks.map((task) => task.prompt)).toEqual(['第二首', '第一首'])
+  })
+
+  // ─── 切片三:适配器 + 执行队列 ─────────────────────────────────────
+
+  describe('执行(适配器 → 网关落盘 → 池)', () => {
+    /** 一个"同步一次拿回字节"的假适配器(不出网:出网走注入的端口)。 */
+    function fakeAdapter(bytes: Uint8Array, onRequest?: (request: AudioHttpRequest) => void) {
+      registerAudioAdapter({
+        id: 'sync-http',
+        buildRequest: (input) => {
+          const request = {
+            url: `${input.channel.baseUrl}/music_generation`,
+            method: 'POST',
+            headers: { authorization: `Bearer ${input.channel.apiKey ?? ''}`, 'content-type': 'application/json' },
+            body: JSON.stringify({ model: input.model.id, prompt: input.task.prompt }),
+          }
+          onRequest?.(request)
+          return { request, adapter: 'sync-http' }
+        },
+        onSubmit: () => ({ kind: 'bytes', bytes, contentType: 'audio/ogg' }),
+      })
+    }
+
+    afterEach(() => {
+      // 注册表是模块级的:每条用例跑完清掉,免得互相污染。
+      clearAudioAdapters()
+    })
+
+    it('跑一个音乐任务:出网 → 经**写网关**落盘 → 状态转 `awaiting-review`、历史记一条', async () => {
+      const bytes = new Uint8Array([79, 103, 103, 83, 1, 2, 3])
+      let sent: AudioHttpRequest | null = null
+      fakeAdapter(bytes, (request) => { sent = request })
+      const task = await service.createAudioTask('audio', {
+        outputPath: 'game/audio/bgm/rain.ogg', model: 'music-3.0', prompt: '雨天的钢琴',
+      })
+      const run = await service.runAudioTask('audio', task.id)
+      expect(run).toMatchObject({ state: 'awaiting-review' })
+      expect(run!.attempts).toHaveLength(1)
+      expect(run!.attempts[0]).toMatchObject({ outcome: 'ok', bytes: bytes.byteLength })
+      // 请求真的发出去了,而且**带上渠道密钥的只有请求头**(账本里没有)。
+      expect(sent!.url).toBe('http://127.0.0.1:9/v1/music_generation')
+      expect(sent!.headers.authorization).toBe('Bearer sk-audio-secret')
+      // 产物经网关落盘:文件真在,而且**池里立刻有它**(与手丢文件同一条推导)。
+      const root = (await service.listProjects()).find((project) => project.name === 'audio')!.root
+      expect(new Uint8Array(await readFile(join(root, 'game/audio/bgm/rain.ogg')))).toEqual(bytes)
+      const pool = await service.audioPool('audio')
+      expect(pool.files.map((file) => file.path)).toContain('audio/bgm/rain.ogg')
+    })
+
+    it('上游拒绝 → 如实记 `failed` + 原话进历史(不吞成"失败了")', async () => {
+      registerAudioAdapter({
+        id: 'sync-http',
+        buildRequest: (input) => ({
+          request: { url: `${input.channel.baseUrl}/x`, method: 'POST', headers: {}, body: '{}' },
+          adapter: 'sync-http',
+        }),
+        onSubmit: () => ({ kind: 'failed', error: 'model not found: music-3.0(HTTP 404)' }),
+      })
+      const task = await service.createAudioTask('audio', {
+        outputPath: 'game/audio/bgm/x.ogg', model: 'music-3.0', prompt: 'x',
+      })
+      const run = await service.runAudioTask('audio', task.id)
+      expect(run).toMatchObject({ state: 'failed', lastError: expect.stringContaining('model not found') })
+      expect(run!.attempts[0]).toMatchObject({ outcome: 'failed' })
+      // 失败不产生产物(不写一个空文件糊过去)。
+      const root = (await service.listProjects()).find((project) => project.name === 'audio')!.root
+      await expect(readFile(join(root, 'game/audio/bgm/x.ogg'))).rejects.toThrow()
+    })
+
+    it('**适配器还没实现** → 如实记失败并指名道姓(不假装成功、也不静默不动)', async () => {
+      const task = await service.createAudioTask('audio', {
+        outputPath: 'game/audio/bgm/y.ogg', model: 'music-3.0', prompt: 'y',
+      })
+      // 清空注册表 = T28/T29 之前的**真实状态**(这个协议还没写)。
+      clearAudioAdapters()
+      const run = await service.runAudioTask('audio', task.id)
+      expect(run!.state).toBe('failed')
+      expect(run!.lastError).toMatch(/还没实现/)
+      expect(run!.lastError).toContain('sync-http') // 指名道姓:哪个协议没有适配器
+      // 也没产生产物。
+      const root = (await service.listProjects()).find((project) => project.name === 'audio')!.root
+      await expect(readFile(join(root, 'game/audio/bgm/y.ogg'))).rejects.toThrow()
+    })
+
+    it('跑队列:只推进 `queued` 的;失败留在 `failed`(重试是人的动作)', async () => {
+      fakeAdapter(new Uint8Array([1, 2, 3, 4]))
+      await service.createAudioTask('audio', { outputPath: 'game/audio/bgm/q1.ogg', model: 'music-3.0', prompt: 'q1' })
+      await service.createAudioTask('audio', { outputPath: 'game/audio/bgm/q2.ogg', model: 'music-3.0', prompt: 'q2' })
+      const ran = await service.runAudioQueue('audio')
+      expect(ran.map((task) => task.state)).toEqual(['awaiting-review', 'awaiting-review'])
+      // 再跑一次:没有 queued 的了 → 什么都不动(不重复出)。
+      const again = await service.runAudioQueue('audio')
+      expect(again).toEqual([])
+      const all = await service.audioTasks('audio')
+      expect(all.every((task) => task.attempts.length === 1)).toBe(true)
+    })
+
+    it('重 roll:保留历史、追加一次尝试,并记下**被覆盖那一版**的指纹', async () => {
+      fakeAdapter(new Uint8Array([9, 9, 9]))
+      const task = await service.createAudioTask('audio', {
+        outputPath: 'game/audio/bgm/r.ogg', model: 'music-3.0', prompt: '第一版',
+      })
+      const first = await service.runAudioTask('audio', task.id)
+      const again = await service.retryAudioTask('audio', task.id, { prompt: '第二版,更安静', run: true })
+      expect(again!.attempts).toHaveLength(2)
+      expect(again!.prompt).toBe('第二版,更安静')
+      // 第二次尝试里记着"我覆盖掉的是哪一版"(指纹来自第一次的产物)。
+      expect(again!.attempts[1]!.replacedFingerprint).toBe(first!.attempts[0]!.fingerprint)
+    })
+
+    it('拒收注记:只追加、指向被拒那一版;空注记/超长注记都拒(要么说清为什么、要么别记)', async () => {
+      fakeAdapter(new Uint8Array([5, 5]))
+      const task = await service.createAudioTask('audio', {
+        outputPath: 'game/audio/bgm/n.ogg', model: 'music-3.0', prompt: 'x',
+      })
+      await service.runAudioTask('audio', task.id)
+      await expect(service.retryAudioTask('audio', task.id, { note: '   ' })).rejects.toMatchObject({ code: 'empty-note' })
+      await expect(service.retryAudioTask('audio', task.id, { note: 'x'.repeat(700) })).rejects.toMatchObject({ code: 'note-too-long' })
+      const noted = await service.retryAudioTask('audio', task.id, { note: '太吵了,钢琴轻一点', via: 'human' })
+      expect(noted!.rejections).toHaveLength(1)
+      expect(noted!.rejections[0]).toMatchObject({ note: '太吵了,钢琴轻一点', via: 'human' })
+    })
   })
 })

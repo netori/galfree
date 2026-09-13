@@ -21,6 +21,11 @@ function settings(overrides: Partial<Required<Config>> = {}): Required<Config> {
     imageApiKey: 'sk-plaintext-in-settings',
     imageChannelName: '主渠道',
     imageModels: '',
+    // 音频渠道(T27)缺省**不配**:于是音频那几条路如实拒绝,与图像"没配渠道"同一态度。
+    audioBaseUrl: '',
+    audioApiKey: '',
+    audioChannelName: '',
+    audioModels: '',
     publishDir: '',
     ...overrides,
   }

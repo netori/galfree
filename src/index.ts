@@ -15,6 +15,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createProjectService } from './service/project-service.ts'
 import { createNodeHttpClient, type ImageChannelSettings, type ImageModelDescriptor } from './service/images.ts'
+import type { AudioChannelSettings, AudioModelDescriptor } from './service/audio-generation.ts'
 import { discoverModels } from './service/discovery.ts'
 import { makeRoutes } from './routes.ts'
 import { GalfreeError } from './service/error.ts'
@@ -98,6 +99,24 @@ export interface Config {
    */
   imageModels?: string
   /**
+   * **音频生成渠道**(T27 / ADR-0012):音乐与语音共用这一条。
+   *
+   * 与图像渠道**分开配置**不是偷懒:三条生成线上游与协议不重叠(图像有 OpenAI 兼容那样的
+   * 事实标准,音乐与语音各家私有)。端点是**可填的** —— 聚合站 / 自建反代 / 本地 TTS
+   * 服务走同一条路,插件不写死厂商域名。
+   */
+  audioBaseUrl?: string
+  audioApiKey?: string
+  audioChannelName?: string
+  /**
+   * 音频模型目录(JSON 数组)。每条要声明**用途**(`music` / `voice`)、
+   * **协议**(`sync-http` 一次拿回 / `async-task` 提交后轮询)与**能力**
+   * (纯音乐?能收歌词?能克隆音色?)—— 与图像同一态度:上游支不支持由人声明,代码不猜。
+   *
+   * 形如:`[{"id":"music-3.0","purpose":"music","adapter":"sync-http","capabilities":{"textToMusic":true,"instrumental":true}}]`
+   */
+  audioModels?: string
+  /**
    * 发布输出目录(T18)。**留空 = 数据目录下的 `publish/<项目名>`**。
    * 每个项目在它下面各占一个子目录;配到项目源树里会被如实拒绝(产物不该混进快照)。
    */
@@ -112,6 +131,10 @@ export const Config: z<Config> = z.object({
   imageApiKey: z.string().default(''),
   imageChannelName: z.string().default(''),
   imageModels: z.string().default(''),
+  audioBaseUrl: z.string().default(''),
+  audioApiKey: z.string().default(''),
+  audioChannelName: z.string().default(''),
+  audioModels: z.string().default(''),
   publishDir: z.string().default(''),
 })
 
@@ -126,6 +149,10 @@ export const GalfreeSettingsSchema: z<Required<Config>> = z.object({
   imageApiKey: z.string().default(''),
   imageChannelName: z.string().default(''),
   imageModels: z.string().default(''),
+  audioBaseUrl: z.string().default(''),
+  audioApiKey: z.string().default(''),
+  audioChannelName: z.string().default(''),
+  audioModels: z.string().default(''),
   publishDir: z.string().default(''),
 })
 
@@ -152,6 +179,78 @@ export function channelFromSettings(settings: Required<Config>): ImageChannelSet
     apiKey: settings.imageApiKey,
     ...(settings.imageChannelName.trim() === '' ? {} : { name: settings.imageChannelName.trim() }),
     models: parseModelCatalog(settings.imageModels),
+  }
+}
+
+/** 解析模型目录 JSON;坏输入返回空目录(面板据此显示"没模型",不静默兜底)。 */
+export function parseAudioModelCatalog(text: string): AudioModelDescriptor[] {
+  if (text.trim() === '') return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(parsed)) return []
+  const models: AudioModelDescriptor[] = []
+  for (const entry of parsed) {
+    if (entry === null || typeof entry !== 'object') continue
+    const candidate = entry as {
+      id?: unknown
+      label?: unknown
+      note?: unknown
+      purpose?: unknown
+      adapter?: unknown
+      capabilities?: Record<string, unknown>
+      paths?: { formats?: unknown; sampleRates?: unknown }
+    }
+    if (typeof candidate.id !== 'string' || candidate.id === '') continue
+    // **认不出的用途/协议一律跳过该条**:猜一个默认值就等于"配置看着生效了、
+    // 实际按错的协议发请求"(图像那条 catalog 也是这个态度)。
+    if (candidate.purpose !== 'music' && candidate.purpose !== 'voice') continue
+    if (candidate.adapter !== 'sync-http' && candidate.adapter !== 'async-task') continue
+    // 能力缺省 = **全 false**(没声明就是不能干,不靠默认值许诺)。
+    const caps = candidate.capabilities ?? {}
+    const on = (key: string): boolean => caps[key] === true
+    const formats = Array.isArray(candidate.paths?.formats) ? candidate.paths.formats.filter((v): v is string => typeof v === 'string') : undefined
+    const sampleRates = Array.isArray(candidate.paths?.sampleRates) ? candidate.paths.sampleRates.filter((v): v is number => typeof v === 'number') : undefined
+    models.push({
+      id: candidate.id,
+      ...(typeof candidate.label === 'string' && candidate.label !== '' ? { label: candidate.label } : {}),
+      ...(typeof candidate.note === 'string' && candidate.note !== '' ? { note: candidate.note } : {}),
+      purpose: candidate.purpose,
+      adapter: candidate.adapter,
+      capabilities: {
+        textToMusic: on('textToMusic'),
+        instrumental: on('instrumental'),
+        lyrics: on('lyrics'),
+        audioReference: on('audioReference'),
+        textToSpeech: on('textToSpeech'),
+        voiceCloning: on('voiceCloning'),
+        voiceId: on('voiceId'),
+        ...(on('urlResult') ? { urlResult: true } : {}),
+      },
+      ...(formats === undefined && sampleRates === undefined
+        ? {}
+        : { paths: { ...(formats === undefined ? {} : { formats }), ...(sampleRates === undefined ? {} : { sampleRates }) } }),
+    })
+  }
+  return models
+}
+
+/**
+ * 从设置拼出音频渠道(T27)。
+ *
+ * **没填端点 = 没渠道**(`null`),不是"一个空渠道" —— 于是生成动作如实拒绝
+ * `no-audio-channel`,与图像那条同一个态度(不假装能生成)。
+ */
+export function audioChannelFromSettings(settings: Required<Config>): AudioChannelSettings | null {
+  if (settings.audioBaseUrl.trim() === '') return null
+  return {
+    baseUrl: settings.audioBaseUrl.trim(),
+    apiKey: settings.audioApiKey,
+    ...(settings.audioChannelName.trim() === '' ? {} : { name: settings.audioChannelName.trim() }),
+    models: parseAudioModelCatalog(settings.audioModels),
   }
 }
 
@@ -257,6 +356,19 @@ export function apply(ctx: Context, config?: Config): void {
   /** 图像子系统的出网端口(生产 fetch);模型发现与出图共用同一个。 */
   const imageHttp = createNodeHttpClient()
 
+  /**
+   * 音频生成子系统的出网端口(T27)。
+   *
+   * 形状比图像那条**窄**(只要"POST 一个 JSON、拿回一段文本"):音乐与语音的协议
+   * 各家不同,适配器(T28/T29)自己去解释响应 —— 端口不理解协议,只负责把请求发出去。
+   */
+  const audioHttp = {
+    send: async (request: { url: string; method: string; headers: Record<string, string>; body: string }) => {
+      const response = await fetch(request.url, { method: request.method, headers: request.headers, body: request.body })
+      return { status: response.status, text: await response.text() }
+    },
+  }
+
   const service = createProjectService({
     dataDir,
     // 合成验证器:假 lint 恒跑,SDK 就绪时叠加真 lint;覆盖路径版本差异警告入状态。
@@ -280,6 +392,11 @@ export function apply(ctx: Context, config?: Config): void {
     images: {
       http: imageHttp,
       channel: () => channelFromSettings(current()),
+    },
+    // 音频生成子系统(T27 / ADR-0012):与图像**同形不同渠道**(上游与协议不重叠)。
+    audio: {
+      http: audioHttp,
+      channel: () => audioChannelFromSettings(current()),
     },
     // 本地发布(T18):真构建(钉版 SDK 的 launcher 项目跑 distribute)。
     // 输出目录:设置里给了就用它,否则落数据目录下的 publish/<项目名>。

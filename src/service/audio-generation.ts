@@ -219,3 +219,142 @@ export function assertAudioOutputPath(outputPath: string): void {
     throw new Error(`音频产物要落在 game/ 下(给的是 ${outputPath})—— 引擎的 searchpath 只有 game/,别处放它找不到`)
   }
 }
+
+// ─── 适配器(按协议收,不按厂商收)────────────────────────────────────
+//
+// 与图像那条同一形状(`ImageAdapter`):**适配器只把"任务参数"翻译成"一次 HTTP 调用"
+// 再翻译回来**,不碰磁盘、不碰网络 —— 出网由接缝经注入的端口做。
+// 这样快带能用假上游验完整回路,生产换真适配器不改形状。
+
+/** 适配器要发的那一个 HTTP 请求(与图像的 `HttpRequest` 同形)。 */
+export interface AudioHttpRequest {
+  url: string
+  method: string
+  headers: Record<string, string>
+  body: string
+}
+
+export interface AudioRequestPlan {
+  request: AudioHttpRequest
+  /** 这次调用用的适配器(进任务历史的诊断信息)。 */
+  adapter: AudioAdapterId
+}
+
+/** 一次提交的结果:要么直接拿到字节(base64 解码后),要么拿到一个要轮询的任务。 */
+export type AudioSubmission =
+  | { kind: 'bytes'; bytes: Uint8Array; contentType?: string }
+  | { kind: 'pending'; taskId: string }
+  /** 上游明说不行(原话带回,不吞成"失败了")。 */
+  | { kind: 'failed'; error: string }
+
+/** 轮询一步的结果。 */
+export type AudioPollStep =
+  | { kind: 'running'; note: string }
+  | { kind: 'done'; url?: string; bytes?: Uint8Array; contentType?: string }
+  | { kind: 'failed'; error: string }
+
+/**
+ * **做任务要带上的东西**(适配器的输入)。刻意与图像那份对称:
+ * 渠道(端点/密钥)、模型(目录条目,含能力声明)、以及任务自己的参数。
+ */
+export interface AudioAdapterInput {
+  channel: AudioChannelSettings
+  model: AudioModelDescriptor
+  task: {
+    purpose: 'music' | 'voice'
+    prompt: string
+    /** 语音任务:要读的文本就是 prompt;这条给"用什么语气"。 */
+    format?: string
+    sampleRate?: number
+    loop?: boolean
+    dialogueId: string | null
+    voiceId?: string
+    referenceAudio: Array<{ path: string; note?: string }>
+  }
+}
+
+export interface AudioAdapter {
+  id: AudioAdapterId
+  /** 把任务翻译成一次 HTTP 调用(纯函数:不发请求)。 */
+  buildRequest: (input: AudioAdapterInput) => AudioRequestPlan
+  /** 提交之后的解释:字节 / 任务 id / 上游拒绝。 */
+  onSubmit: (response: { status: number; text: string }, model: AudioModelDescriptor) => AudioSubmission
+  /** 异步制:轮询一步。 */
+  poll?: (response: { status: number; text: string }, taskId: string) => AudioPollStep
+  /** 异步制:据此拼下一次轮询的请求。 */
+  buildPollRequest?: (input: AudioAdapterInput, taskId: string) => AudioHttpRequest
+}
+
+/**
+ * 适配器注册表(**此刻是空的**,如实:适配器是 T28/T29 的活)。
+ *
+ * `adapterFor` 找不到就抛 —— 于是"跑一个任务"会如实记一条失败,
+ * 说清"还没接上这个协议",而不是假装成功(也不静默什么都不做)。
+ */
+const ADAPTERS = new Map<AudioAdapterId, AudioAdapter>()
+
+/** 注册一个适配器(T28/T29 用;同 id 覆盖 = 测试夹具可以换掉真实现)。 */
+export function registerAudioAdapter(adapter: AudioAdapter): void {
+  ADAPTERS.set(adapter.id, adapter)
+}
+
+/** 取一个适配器;没有就抛(带上"还没实现"的事实,不吞)。 */
+export function adapterFor(id: AudioAdapterId): AudioAdapter {
+  const adapter = ADAPTERS.get(id)
+  if (adapter === undefined) {
+    throw new Error(`音频协议「${id}」的适配器还没实现(见 #36 音乐 / #37 TTS)—— 这个任务不会假装成功`)
+  }
+  return adapter
+}
+
+/** 已注册的适配器(诊断/面板用)。 */
+export function registeredAudioAdapters(): AudioAdapterId[] {
+  return [...ADAPTERS.keys()]
+}
+
+/**
+ * 清空适配器注册表(**给测试用**;也用于诊断"是不是一个适配器都没注册")。
+ *
+ * 为什么要有它:注册表是模块级的,夹具注册的假适配器不摘掉就会污染别的用例 ——
+ * 而"没有适配器"正是本票要如实拒绝的那种状态,得有办法真的造出来。
+ */
+export function clearAudioAdapters(): void {
+  ADAPTERS.clear()
+}
+
+/** 内容类型 → 后缀(下载回来的音频要知道自己是什么格式)。 */
+export function audioFormatOf(contentType: string | undefined, url: string): string {
+  const type = (contentType ?? '').toLowerCase()
+  if (type.includes('mpeg') || type.includes('mp3')) return 'mp3'
+  if (type.includes('ogg') || type.includes('opus')) return 'ogg'
+  if (type.includes('wav') || type.includes('wave')) return 'wav'
+  if (type.includes('flac')) return 'flac'
+  if (type.includes('m4a') || type.includes('mp4')) return 'm4a'
+  const fromUrl = /\.([A-Za-z0-9]{2,5})(?:\?|$)/.exec(url)?.[1]
+  return fromUrl === undefined ? 'ogg' : fromUrl.toLowerCase()
+}
+
+/**
+ * 响应体 → 音频字节。
+ *
+ * 两种上游都给:有的直接回 **base64**(MiniMax `music_generation` 的 `hex`/base64 一族),
+ * 有的回一个**可下载的 URL**(那种走 `#awaitAudioResult` 的下载分支)。
+ * **认不出来就抛**:宁可让人看到"这个响应我不认识",也不要写一个空文件进项目 ——
+ * 后者会在板上显示成"已填",而播放时是静音(这正是 T17 那条"悬空引用"要防的形状)。
+ */
+export function decodeBase64OrRaw(text: string): Uint8Array {
+  const trimmed = text.trim()
+  if (trimmed === '') throw new Error('上游返回了空响应:没有音频字节可写')
+  // 纯文本响应(不是 base64):直接当 UTF-8 字节(测试夹具与"上游其实回了个错误页"都走这里)。
+  if (!/^[A-Za-z0-9+/=\s]+$/.test(trimmed) || trimmed.length % 4 !== 0) {
+    return new TextEncoder().encode(trimmed)
+  }
+  const decoded = Buffer.from(trimmed, 'base64')
+  if (decoded.byteLength === 0) throw new Error('base64 解出来是空的:没有音频字节可写')
+  return new Uint8Array(decoded)
+}
+
+/** 异步制的轮询上限(有界:等不到就如实说"没等到",不算成功)。 */
+export const AUDIO_POLL_TIMEOUT_MS = 5 * 60 * 1000
+/** 轮询间隔。 */
+export const AUDIO_POLL_INTERVAL_MS = 2_000
