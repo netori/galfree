@@ -375,6 +375,31 @@ function collectEdges(
 }
 
 /**
+ * 行内字符串的转义 → **引擎看到的那串文本**。
+ *
+ * 为什么必须解(`parseDialogue` 的 regex 捕获的是**原始**字符):
+ * 引擎把 `\"` 解成一个真引号(实测:`renpy.exe <项目> dialogue None` 导出的 Dialogue 列
+ * 里就是一个 `"`,没有反斜杠)。我们留着反斜杠的后果很实在 ——
+ * **送给本地 TTS 的文本会多出反斜杠**(念出来或直接失败),而这正是 T29 要用的那条路。
+ *
+ * 规则极简(只认引擎这三样):`\"` → `"`、`\\` → `\`、`\n` → 换行;其余 `\x` 原样留着
+ * (引擎对没定义的转义就是这个态度 —— 不吞、不猜)。
+ */
+export function unescapeRpyString(raw: string): string {
+  let out = ''
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i]!
+    if (ch !== '\\') { out += ch; continue }
+    const next = raw[i + 1]
+    if (next === undefined) { out += ch; continue }
+    if (next === 'n') { out += '\n'; i += 1; continue }
+    if (next === '"' || next === '\\') { out += next; i += 1; continue }
+    out += ch
+  }
+  return out
+}
+
+/**
  * 一行对白 → 语句。行尾的 `id` 子句先摘掉再匹配实体部分,id 单独取(T26)。
  *
  * `problem` 回传的两种是**结构错**(引擎也不认),由调用方记成 error:
@@ -391,7 +416,8 @@ function parseDialogue(
   const match = DIALOGUE_RE.exec(core)
   if (match === null) return null
   const speaker = match[1] ?? null
-  const text = match[2]!
+  // 文本解转义 —— 存的是**引擎看到的那串**(见 `unescapeRpyString` 的说明)。
+  const text = unescapeRpyString(match[2]!)
   const problem: DialectProblem | null = clause.present && clause.name === null
     ? {
         severity: 'error', line: lineNo, code: 'invalid-dialogue-id', file: '',

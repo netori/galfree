@@ -17,6 +17,8 @@ import { ProjectRegistry, type RegistryEntry } from './registry.ts'
 import { commitSnapshot, fileDiff, fileHistory, rollbackFile, type SnapshotEntry } from './snapshot.ts'
 import { PROJECT_NAME_RE, TEMPLATE_CJK_FONT, TEMPLATE_UI_FILES, TEMPLATE_UI_IMAGE_DIR, TEMPLATE_WINDOW_ICON, renderTemplateFiles, renderUiPatch, templateKeepFiles } from './template.ts'
 import { COVER_TARGETS, coverTargetOf, coverTargetIds } from './covers.ts'
+import { dialogueIdFor } from './dialogue-id.ts'
+import { isVoiceAudioFile, matchVoiceFiles, voiceTargetPath, type VoiceBatch, type VoiceBatchRow } from './voice-batch.ts'
 import { FakeValidator } from './validation/template-validator.ts'
 import { deriveGraph, parseRpy } from './rpy/parse.ts'
 import { readRpyFiles } from './rpy/files.ts'
@@ -1921,6 +1923,95 @@ export class ProjectService {
       })
     }
     return { channel, model }
+  }
+
+  /**
+   * **本地 TTS 批量清单**(T29 / #37 的第一片,纯读):把每一句对白摊成
+   * "场景 / 行号 / 说话人 / 台词 / **id** / 目标文件名"。
+   *
+   * 这条路**不花上游额度**:清单交给用户自己的本地 TTS 批量跑,再把音频按 id 放回来
+   * (`importVoiceFiles`)。id 的口径与 ADR-0013 完全一致 —— **id 就是文件名**:
+   * 已经写进 `.rpy` 的用那里的,还没写的按 `stampDialogueIds` 的**同一规则**派生。
+   */
+  async voiceBatch(projectRef: string): Promise<VoiceBatch> {
+    const graph = await this.branchGraph(projectRef)
+    const pool = await this.audioPool(projectRef)
+    // 池里的路径是**相对 game/** 的(`audio/voice/x.ogg`),清单里是相对项目根的。
+    const existing = new Set(pool.files.map((file) => file.path))
+    const rows: VoiceBatchRow[] = []
+    for (const scene of graph.scenes) {
+      let seq = 0
+      for (const statement of scene.statements) {
+        if (statement.kind !== 'dialogue') continue
+        const dialogueId = statement.id ?? dialogueIdFor(scene.label, seq)
+        seq += 1
+        const targetPath = voiceTargetPath(dialogueId)
+        rows.push({
+          scene: scene.label,
+          line: statement.line,
+          speaker: statement.speaker,
+          text: statement.text,
+          dialogueId,
+          targetPath,
+          missing: !existing.has(targetPath.replace(/^game\//, '')),
+        })
+      }
+    }
+    return { rows, missingVoiceFiles: rows.filter((row) => row.missing).length, extension: 'ogg' }
+  }
+
+  /**
+   * **把本地 TTS 的产物收回来**(T29):按文件名认 id → 经写网关落进 `game/voice/`。
+   *
+   * 四类结果**逐条报**(收进来 / 缺 / 多余 / 对不上 id):静默跳过等于
+   * "以为配齐了、玩的时候没声音" —— 与 T17 那条"悬空引用"要防的是同一种假象。
+   */
+  async importVoiceFiles(
+    projectRef: string,
+    input: { dropDir: string; rows?: VoiceBatchRow[] },
+  ): Promise<{
+    imported: Array<{ dialogueId: string; path: string; bytes: number }>
+    duplicates: string[]
+    unknownFiles: Array<{ name: string; path: string }>
+    missing: VoiceBatchRow[]
+  }> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const rows = input.rows ?? (await this.voiceBatch(projectRef)).rows
+    const files = await this.#listVoiceCandidates(input.dropDir)
+    const matched = matchVoiceFiles(rows, files)
+    const gateway = await this.#gatewayFor(projectRef)
+    const imported: Array<{ dialogueId: string; path: string; bytes: number }> = []
+    for (const item of matched.imported) {
+      const content = await readFile(item.sourcePath)
+      const current = await gateway.read(item.targetPath)
+      await gateway.writeBatch(
+        [{ path: item.targetPath, content, expectVersion: current.version }],
+        { origin: 'agent', reason: 'voice' },
+      )
+      imported.push({ dialogueId: item.dialogueId, path: item.targetPath, bytes: content.byteLength })
+    }
+    return {
+      imported,
+      duplicates: matched.duplicates.map((file) => file.name),
+      unknownFiles: matched.unknown.map((file) => ({ name: file.name, path: file.path })),
+      missing: matched.missing,
+    }
+  }
+
+  /** 落盘目录里全部音频文件的候选清单(递归;`readme.txt` 这种不该被当语音)。 */
+  async #listVoiceCandidates(dropDir: string): Promise<Array<{ name: string; path: string }>> {
+    const out: Array<{ name: string; path: string }> = []
+    const walk = async (dir: string): Promise<void> => {
+      const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
+      for (const item of entries) {
+        const full = join(dir, item.name)
+        if (item.isDirectory()) { await walk(full); continue }
+        if (isVoiceAudioFile(item.name)) out.push({ name: item.name, path: full })
+      }
+    }
+    await walk(dropDir)
+    return out
   }
 
   /**
