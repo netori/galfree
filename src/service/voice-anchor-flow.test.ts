@@ -169,6 +169,29 @@ describe('声音锚:自动携链(T32)', () => {
     expect(run!.lastError).toMatch(/音色档案/)
   })
 
+  it('降级不是死路:补上音色档案之后,**重 roll 那一条**就成了(不用重建任务)', async () => {
+    await service.upsertCharacter('anchor', {
+      id: 'ghost', name: '幽灵', voice: 'ghost', appearance: {}, references: [],
+    })
+    const task = await service.createAudioTask('anchor', {
+      outputPath: 'game/voice/start_0001.wav', model: 'indextts-2.5', prompt: '……', dialogueId: 'start_0001',
+    })
+    expect(task.degradation?.code).toBe('voice-anchor-missing')
+    expect((await service.runAudioTask('anchor', task.id))!.state).toBe('failed')
+
+    // 人去角色视图给它补一条档案 —— 然后回来点「重 roll」。
+    await service.upsertCharacter('anchor', {
+      id: 'ghost', name: '幽灵', voice: 'ghost', appearance: {}, references: [],
+      voiceProfile: { sample: 'ghost.wav' },
+    })
+    const again = await service.retryAudioTask('anchor', task.id, { run: true })
+    expect(again!.state).toBe('awaiting-review')
+    // 账本上现在记着**这次真的用了哪段参考**,降级说明也随之消失(它已经不成立了)。
+    expect(again!.voiceSample).toBe('ghost.wav')
+    expect(again!.degradation).toBeUndefined()
+    expect(bodyOf(0)).toMatchObject({ audio: 'ghost.wav', text: '……' })
+  })
+
   it('`voiceId` 是**登记簿 id**,不再被当成 `speaker` 发出去(那是 LoRA 适配器名)', async () => {
     await service.upsertCharacter('anchor', {
       id: 'xiao_tang', name: '小棠', voice: 'xiao_tang', appearance: {}, references: [],

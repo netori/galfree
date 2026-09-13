@@ -2650,13 +2650,18 @@ export class ProjectService {
   /**
    * 重 roll 一个音频任务(与图像那条同一语义):保留历史、追加一次尝试,可改词;
    * **拒收注记**只追加并指向被拒那一版(空注记/超长都拒)。
+   *
+   * **T32 加的一小段**:语音任务若**还没有**参考样本(建任务时那个角色还没有音色档案),
+   * 在这一步再解析一次 —— 人很可能刚刚去补上了档案,这时点「重 roll」就该成
+   * (不补的话那条任务只能重建,而"降级"本身就成了死路)。
+   * 已经带着样本的任务**一个字不动**:重 roll = 同一个请求再发一次(同一把嗓子)。
    */
   async retryAudioTask(
     projectRef: string,
     id: string,
     options: { run?: boolean; prompt?: string; note?: string; via?: 'human' | 'agent' },
   ): Promise<AudioTask | null> {
-    const reset = await this.#audioLedger.mutate(projectRef, (document, writers) => {
+    const reset = await this.#audioLedger.mutate(projectRef, async (document, writers) => {
       const task = document.tasks.find((candidate) => candidate.id === id)
       if (task === undefined) throw new GalfreeError('unknown-task', `没有这个音频任务:${id}`)
       if (options.prompt !== undefined && options.prompt.trim() === '') {
@@ -2668,6 +2673,24 @@ export class ProjectService {
         state: 'queued',
         ...(options.prompt === undefined ? {} : { prompt: options.prompt }),
         updatedAt: at,
+      }
+      if (task.purpose === 'voice' && task.voiceSample === undefined) {
+        const entry = await this.#resolve(projectRef)
+        const voice = await this.#resolveVoiceForTask(entry, projectRef, {
+          outputPath: task.outputPath,
+          model: task.model,
+          prompt: next.prompt,
+          ...(task.dialogueId === null ? {} : { dialogueId: task.dialogueId }),
+          ...(task.voiceId === undefined ? {} : { voiceId: task.voiceId }),
+        })
+        if (voice.sample !== undefined) {
+          next.voiceSample = voice.sample
+          if (voice.speaker !== undefined) next.voiceSpeaker = voice.speaker
+          if (voice.lang !== undefined) next.voiceLang = voice.lang
+          if (voice.emotion !== undefined) next.voiceEmotion = voice.emotion
+          // 降级说明**随之消失**:它记录的"这条拿不到嗓子"已经不成立了(留着就是过期的话)。
+          delete next.degradation
+        }
       }
       if (options.note !== undefined) {
         const note = options.note.trim()

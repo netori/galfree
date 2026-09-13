@@ -44,7 +44,12 @@
   agent「美术指导」工具面 5 个(`galfree_image_channel` / `galfree_art_queue` /
   `galfree_generate_image` / `galfree_reroll_image` / `galfree_fill_missing_art`)——
   与面板**同一条队列、同一份推导**,没有第二管线
-- ⏳ 参考链一致性回路(T16)、音频/发布(T17–T18)
+- ⏳ **这一行之后的历史**(T16 参考链 … T32 声音锚)不再在这份清单里逐票罗列 ——
+  现状以 `CONTEXT.md` 的「进行中」节 + `docs/handoff-*.md`(每票一份交接)为准,
+  接缝契约在 `docs/contracts/stage-zero.md`。三句话概括:T16 参考链(同一张脸)、
+  T17–T18 音频接线与本地发布、T19–T22 工具面/指引/nextActions/preset、
+  T23–T24 中文字体与试玩不卡人、T25–T32 三条生成线(图像已有;**音乐/语音各一条渠道**;
+  语音的**声音锚** = 每个角色一份参考样本)+ 封面 + 界面换皮 + 快照回滚。
 
 ## 工程
 
@@ -79,7 +84,7 @@ docs/contracts/       接缝契约(dialect-subset.md / stage-zero.md)
 
 ```bash
 npm run typecheck      # tsc --noEmit
-npm test               # 快集成带(无网络、无真 SDK;125 tests,全在 ProjectService 接缝上)
+npm test               # 快集成带(无网络、无真 SDK;全在 ProjectService 接缝上)
 npm run test:slow      # 慢集成带(真钉版 SDK lint/compile + 路由适配层契约;发版前必跑)
 npm run build          # lib/index.js(ESM host)+ lib/client.js(web bundle)
 ```
