@@ -20,6 +20,7 @@ import { registerAudioAdapter } from './service/audio-generation.ts'
 import { createIndexttsAdapter } from './service/audio-adapter-indextts.ts'
 import { createSunoAdapter } from './service/audio-adapter-suno-register.ts'
 import { discoverModels } from './service/discovery.ts'
+import { discoverAudioModels } from './service/audio-discovery.ts'
 import { makeRoutes } from './routes.ts'
 import { GalfreeError } from './service/error.ts'
 import { SdkProvisioner, probeOverrideSdk } from './service/sdk-provision.ts'
@@ -545,8 +546,12 @@ export function apply(ctx: Context, config?: Config): void {
             return await capability.createDirectory(path, name)
           },
         },
-        // 模型发现(T14 续):与出图共用同一个出网端口 —— 生产 fetch,快带假上游。
-        discoverModels: (input) => discoverModels(imageHttp, input),
+        // 模型发现(T14 续;2026-09-13 起音频渠道也用同一个口子):
+        // 按 `purpose` 分流到对应那条的推断 —— 图像是五项能力、音频是六项,推断规则不同,
+        // 但"拉 /models → 解析 → 标待确认"这套形状只有一份。
+        discoverModels: (input) => input.purpose === undefined
+          ? discoverModels(imageHttp, input)
+          : discoverAudioModels(imageHttp, { ...input, purpose: input.purpose }),
         sdk: {
           // 新建项目要从这里拷界面模板(screens.rpy / gui.rpy)。
           dir: () => sdkDir(),

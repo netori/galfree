@@ -15,6 +15,8 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import { ModelPicker, rowsFromCatalog, sameRows, type ModelRow } from './model-picker.tsx'
+import { AudioModelPicker } from './audio-model-picker.tsx'
+import { audioRowsFromCatalog, sameAudioRows, type AudioModelRow } from './audio-catalog.ts'
 import s from './settings-card.module.css'
 
 /** 与 Host 半 `CONFIG_NAMESPACE` 同一个命名空间(两端必须一致)。 */
@@ -322,6 +324,25 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
    */
   const audioProblem = useMemo(() => modelsProblem(draft.musicModels), [draft.musicModels])
   const voiceProblem = useMemo(() => modelsProblem(draft.voiceModels), [draft.voiceModels])
+
+  /**
+   * 两条音频渠道的**清单行**(与图像那条同一个机制,只是能力表按用途不同)。
+   *
+   * 那一圈"文本 → 清单 → 文本"的同步必须**按内容比对**才 setState(否则渲染自锁,
+   * 见 `sameAudioRows` 的注释)—— 图像那条在这里栽过一次,这条照同一个态度写。
+   */
+  const [musicChoices, setMusicChoices] = useState<AudioModelRow[]>(() => audioRowsFromCatalog('music', EMPTY_DRAFT.musicModels))
+  const [voiceChoices, setVoiceChoices] = useState<AudioModelRow[]>(() => audioRowsFromCatalog('voice', EMPTY_DRAFT.voiceModels))
+
+  useEffect(() => {
+    const next = audioRowsFromCatalog('music', draft.musicModels)
+    setMusicChoices((current) => sameAudioRows(current, next) ? current : next)
+  }, [draft.musicModels])
+  useEffect(() => {
+    const next = audioRowsFromCatalog('voice', draft.voiceModels)
+    setVoiceChoices((current) => sameAudioRows(current, next) ? current : next)
+  }, [draft.voiceModels])
+
   const overridden = (field: keyof ChannelDraft): boolean => scope.view?.user !== undefined && field in scope.view.user
 
   /**
@@ -531,8 +552,22 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
             />
           </label>
 
-          <details className={s.field} open>
-            <summary className={s.hint}>音乐模型目录(JSON;每条声明协议与能力)</summary>
+          <AudioModelPicker
+            purpose="music"
+            baseUrl={draft.musicBaseUrl}
+            apiKey={draft.musicApiKey}
+            rows={musicChoices}
+            disabled={status === 'saving' || !scope.writable}
+            onChange={(next: AudioModelRow[], json: string) => {
+              // 顺序与图像那条一样:先写文本(它触发同步),**再**落选择状态 ——
+              // 反过来会让刚点的那一下被同步覆盖(checkbox 弹回去)。
+              edit('musicModels', json)
+              setMusicChoices(next)
+            }}
+          />
+
+          <details className={s.field}>
+            <summary className={s.hint}>高级:直接看/改目录 JSON(排查用)</summary>
             <textarea
               className={`${s.input} ${s.textarea}`}
               value={draft.musicModels}
@@ -601,8 +636,20 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
             />
           </label>
 
-          <details className={s.field} open>
-            <summary className={s.hint}>语音模型目录(JSON;每条声明协议与能力)</summary>
+          <AudioModelPicker
+            purpose="voice"
+            baseUrl={draft.voiceBaseUrl}
+            apiKey={draft.voiceApiKey}
+            rows={voiceChoices}
+            disabled={status === 'saving' || !scope.writable}
+            onChange={(next: AudioModelRow[], json: string) => {
+              edit('voiceModels', json)
+              setVoiceChoices(next)
+            }}
+          />
+
+          <details className={s.field}>
+            <summary className={s.hint}>高级:直接看/改目录 JSON(排查用)</summary>
             <textarea
               className={`${s.input} ${s.textarea}`}
               value={draft.voiceModels}

@@ -56,12 +56,25 @@ export interface RouteDeps {
    * 走**注入的出网端口**,所以快带能用本地假上游验;不装配时路由如实报未装配
    * (面板会显示"这台宿主没给装配"),而不是假装拉到空清单。
    */
-  discoverModels?: (input: { baseUrl: string; apiKey?: string }) => Promise<{
+  discoverModels?: (input: { baseUrl: string; apiKey?: string; purpose?: 'music' | 'voice' }) => Promise<{
     models: Array<{
       id: string
       label?: string
-      imageLikely: boolean
-      inference: { capabilities: ImageModelCapabilities; family?: string; basis: string; needsConfirmation: boolean }
+      /** 图像那条用它;音频那条叫 `likely`(同义:像不像这个用途的模型)。 */
+      imageLikely?: boolean
+      likely?: boolean
+      /**
+       * 推断结果。能力那一栏的**具体字段因渠道而异**(图像五项 / 音频六项),
+       * 所以这里不收窄成某一个接口 —— 收窄了就得为第二条渠道再写一份路由端口类型,
+       * 而"路由只搬运"这件事不需要它知道有哪几种能力。
+       */
+      inference: {
+        capabilities: object
+        adapter?: string
+        family?: string
+        basis: string
+        needsConfirmation: boolean
+      }
     }>
     total: number
     endpoint: string
@@ -920,6 +933,27 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
   // 已经有主人了。同名路由会让两条完全不同的读法互相顶掉(写这段时差点真撞上)。
   if (method === 'GET' && path === '/audio/channel') {
     writeJson(res, 200, await service.audioChannels())
+    return
+  }
+
+  // 拉**音乐渠道**上游的模型清单(与图像那条同一个端口、同一套态度)。
+  //
+  // 为什么音乐这条也要有:聚合站的模型名千奇百怪(`V6` / `chirp-v3-5` / 别名),
+  // 手写目录 JSON 等于让人去猜"这条该声明什么协议、什么能力"。拉一份下来勾选即可。
+  //
+  // **语音那条不走这里**:本机 TTS(IndexTTS 那类)通常**没有** `/models`
+  // (只有 `/health` `/speakers` `/voices`)—— 那条路靠面板的「手动添加模型」。
+  // 所以 `purpose: "voice"` 也能问,只是本机服务多半会如实回一句"没有 /models、请手动添加"。
+  if (method === 'POST' && path === '/audio/channel/models') {
+    if (deps.discoverModels === undefined) {
+      return writeJson(res, 503, { error: '这台宿主没有装配模型发现端口', code: 'discovery-unavailable' })
+    }
+    const body = await readJsonBody(req)
+    const baseUrl = String(body.baseUrl ?? '')
+    if (baseUrl.trim() === '') throw new GalfreeError('invalid-channel', '需要 baseUrl(上游基址)')
+    const purpose = body.purpose === 'voice' ? 'voice' : 'music'
+    const apiKey = typeof body.apiKey === 'string' && body.apiKey !== '' ? body.apiKey : undefined
+    writeJson(res, 200, await deps.discoverModels({ baseUrl, purpose, ...(apiKey === undefined ? {} : { apiKey }) }))
     return
   }
 
