@@ -16,6 +16,8 @@ import { join } from 'node:path'
 import { createProjectService } from './service/project-service.ts'
 import { createNodeHttpClient, type ImageChannelSettings, type ImageModelDescriptor } from './service/images.ts'
 import type { AudioChannelSettings, AudioModelDescriptor } from './service/audio-generation.ts'
+import { registerAudioAdapter } from './service/audio-generation.ts'
+import { createIndexttsAdapter } from './service/audio-adapter-indextts.ts'
 import { discoverModels } from './service/discovery.ts'
 import { makeRoutes } from './routes.ts'
 import { GalfreeError } from './service/error.ts'
@@ -355,6 +357,15 @@ export function apply(ctx: Context, config?: Config): void {
 
   /** 图像子系统的出网端口(生产 fetch);模型发现与出图共用同一个。 */
   const imageHttp = createNodeHttpClient()
+
+  /**
+   * **注册音频协议适配器**(T27/T29)。没注册的协议在跑任务时会**如实报"还没实现"** ——
+   * 所以注册是显式的,不是隐式的默认行为。
+   *
+   * 目前只有一个:**IndexTTS 2.5**(发起人机器上那份整合包的本地 API,
+   * `app_api.py`,默认 `127.0.0.1:9005`)。要接别家就在下面按同一个形状加一行。
+   */
+  registerAudioAdapter(createIndexttsAdapter())
 
   /**
    * 音频生成子系统的出网端口(T27)。

@@ -2066,7 +2066,7 @@ export class ProjectService {
         },
       })
       const response = await this.#audioPorts!.http.send(plan.request)
-      const submission = adapter.onSubmit(response, model)
+      const submission = await adapter.onSubmit(response, model)
       if (submission.kind === 'failed') throw new Error(submission.error)
       if (submission.kind === 'bytes') {
         bytes = submission.bytes

@@ -277,8 +277,13 @@ export interface AudioAdapter {
   id: AudioAdapterId
   /** 把任务翻译成一次 HTTP 调用(纯函数:不发请求)。 */
   buildRequest: (input: AudioAdapterInput) => AudioRequestPlan
-  /** 提交之后的解释:字节 / 任务 id / 上游拒绝。 */
-  onSubmit: (response: { status: number; text: string }, model: AudioModelDescriptor) => AudioSubmission
+  /**
+   * 提交之后的解释:字节 / 任务 id / 上游拒绝。
+   *
+   * **可以是异步的**:有的上游把产物放在**服务端路径**上(IndexTTS 就是),
+   * 这时适配器要读那个文件才拿得到字节。异步在这里是必要的,不是顺手加的。
+   */
+  onSubmit: (response: { status: number; text: string }, model: AudioModelDescriptor) => AudioSubmission | Promise<AudioSubmission>
   /** 异步制:轮询一步。 */
   poll?: (response: { status: number; text: string }, taskId: string) => AudioPollStep
   /** 异步制:据此拼下一次轮询的请求。 */
