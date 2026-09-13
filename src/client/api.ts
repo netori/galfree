@@ -4,6 +4,7 @@
  */
 // 只借类型:推导引擎的那两个联合(码 / 跳转目标)不在客户端手抄第二份 —— type-only import
 // 构建时被擦掉,产物里不会多出服务端代码。
+import type { AudioPurpose } from '../service/audio-generation.ts'
 import type { NextActionCode, NextActionTarget } from '../service/progress.ts'
 
 export interface ProjectView {
@@ -85,7 +86,7 @@ export interface CharacterUpsertPayload {
   references?: Array<{ path: string; slot?: string; note?: string }>
 }
 
-/** 音频渠道处境(T27):**不含密钥** —— 只说配没配。 */
+/** 音频渠道处境(T27 / ADR-0012):**音乐与语音各一条**,各**不含密钥** —— 只说配没配。 */
 export interface AudioChannelView {
   configured: boolean
   name?: string
@@ -95,12 +96,20 @@ export interface AudioChannelView {
     id: string
     label?: string
     note?: string
-    purpose: 'music' | 'voice'
+    purpose: AudioPurposeView
     adapter: string
     capabilities: Record<string, boolean>
     paths?: { formats?: string[]; sampleRates?: number[] }
   }>
 }
+
+/**
+ * 音频用途:音乐还是语音(**各有一条渠道** —— 建任务/跑任务都按它分流)。
+ *
+ * 类型来自 service 那一份(`AudioPurpose`):领域概念的定义只有一处,
+ * 客户端这个别名只是"面板这边怎么叫它"。
+ */
+export type AudioPurposeView = AudioPurpose
 
 /** 音频任务(面板读的那一份;与账本同源)。 */
 export interface AudioTaskView {
@@ -916,22 +925,25 @@ export class GalfreeApi {
   // **注意与上面的池分开**:池是"项目里现在有哪些音频文件"(T17,派生的);
   // 这一组是"要去上游生成什么"(渠道 + 任务账本)。两者不是一件事。
 
-  /** 音频渠道处境(配没配、有哪些模型、各自声明了什么;**不含密钥**)。 */
-  async audioChannel(): Promise<AudioChannelView> {
-    return readJson<AudioChannelView>(await fetch('/api/galfree/audio/channel'))
+  /** **两条**音频渠道的处境:音乐与语音各一条(配没配、有哪些模型、各自声明了什么;**不含密钥**)。 */
+  async audioChannels(): Promise<Record<AudioPurposeView, AudioChannelView>> {
+    return readJson<Record<AudioPurposeView, AudioChannelView>>(await fetch('/api/galfree/audio/channel'))
   }
 
-  /** 音频任务账本(最新的在前)。 */
-  async audioTasks(): Promise<AudioTaskView[]> {
+  /**
+   * 音频任务账本(最新的在前)。给了 `purpose` 就只要那一类 ——
+   * 两张卡各自只显示自己的任务(数出来的"排队 N 条"也就是那一跑真会发的条数)。
+   */
+  async audioTasks(purpose?: AudioPurposeView): Promise<AudioTaskView[]> {
     const body = await readJson<{ tasks: AudioTaskView[] }>(await fetch('/api/galfree/audio/tasks'))
-    return body.tasks
+    return purpose === undefined ? body.tasks : body.tasks.filter((task) => task.purpose === purpose)
   }
 
   async createAudioTask(input: {
     outputPath: string
     model: string
     prompt: string
-    purpose?: 'music' | 'voice'
+    purpose?: AudioPurposeView
     dialogueId?: string
     format?: string
     loop?: boolean
@@ -946,9 +958,13 @@ export class GalfreeApi {
     return body.task
   }
 
-  /** 推进队列(串行);返回跑过的那几个任务的状态。 */
-  async runAudioQueue(): Promise<AudioTaskView[]> {
-    const body = await readJson<{ tasks: AudioTaskView[] }>(await fetch('/api/galfree/audio/tasks/run', { method: 'POST' }))
+  /** 推进队列(串行);返回跑过的那几个任务的状态。给了 `purpose` 就**只跑那一类**。 */
+  async runAudioQueue(purpose?: AudioPurposeView): Promise<AudioTaskView[]> {
+    const body = await readJson<{ tasks: AudioTaskView[] }>(await fetch('/api/galfree/audio/tasks/run', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(purpose === undefined ? {} : { purpose }),
+    }))
     return body.tasks
   }
 

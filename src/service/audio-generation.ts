@@ -1,8 +1,9 @@
 /**
- * 音频生成子系统(T27 / ADR-0012)—— 音乐与语音共用的**渠道 + 任务**形状。
+ * 音频生成子系统(T27 / ADR-0012)—— 音乐与语音**各自一条渠道**,共用一套**任务**形状。
  *
  * 与图像子系统(ADR-0010 / `images.ts`)**同构但不共用渠道**:三条生成线各自一条渠道,
  * 因为它们的上游与协议不重叠(图像有事实标准,音乐与语音各家私有)。
+ * 落到这一层就是:**音乐一条、语音一条**(音源与 TTS 的上游在现实里从来不是同一家)。
  * 共用的是**纪律与底层**:
  *  - 任务账本的状态机/历史/拒收注记 = `tasks.ts`(同一份代码);
  *  - 密钥只存本机设置,不进项目/快照/账本;
@@ -31,6 +32,14 @@ export type AudioAdapterId =
   | 'sync-http'
   /** 异步任务:提交拿任务 id,轮询到终态再取音频。Suno 类聚合多为此。 */
   | 'async-task'
+
+/**
+ * 用途:**音乐**还是**语音**。
+ *
+ * 它不只是任务上的一个标签 —— 每一条都有一份**自己的渠道**(ADR-0012:三条生成线各自一条)。
+ * 所以"这条任务该用哪个端点、哪把密钥、哪份模型目录"都由它决定。
+ */
+export type AudioPurpose = 'music' | 'voice'
 
 /**
  * **模型能力声明**(与图像的 `ImageModelCapabilities` 同一态度):
@@ -69,13 +78,19 @@ export interface AudioModelDescriptor {
   note?: string
   /** 协议(POST 路径与"同步还是异步"的差异走这里)。 */
   adapter: AudioAdapterId
-  /** 这个模型干什么用的:**音乐 / 语音**(同一条渠道里可以都有)。 */
-  purpose: 'music' | 'voice'
+  /**
+   * 这条模型干什么用的:**音乐 / 语音**。
+   *
+   * 渠道已经按用途分开了(音乐渠道里只有音乐模型),所以这里主要是一道**一致性检查**:
+   * 拼渠道时会按它过滤(`audioChannelFromSettings`),于是"把 TTS 模型递给了音乐上游"
+   * 这件事在配置阶段就不可能发生。
+   */
+  purpose: AudioPurpose
   capabilities: AudioModelCapabilities
   paths?: AudioModelPaths
 }
 
-/** 渠道设置(与图像渠道同形:端点 + 密钥 + 模型目录)。 */
+/** 渠道设置(与图像渠道同形:端点 + 密钥 + 模型目录)。**音乐一条、语音一条。** */
 export interface AudioChannelSettings {
   name?: string
   baseUrl: string
@@ -86,8 +101,12 @@ export interface AudioChannelSettings {
 /**
  * 音频子系统的**注入端口**(T27):出网 + 渠道读取。
  *
- * 与图像同一态度:**`null` = 没配渠道** → 生成动作如实拒绝(`no-audio-channel`),
- * 绝不假装能生成。出网走注入的端口,所以快带能用假上游验完整回路,生产换真 fetch 不改形状。
+ * 与图像同一态度:**`null` = 那条渠道没配** → 生成动作如实拒绝
+ * (`no-music-channel` / `no-voice-channel`),绝不假装能生成。
+ * 出网走注入的端口,所以快带能用假上游验完整回路,生产换真 fetch 不改形状。
+ *
+ * **出网是共用的、渠道是两条**:音乐与语音的协议不同(轮询 vs 同步),但"发一个 HTTP 请求"
+ * 这件事没有两条(下载那条同理)。分成两份反而会让"下载接口只装配了一半"变成可能。
  */
 export interface AudioPorts {
   /** 出网(生产 fetch / 快带假上游)。形状与图像的 `HttpRequest` 同构,但**各走各的渠道**。 */
@@ -102,12 +121,17 @@ export interface AudioPorts {
      */
     download?: (url: string) => Promise<{ status: number; bytes: Uint8Array; contentType: string }>
   }
-  /** 当前渠道设置;`null` = 还没配。每次现读(设置可能刚被改)。 */
-  channel: () => AudioChannelSettings | null
+  /**
+   * 取**某一条**渠道的设置;`null` = 那条还没配。每次现读(设置可能刚被改)。
+   *
+   * 带 `purpose` 而不是给两个字段,是为了让"这条任务该走哪条渠道"**只有一处判断**:
+   * 服务那边是 `channel(task.purpose)`,装配那边是 `(purpose) => audioChannelFromSettings(current(), purpose)`。
+   */
+  channel: (purpose: AudioPurpose) => AudioChannelSettings | null
 }
 
 /** 只要声明了能干这件事的模型(与 `imageModels` 同口径)。 */
-export function audioModels(channel: AudioChannelSettings, purpose?: 'music' | 'voice'): AudioModelDescriptor[] {
+export function audioModels(channel: AudioChannelSettings, purpose?: AudioPurpose): AudioModelDescriptor[] {
   const usable = channel.models.filter((model) => purpose === undefined || model.purpose === purpose)
   return usable
 }
@@ -115,12 +139,12 @@ export function audioModels(channel: AudioChannelSettings, purpose?: 'music' | '
 // ─── 任务(与图像任务同底层,字段按音频的用途)──────────────────────
 
 /** 音频任务的产物类型 discriminator。 */
-export type AudioTaskKind = 'music' | 'voice'
+export type AudioTaskKind = AudioPurpose
 
 export interface AudioTask extends GenerationTaskBase {
   kind: AudioTaskKind
-  /** 用途:音乐(BGM/SE)还是语音(对白配音)。 */
-  purpose: 'music' | 'voice'
+  /** 用途:音乐(BGM/SE)还是语音(对白配音)。**它决定这条任务走哪条渠道。** */
+  purpose: AudioPurpose
   /**
    * 语音任务的**对话 id**(ADR-0013 的那根锚 = 文件名)。
    * 音乐任务为 null(它没有"哪一句"这回事)。
@@ -191,7 +215,7 @@ export interface CreateAudioTaskInput {
   /** 制作指令(风格/情绪/场景;音乐是提示词,语音是"用什么语气读")。 */
   prompt: string
   /** 用途;缺省按目标路径推(`voice/` 下 = 语音,其余 = 音乐)。 */
-  purpose?: 'music' | 'voice'
+  purpose?: AudioPurpose
   /** 语音任务的对话 id(ADR-0013)。 */
   dialogueId?: string
   format?: string
@@ -209,7 +233,7 @@ export interface CreateAudioTaskInput {
  * 为什么按路径推:`game/voice/` 是 ADR-0013 定下的语音目录(`config.auto_voice = "voice/{id}.ogg"`),
  * 而"这句话是对白配音还是 BGM"在路径上就已经说清了。让调用方每次显式声明反而容易漏。
  */
-export function purposeOfPath(outputPath: string): 'music' | 'voice' {
+export function purposeOfPath(outputPath: string): AudioPurpose {
   return /(^|\/)voice\//.test(outputPath.replace(/\\/g, '/')) ? 'voice' : 'music'
 }
 
@@ -271,7 +295,7 @@ export interface AudioAdapterInput {
   channel: AudioChannelSettings
   model: AudioModelDescriptor
   task: {
-    purpose: 'music' | 'voice'
+    purpose: AudioPurpose
     prompt: string
     /** 语音任务:要读的文本就是 prompt;这条给"用什么语气"。 */
     format?: string

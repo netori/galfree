@@ -917,20 +917,31 @@ describe('路由适配层(/api/galfree)', () => {
 
     const channel = await req('/api/galfree/audio/channel')
     expect(channel.status).toBe(200)
-    // 这个夹具没装配音频端口 → 如实说"没配"(不是 500、也不是一个假渠道)。
-    expect(channel.body).toEqual({ configured: false, apiKeyConfigured: false, models: [] })
+    // 这个夹具没装配音频端口 → **两条**都如实说"没配"(不是 500、也不是一个假渠道)。
+    // 音乐与语音各自一条渠道(ADR-0012),所以这份视图里是两个同样形状的对象。
+    expect(channel.body).toEqual({
+      music: { configured: false, apiKeyConfigured: false, models: [] },
+      voice: { configured: false, apiKeyConfigured: false, models: [] },
+    })
 
     const tasks = await req('/api/galfree/audio/tasks')
     expect(tasks.status).toBe(200)
     expect(tasks.body.tasks).toEqual([])
 
-    // 三道门:没配渠道 → 建任务拒;空路径 → 拒(都在接缝上判)。
+    // 三道门:那条渠道没配 → 建任务拒;空路径 → 拒(都在接缝上判)。
     const noChannel = await postJson('/api/galfree/audio/tasks/create', {
       outputPath: 'game/audio/bgm/rain.ogg', model: 'music-3.0', prompt: '雨天',
     })
     // 503 = 能力未就绪(与图像那条 `no-image-channel` 同一个态度:**不是**服务端故障)。
+    // 码**按用途分**:音乐与语音各有一条,一个码说不清该去配哪一段。
     expect(noChannel.status).toBe(503)
-    expect(noChannel.body.code).toBe('no-audio-channel')
+    expect(noChannel.body.code).toBe('no-music-channel')
+
+    const noVoiceChannel = await postJson('/api/galfree/audio/tasks/create', {
+      outputPath: 'game/voice/start_0000.ogg', model: 'indextts', prompt: '平静地读',
+    })
+    expect(noVoiceChannel.status).toBe(503)
+    expect(noVoiceChannel.body.code).toBe('no-voice-channel')
 
     const emptyPath = await postJson('/api/galfree/audio/tasks/create', { model: 'music-3.0', prompt: 'x' })
     expect(emptyPath.status).toBe(400)

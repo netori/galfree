@@ -55,18 +55,24 @@ interface ChannelDraft {
   imageApiKey: string
   imageChannelName: string
   imageModels: string
-  /** 音频生成渠道(T27 / ADR-0012):音乐与语音共用这一条。 */
-  audioBaseUrl: string
-  audioApiKey: string
-  audioChannelName: string
-  audioModels: string
+  /** 音乐生成渠道(T27 / ADR-0012:三条生成线各自一条)。 */
+  musicBaseUrl: string
+  musicApiKey: string
+  musicChannelName: string
+  musicModels: string
+  /** 语音(TTS)生成渠道 —— 与音乐那条**分开配**(上游与协议不重叠)。 */
+  voiceBaseUrl: string
+  voiceApiKey: string
+  voiceChannelName: string
+  voiceModels: string
   /** 发布输出目录(T18);留空 = 数据目录下的 publish/<项目名>。 */
   publishDir: string
 }
 
 const EMPTY_DRAFT: ChannelDraft = {
   imageBaseUrl: '', imageApiKey: '', imageChannelName: '', imageModels: '',
-  audioBaseUrl: '', audioApiKey: '', audioChannelName: '', audioModels: '',
+  musicBaseUrl: '', musicApiKey: '', musicChannelName: '', musicModels: '',
+  voiceBaseUrl: '', voiceApiKey: '', voiceChannelName: '', voiceModels: '',
   publishDir: '',
 }
 
@@ -82,7 +88,17 @@ const EMPTY_DRAFT: ChannelDraft = {
 export const SETTINGS_CARD_KEYS = Object.keys(EMPTY_DRAFT) as Array<keyof ChannelDraft>
 
 /** 密钥字段:空值**不能** unset(空密钥是合法状态:本地服务通常不要密钥)。 */
-const SECRET_FIELDS: ReadonlyArray<keyof ChannelDraft> = ['imageApiKey', 'audioApiKey']
+const SECRET_FIELDS: ReadonlyArray<keyof ChannelDraft> = ['imageApiKey', 'musicApiKey', 'voiceApiKey']
+
+/**
+ * **旧一代**的音频渠道键(T27 那代:音乐与语音共用一条)。
+ *
+ * 2026-09-13 拆成 `music*` / `voice*` 两族之后,这四个键不在 schema 里了 ——
+ * schema 会剥掉未知键,于是"配过音频渠道"的人升级后会看到两段空白。
+ * 它们**不再被读取**,但设置文档里可能还留着;面板据此给一句提示(见 legend 那段注释)。
+ * 这里只列名字,**不做迁移**:那个端点原本该算音乐还是语音,只有人知道。
+ */
+const LEGACY_AUDIO_KEYS = ['audioBaseUrl', 'audioApiKey', 'audioChannelName', 'audioModels'] as const
 
 /** 模型目录示例:先给一条能跑的,人照着改(空目录会让建任务被拒)。 */
 const MODEL_EXAMPLE = JSON.stringify([
@@ -94,20 +110,12 @@ const MODEL_EXAMPLE = JSON.stringify([
 ], null, 2)
 
 /**
- * 音频模型目录的示例:**给两条真的能用的**(本地 TTS 一条、Suno 类音乐一条)。
+ * 音乐目录的示例:**一条真的能用的**(Suno 类聚合站)。
  *
- * 为什么给这么具体:这两个适配器各自要的参数(`speaker`/`audio`、`submit`/`record`/`model`)
- * 写在 `note` 里,不给示例的话人只能猜;而猜错的形态是"配置看着生效了、跑起来说不认这个形状"。
+ * 为什么给这么具体:那个适配器要的参数(`submit`/`record`/`model`)写在 `note` 里,
+ * 不给示例的话人只能猜;而猜错的形态是"配置看着生效了、跑起来说不认这个形状"。
  */
-const AUDIO_MODEL_EXAMPLE = JSON.stringify([
-  {
-    id: 'indextts-2.5',
-    purpose: 'voice',
-    adapter: 'sync-http',
-    label: '本地 TTS(参考音频的音色)',
-    note: 'speaker=default;audio=参考音频.mp3;lang=ZH',
-    capabilities: { textToSpeech: true, voiceCloning: true, voiceId: true, audioReference: true },
-  },
+const MUSIC_MODEL_EXAMPLE = JSON.stringify([
   {
     id: 'suno-generation',
     purpose: 'music',
@@ -115,6 +123,18 @@ const AUDIO_MODEL_EXAMPLE = JSON.stringify([
     label: '音乐(聚合站;sunoapi 那种协议)',
     note: 'submit=/api/v1/generate;record=/api/v1/generate/record-info;model=V6',
     capabilities: { textToMusic: true, instrumental: true, lyrics: true, urlResult: true },
+  },
+], null, 2)
+
+/** 语音目录的示例:**一条真的能用的**(本机 IndexTTS 那种服务)。 */
+const VOICE_MODEL_EXAMPLE = JSON.stringify([
+  {
+    id: 'indextts-2.5',
+    purpose: 'voice',
+    adapter: 'sync-http',
+    label: '本地 TTS(参考音频的音色)',
+    note: 'speaker=default;audio=参考音频.mp3;lang=ZH',
+    capabilities: { textToSpeech: true, voiceCloning: true, voiceId: true, audioReference: true },
   },
 ], null, 2)
 
@@ -296,15 +316,26 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
 
   const problem = useMemo(() => modelsProblem(draft.imageModels), [draft.imageModels])
   /**
-   * 音频目录的校验:与图像那条**同一把尺子**(坏 JSON / 不是数组当场说),
+   * 两条音频目录的校验:与图像那条**同一把尺子**(坏 JSON / 不是数组当场说),
    * 但**不检查认不出的 purpose/adapter** —— 那两条是"整条跳过"的语义(见 Host 半的说明),
    * 在这里拦成报错反而与接缝不一致。
    */
-  const audioProblem = useMemo(() => modelsProblem(draft.audioModels), [draft.audioModels])
+  const audioProblem = useMemo(() => modelsProblem(draft.musicModels), [draft.musicModels])
+  const voiceProblem = useMemo(() => modelsProblem(draft.voiceModels), [draft.voiceModels])
   const overridden = (field: keyof ChannelDraft): boolean => scope.view?.user !== undefined && field in scope.view.user
 
+  /**
+   * 设置文档里**还留着**的旧音频渠道键(T27 那代的 `audioBaseUrl` 一族)。
+   *
+   * 读的是 `user` 那一层(用户实际写下的键),不是 resolved 值 —— schema 已经不认它们,
+   * 所以 resolved 里看不到、而文档里还在。这四行代码是"配置静默失效"的唯一出口:
+   * 不提示的话,人只会看到自己配的渠道不见了。
+   */
+  const legacyAudioKeys = LEGACY_AUDIO_KEYS.filter((key) =>
+    (scope.view?.user as Record<string, unknown> | undefined)?.[key] !== undefined)
+
   const save = async (): Promise<void> => {
-    const firstProblem = problem ?? audioProblem
+    const firstProblem = problem ?? audioProblem ?? voiceProblem
     if (firstProblem !== null) {
       setStatus('error')
       setMessage(firstProblem)
@@ -350,6 +381,20 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
       ) : (
         <div className={s.body}>
           {!scope.writable ? <p className={s.warn}>这个部署把设置存成只读,改不了。</p> : null}
+
+          {/*
+            旧音频渠道那四个键(`audioBaseUrl` 一族,2026-09-13 拆成音乐/语音两族之后
+            已不在 schema 里)如果还留在设置文档里,**如实说一句** ——
+            不说的话人只会看到"我配的渠道没了",而不知道为什么(那两个键现在既不被读、
+            也不会被面板清掉)。**只提示、不迁移**:怎么分是人的决定(那个端点原本是音乐还是语音)。
+          */}
+          {legacyAudioKeys.length > 0 ? (
+            <p className={s.warn}>
+              设置文档里还有旧的音频渠道键({legacyAudioKeys.join('、')})—— 它们**已经不再被读取**。
+              音乐与语音现在是**两条**渠道:把原来那组端点/密钥/模型目录**照原样搬到下面「音乐生成渠道」
+              或「语音生成渠道」**对应那一段(搬完可以手改设置文档删掉旧的四个键;面板不会替你动它们)。
+            </p>
+          ) : null}
 
           <label className={s.field}>
             <span className={s.label}>端点(OpenAI 兼容基址)</span>
@@ -436,28 +481,29 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
           </label>
 
           {/*
-            ─── 音频生成渠道(T27 / ADR-0012)────────────────────────────────
-            音乐与语音**共用这一条**;与图像那条分开配,因为三条生成线的上游与协议不重叠。
-            端点填什么都行:聚合站 / 自建反代 / **本地 TTS 服务**(IndexTTS 那种)走同一条路。
+            ─── 音乐生成渠道(T27 / ADR-0012)────────────────────────────────
+            三条生成线**各自一条渠道**:音乐与语音的上游与协议不重叠(音乐多是"提交 → 轮询 → 拿 URL",
+            语音那条多半是本机服务)。合成一条的表现是"换了音乐上游,语音那半跟着坏"。
+            端点填什么都行:聚合站 / 自建反代 / 本地服务走同一条路。
           */}
-          <div className={s.divider} role="separator" aria-label="音频生成渠道" />
-          <h4 className={s.groupTitle}>音频生成渠道(音乐 + 语音)</h4>
+          <div className={s.divider} role="separator" aria-label="音乐生成渠道" />
+          <h4 className={s.groupTitle}>音乐生成渠道</h4>
           <p className={s.hint} style={{ marginBottom: 8 }}>
-            端点**可填任意基址** —— 聚合站 / 自建反代 / 本地 TTS 服务都走这一条,插件不写死厂商。
-            本地 TTS(如 IndexTTS 的 `app_api.py`)填 `http://127.0.0.1:9005` 即可。
-            没配 = 生成动作如实拒绝(`no-audio-channel`),面板上也会说清为什么。
+            端点**可填任意基址**(聚合站 / 自建反代),插件不写死厂商。
+            没配 = 建音乐任务如实拒绝(`no-music-channel`),面板上也会说清为什么。
+            **语音那条在下面单独配** —— 两条互不影响。
           </p>
 
           <label className={s.field}>
-            <span className={s.label}>端点(音乐 / 语音上游基址)</span>
+            <span className={s.label}>端点(音乐上游基址)</span>
             <input
               className={s.input}
-              value={draft.audioBaseUrl}
-              placeholder="http://127.0.0.1:9005(本地 TTS)或聚合站基址"
-              onChange={(event) => edit('audioBaseUrl', event.target.value)}
-              aria-label="音频渠道端点"
+              value={draft.musicBaseUrl}
+              placeholder="https://your-music-aggregator.example/v1"
+              onChange={(event) => edit('musicBaseUrl', event.target.value)}
+              aria-label="音乐渠道端点"
             />
-            <span className={s.hint}>留空 = 没配音频渠道。这时建音频任务会如实拒绝(不假装能出)。</span>
+            <span className={s.hint}>留空 = 没配音乐渠道。这时建音乐任务会如实拒绝(不假装能出)。</span>
           </label>
 
           <label className={s.field}>
@@ -466,10 +512,10 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
             </span>
             <input
               className={s.input}
-              value={draft.audioApiKey}
-              placeholder="本地服务通常留空"
-              onChange={(event) => edit('audioApiKey', event.target.value)}
-              aria-label="音频渠道密钥"
+              value={draft.musicApiKey}
+              placeholder="聚合站给的 key"
+              onChange={(event) => edit('musicApiKey', event.target.value)}
+              aria-label="音乐渠道密钥"
             />
             <span className={s.hint}>只用于出网请求;不进项目目录、不进快照、不进任务账本。</span>
           </label>
@@ -478,31 +524,100 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
             <span className={s.label}>渠道名(随便填,只为在面板/账本里指认)</span>
             <input
               className={s.input}
-              value={draft.audioChannelName}
-              placeholder="本地 TTS / 音乐聚合站"
-              onChange={(event) => edit('audioChannelName', event.target.value)}
-              aria-label="音频渠道名"
+              value={draft.musicChannelName}
+              placeholder="音乐聚合站"
+              onChange={(event) => edit('musicChannelName', event.target.value)}
+              aria-label="音乐渠道名"
             />
           </label>
 
           <details className={s.field} open>
-            <summary className={s.hint}>音频模型目录(JSON;每条要声明用途、协议与能力)</summary>
+            <summary className={s.hint}>音乐模型目录(JSON;每条声明协议与能力)</summary>
             <textarea
               className={`${s.input} ${s.textarea}`}
-              value={draft.audioModels}
-              placeholder={AUDIO_MODEL_EXAMPLE}
-              rows={8}
-              onChange={(event) => edit('audioModels', event.target.value)}
-              aria-label="音频模型目录"
+              value={draft.musicModels}
+              placeholder={MUSIC_MODEL_EXAMPLE}
+              rows={7}
+              onChange={(event) => edit('musicModels', event.target.value)}
+              aria-label="音乐模型目录"
             />
             <span className={s.hint}>
-              `purpose` 只能是 `music` / `voice`;`adapter` 只能是 `sync-http`(一次拿回)或
-              `async-task`(提交后轮询)。**认不出的值会整条跳过**(不猜默认协议)。
+              `adapter` 只能是 `sync-http`(一次拿回)或 `async-task`(提交后轮询);
+              **认不出的值会整条跳过**(不猜默认协议)。
+              聚合站可在 `note` 里覆盖路径与模型名:`submit=…;record=…;model=V6`。
               <br />
-              本地 TTS(IndexTTS)的嗓子里写在 `note`:`speaker=default;audio=参考音频.wav;lang=ZH`;
-              Suno 类聚合站可在 `note` 里覆盖路径与模型名:`submit=…;record=…;model=V6`。
+              这一栏里**只该有音乐模型**(`purpose: "music"`)—— 混进语音的会被过滤掉,
+              因为那条模型属于下面那条渠道。
             </span>
             {audioProblem !== null ? <span className={s.error}>{audioProblem}</span> : null}
+          </details>
+
+          {/*
+            ─── 语音(TTS)生成渠道 ──────────────────────────────────────────
+            典型形态是**本机服务**(IndexTTS 那种),与音乐那条八竿子打不着 —— 所以分开填。
+          */}
+          <div className={s.divider} role="separator" aria-label="语音生成渠道" />
+          <h4 className={s.groupTitle}>语音(TTS)生成渠道</h4>
+          <p className={s.hint} style={{ marginBottom: 8 }}>
+            本地服务(如 IndexTTS 的 `app_api.py`)填 `http://127.0.0.1:9005` 即可。
+            没配 = 建语音任务如实拒绝(`no-voice-channel`);但**不配也能做语音** ——
+            走「语音批量清单」那条不花额度的路(导出 → 本地工具 → 按 id 导回)。
+          </p>
+
+          <label className={s.field}>
+            <span className={s.label}>端点(语音服务基址)</span>
+            <input
+              className={s.input}
+              value={draft.voiceBaseUrl}
+              placeholder="http://127.0.0.1:9005(本地 TTS)"
+              onChange={(event) => edit('voiceBaseUrl', event.target.value)}
+              aria-label="语音渠道端点"
+            />
+            <span className={s.hint}>留空 = 没配语音渠道。这时建语音任务会如实拒绝(不假装能出)。</span>
+          </label>
+
+          <label className={s.field}>
+            <span className={s.label}>
+              密钥 <span className={s.badge}>明文存本机</span>
+            </span>
+            <input
+              className={s.input}
+              value={draft.voiceApiKey}
+              placeholder="本地服务通常留空"
+              onChange={(event) => edit('voiceApiKey', event.target.value)}
+              aria-label="语音渠道密钥"
+            />
+            <span className={s.hint}>只用于出网请求;不进项目目录、不进快照、不进任务账本。</span>
+          </label>
+
+          <label className={s.field}>
+            <span className={s.label}>渠道名(随便填,只为在面板/账本里指认)</span>
+            <input
+              className={s.input}
+              value={draft.voiceChannelName}
+              placeholder="本地 TTS"
+              onChange={(event) => edit('voiceChannelName', event.target.value)}
+              aria-label="语音渠道名"
+            />
+          </label>
+
+          <details className={s.field} open>
+            <summary className={s.hint}>语音模型目录(JSON;每条声明协议与能力)</summary>
+            <textarea
+              className={`${s.input} ${s.textarea}`}
+              value={draft.voiceModels}
+              placeholder={VOICE_MODEL_EXAMPLE}
+              rows={7}
+              onChange={(event) => edit('voiceModels', event.target.value)}
+              aria-label="语音模型目录"
+            />
+            <span className={s.hint}>
+              嗓子里写在 `note`:`speaker=default;audio=参考音频.wav;lang=ZH`。
+              能力那一栏是 TTS 专有的(能不能克隆音色、能不能指定音色 id、收不收参考音频)。
+              <br />
+              这一栏里**只该有语音模型**(`purpose: "voice"`)—— 混进音乐的会被过滤掉。
+            </span>
+            {voiceProblem !== null ? <span className={s.error}>{voiceProblem}</span> : null}
           </details>
 
           <div className={s.actions}>

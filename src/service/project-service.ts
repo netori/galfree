@@ -66,7 +66,7 @@ import {
   adapterFor as audioAdapterFor,
   AUDIO_POLL_INTERVAL_MS, AUDIO_POLL_TIMEOUT_MS,
   AUDIO_TASK_KIND_DESCRIPTOR, AUDIO_TASKS_FILE, assertAudioOutputPath, audioModels, decodeBase64OrRaw, purposeOfPath,
-  type AudioChannelSettings, type AudioModelDescriptor, type AudioPorts, type AudioTask, type CreateAudioTaskInput,
+  type AudioChannelSettings, type AudioModelDescriptor, type AudioPorts, type AudioPurpose, type AudioTask, type CreateAudioTaskInput,
 } from './audio-generation.ts'
 import { ABSENT, fileFingerprint, fingerprint, pathExists } from './hash.ts'
 import {
@@ -235,7 +235,7 @@ export interface ProjectServiceOptions {
   /**
    * 音频生成端口(T27 / ADR-0012):音乐与语音共用的一条渠道。
    *
-   * **缺省 = 没装配** → 音频生成如实报 `no-audio-channel`(与图像同一种态度)。
+   * **缺省 = 没装配** → 音频生成如实报 `no-music-channel` / `no-voice-channel`(与图像同一种态度)。
    */
   audio?: AudioPorts
   /**
@@ -1915,19 +1915,36 @@ export class ProjectService {
   }
 
   /**
-   * 音频渠道的**读法**(T27):配没配、有哪些模型、每个模型声明了什么。
+   * 音频渠道的**读法**(T27 / ADR-0012):音乐与语音**各读一条** —— 配没配、有哪些模型、
+   * 每个模型声明了什么。
    *
    * 与 `imageChannel()` 同一个态度:**不含密钥** —— `apiKeyConfigured` 只说配没配,
    * 不回传密钥本身(ADR-0010/0012 的硬边界)。
+   *
+   * 为什么两条一起给:面板与 `/state` 都要同时显示"音乐配了没 / 语音配了没" ——
+   * 分两次读只会让两边各自拼一次同样的形状。
    */
-  async audioChannel(): Promise<{
+  async audioChannels(): Promise<Record<AudioPurpose, {
     configured: boolean
     name?: string
     baseUrl?: string
     apiKeyConfigured: boolean
     models: AudioModelDescriptor[]
-  }> {
-    const channel = this.#audioPorts?.channel() ?? null
+  }>> {
+    return {
+      music: this.#audioChannelView('music'),
+      voice: this.#audioChannelView('voice'),
+    }
+  }
+
+  #audioChannelView(purpose: AudioPurpose): {
+    configured: boolean
+    name?: string
+    baseUrl?: string
+    apiKeyConfigured: boolean
+    models: AudioModelDescriptor[]
+  } {
+    const channel = this.#audioPorts?.channel(purpose) ?? null
     if (channel === null) return { configured: false, apiKeyConfigured: false, models: [] }
     return {
       configured: true,
@@ -2137,8 +2154,9 @@ export class ProjectService {
    * 建一个音频生成任务(T27)。
    *
    * **三道门如实拦**(与图像的 `createGenerationTask` 同一态度):
-   *  1. 没配渠道 → `no-audio-channel`(绝不假装能生成);
-   *  2. 模型不在目录里 → `unknown-audio-model`,并列出目录里有什么;
+   *  1. **那条**渠道没配 → `no-music-channel` / `no-voice-channel`(绝不假装能生成;
+   *     码按用途分,是因为"语音配好了、音乐没配"是常态,一个码说不清该去配哪一段);
+   *  2. 模型不在**那条**渠道的目录里 → `unknown-audio-model`,并列出目录里有什么;
    *  3. 目标路径形状不对 → `invalid-audio-path`(引擎的 searchpath 只有 `game/`,
    *     而绝对路径会被**静默回退** —— 那是"看着生成了其实没人找得到")。
    */
@@ -2146,16 +2164,17 @@ export class ProjectService {
     return await this.#audioLedger.mutate(projectRef, async (document, writers) => {
       const entry = await this.#resolve(projectRef)
       await this.#assertPresent(entry)
-      const { channel, model } = this.#requireAudioModel(input.model)
       const outputPath = input.outputPath.replace(/\\/g, '/')
       try {
         assertAudioOutputPath(outputPath)
       } catch (error) {
         throw new GalfreeError('invalid-audio-path', error instanceof Error ? error.message : String(error))
       }
+      // 用途先定:它决定走哪条渠道、查哪份模型目录(`voice/` 下 = 语音,其余 = 音乐)。
+      const purpose = input.purpose ?? purposeOfPath(outputPath)
+      const { channel, model } = this.#requireAudioModel(input.model, purpose)
       const prompt = input.prompt.trim()
       if (prompt === '') throw new GalfreeError('empty-prompt', '提示词是空的:给一句能用的制作指令(风格/情绪/场景)')
-      const purpose = input.purpose ?? purposeOfPath(outputPath)
       const at = new Date().toISOString()
       const task: AudioTask = {
         schemaVersion: 1,
@@ -2183,15 +2202,24 @@ export class ProjectService {
     })
   }
 
-  /** 音频渠道与模型的两道门(没配 / 不在目录里都如实拒绝)。 */
-  #requireAudioModel(modelId: string): { channel: AudioChannelSettings; model: AudioModelDescriptor } {
-    const channel = this.#audioPorts?.channel() ?? null
+  /**
+   * 音频渠道与模型的两道门(**按用途**查:音乐查音乐那条、语音查语音那条)。
+   *
+   * 没配与"模型不在目录里"都如实拒绝,而且说清**是哪一条**渠道 —— 分类配置之后,
+   * "哪一段没配"正是人要知道的那半句。
+   */
+  #requireAudioModel(modelId: string, purpose: AudioPurpose): { channel: AudioChannelSettings; model: AudioModelDescriptor } {
+    const label = purpose === 'music' ? '音乐生成' : '语音(TTS)生成'
+    const channel = this.#audioPorts?.channel(purpose) ?? null
     if (channel === null) {
-      throw new GalfreeError(GATE.noAudioChannel, '还没有配置音频生成渠道(设置 → 插件 → GALFree):先填端点、密钥与模型目录')
+      throw new GalfreeError(
+        purpose === 'music' ? GATE.noMusicChannel : GATE.noVoiceChannel,
+        `还没有配置${label}渠道(设置 → 插件 → GALFree):音乐与语音是**两条**渠道,先填${label}那一段的端点、密钥与模型目录`,
+      )
     }
     const model = channel.models.find((candidate) => candidate.id === modelId)
     if (model === undefined) {
-      throw new GalfreeError('unknown-audio-model', `模型「${modelId}」不在这个音频渠道的模型目录里(目录里有:${channel.models.map((candidate) => candidate.id).join(', ') || '(空)'})`, {
+      throw new GalfreeError('unknown-audio-model', `模型「${modelId}」不在${label}渠道的模型目录里(目录里有:${channel.models.map((candidate) => candidate.id).join(', ') || '(空)'})`, {
         known: channel.models.map((candidate) => candidate.id),
       })
     }
@@ -2291,9 +2319,16 @@ export class ProjectService {
    * 推进音频队列里**排队中**的任务(T27 的下一片:执行)。
    *
    * 与图像那条同一态度:串行、失败留在 `failed`(重试是人的动作,不是自动重试循环)。
+   *
+   * **`purpose` 给了就只跑那一类**(音乐与语音各一条渠道,面板也是两张卡):
+   * 面板上"跑队列(N 条)"那个 N 必须是**这一下真会发出去的条数** ——
+   * 只按用途数、却把两条都跑掉,对不上账,而且会替另一条渠道花钱
+   * (TTS 按台词行计费,正是最贵的那条)。不给 = 全跑(CLI/工具那条路,语义与从前一致)。
    */
-  async runAudioQueue(projectRef: string): Promise<AudioTask[]> {
-    const queued = (await this.audioTasks(projectRef)).filter((task) => task.state === 'queued')
+  async runAudioQueue(projectRef: string, options: { purpose?: AudioPurpose } = {}): Promise<AudioTask[]> {
+    const queued = (await this.audioTasks(projectRef))
+      .filter((task) => task.state === 'queued')
+      .filter((task) => options.purpose === undefined || task.purpose === options.purpose)
     for (const task of queued) await this.runAudioTask(projectRef, task.id)
     const after = await this.audioTasks(projectRef)
     return queued.map((task) => after.find((candidate) => candidate.id === task.id) ?? task)
@@ -2319,7 +2354,9 @@ export class ProjectService {
       writers.push(next)
       return Promise.resolve(next)
     })
-    const { channel, model } = this.#requireAudioModel(task.model)
+    // 跑任务时按**这条任务自己的用途**查渠道:音乐任务永远走音乐那条,语音永远走语音那条 ——
+    // 哪怕两条渠道的模型 id 撞了名(它们本来就分属两份目录)。
+    const { channel, model } = this.#requireAudioModel(task.model, task.purpose)
 
     let bytes: Uint8Array
     try {

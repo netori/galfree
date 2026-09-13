@@ -23,8 +23,16 @@ export const GATE = {
   stampForbidden: 'stamp-forbidden',
   /** 出图要有图像渠道(端点 + 密钥 + 模型目录)。 */
   noImageChannel: 'no-image-channel',
-  /** 出**音乐/语音**要有音频渠道(T27 / ADR-0012;与图像那条分开配)。 */
-  noAudioChannel: 'no-audio-channel',
+  /**
+   * 出**音乐**要有音乐渠道(T27 / ADR-0012:三条线各自一条渠道)。
+   *
+   * 音乐与语音**分成两个码**(曾经是一个 `no-audio-channel`):分开配之后,
+   * "语音那条配好了、音乐这条没配"是常态 —— 一个码说不清该去配哪一段,
+   * 而人会照着错误去填错的那半。
+   */
+  noMusicChannel: 'no-music-channel',
+  /** 出**语音(TTS)**要有语音渠道(`no-music-channel` 的镜像)。 */
+  noVoiceChannel: 'no-voice-channel',
   /** 试玩与发布都要钉版 SDK 就绪。 */
   sdkNotReady: 'sdk-not-ready',
 } as const

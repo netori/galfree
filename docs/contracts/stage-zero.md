@@ -822,22 +822,35 @@ Ren'Py Script` —— **第一列就是语音文件名要用的那个标识符**
 真引擎验过三件:lint 干净、导出的是**我们盖的 id**、**缺语音文件不崩**(退出码 0 无 traceback)。
 守卫:`dialogue-id.test.ts`(快带 16 条)+ `dialogue-id.slow.test.ts`(慢带)。
 
-### 音频生成通道(T27 / #35,2026-09-12;音乐与语音共用)
+### 音频生成通道(T27 / #35,2026-09-12;**2026-09-13 拆成音乐 / 语音两条**)
 
 与图像**同形、不同渠道**(ADR-0012:三条生成线上游与协议不重叠):
 
-- **设置里四个键**:`audioBaseUrl`(端点,**可填** —— 聚合站/自建反代/本地 TTS 同一条路)、
-  `audioApiKey`、`audioChannelName`、`audioModels`(JSON 目录:每条声明 `purpose`
-  (`music`/`voice`)、`adapter`(`sync-http`/`async-task`)、`capabilities`)。
-  **没填端点 = 没渠道** → 生成动作如实拒绝 `no-audio-channel`;
+> **2026-09-13 修订**:此前这里是"音乐与语音**共用**一条渠道"(四个键 `audioBaseUrl` 一族)。
+> 发起人 2026-09-13 指出与 ADR-0012 的原话不符 —— ADR 写的是"**三条线 = 图像 / 音乐 / 语音。
+> 每条线一个独立渠道**(独立端点 + 密钥 + 模型目录),因为它们的上游与协议不重叠"。
+> 实际后果很实在:音乐多是"提交 → 轮询 → 拿 URL"的聚合站,语音那条多半是**本机服务**;
+> 合成一条的表现是"换了音乐上游,语音那半跟着坏",或者干脆两头都配不对。
+> 现在两个用途**各四个键**(`music*` / `voice*`),错误码也分成两个。
+
+- **设置里 8 个键**(每族 4 个):`musicBaseUrl` / `musicApiKey` / `musicChannelName` / `musicModels`
+  与 `voiceBaseUrl` / `voiceApiKey` / `voiceChannelName` / `voiceModels`。端点**可填**
+  —— 聚合站/自建反代/本地服务同一条路(插件不写死厂商域名)。
+  **没填端点 = 那条渠道没有** → 生成动作如实拒绝 `no-music-channel` / `no-voice-channel`;
+- **拼装只有一份**(`audioChannelFromSettings(settings, purpose)`):两条渠道形状完全一样,
+  差别只在读哪四个键与**按用途过滤目录** —— 音乐渠道里混进一条 `purpose:"voice"` 的模型,
+  会在拼渠道时被滤掉(而不是等到选模型时才说不认,更不是把 TTS 模型递给音乐上游);
 - **认不出的 `purpose`/`adapter` 一律跳过那一条**(不猜默认值);**能力缺省 = 全 false**;
 - **账本** `.studio/audio-tasks.json`(与图像各一份文件、**同一个底层** `tasks.ts`):
   `queued → running → awaiting-review | failed`、尝试历史(含被覆盖那版的指纹)、
   拒收注记、降级说明;
-- **接缝**:`audioChannel()` / `audioTasks()` / `createAudioTask()` / `runAudioTask()` /
-  `runAudioQueue()` / `retryAudioTask()`;三道门在**接缝上**拦
-  (`no-audio-channel` / `unknown-audio-model` / `invalid-audio-path`),
+- **接缝**:`audioChannels()`(两条一起给)/ `audioTasks()` / `createAudioTask()` /
+  `runAudioTask()` / `runAudioQueue()` / `retryAudioTask()`;三道门在**接缝上**拦
+  (`no-music-channel` / `no-voice-channel` / `unknown-audio-model` / `invalid-audio-path`),
   路径必须落 `game/` 下且相对(引擎 searchpath 只有 `game/`);
+  **跑任务时按这条任务自己的用途查渠道**(`task.purpose`),所以两条渠道的模型 id 撞名也不会串;
+- **出网只有一份、渠道有两条**:`AudioPorts.http` 共用(发一个 HTTP 请求 / 下载一次字节
+  没有两条),`channel(purpose)` 按用途现读 —— 分成两份反而会让"下载口只装配了一半"变成可能;
 - **产物经写网关落盘**(ADR-0004)→ 音频池立刻派生得到它(T17 的池口径不变);
 - **适配器按协议收**:`AudioAdapter`(`buildRequest` / `onSubmit` / 可选 `poll`),
   注册表**初始为空**且如实:没有适配器 → 任务记 `failed` 并指名道姓,不假装成功。
@@ -865,17 +878,24 @@ Suno 类上游给的是**音频 URL** 而不是字节,而"文本口"读不了二
 路由:`GET /voice/batch`(`?format=json`)/ `POST /voice/import`;agent 工具 `galfree_voice_batch`。
 
 - **路由**:
-  - `GET /audio/channel` → 渠道处境(**不含密钥**;`configured` / `models[]` 各自的能力声明);
+  - `GET /audio/channel` → **两条**渠道的处境(`{music, voice}`,**不含密钥**;
+    各自 `configured` / `models[]` 与能力声明);
   - `GET /audio/tasks` → 任务账本(最新的在前);`POST /audio/tasks/create`(201;`run:true` 则建完即跑)
     / `POST /audio/tasks/run` / `POST /audio/tasks/retry`(重 roll 与拒收注记,后者 `via:'human'`);
-  - 状态码:没配渠道 = **503**(`no-audio-channel`,与 `no-image-channel` 同性质:能力未就绪,
-    **不是**服务端故障);模型不在目录 / 路径形状不对 / 缺 id = **400**;方法不对 = 405。
+  - 状态码:那条渠道没配 = **503**(`no-music-channel` / `no-voice-channel`,与 `no-image-channel`
+    同性质:能力未就绪,**不是**服务端故障);模型不在目录 / 路径形状不对 / 缺 id = **400**;
+    方法不对 = 405。
+    **码按用途分的理由**:"语音那条配好了、音乐这条没配"是常态 —— 一个码说不清该去配哪一段,
+    而人会照着错误去填错的那半。
   - ⚠️ **`/audio` 不属于这一组** —— 那是**音频池**(T17)的读法。参数表里两条都登记在案,
     写这段时差点真撞上(同名会让其中一条完全读不到)。
 
-**面板**:舞台板下面一张「音频生成」卡(渠道处境 + 队列 + **"跑队列(N 条)"** ——
-N 就是这一下会真发出去的上游请求数)。判断在 `src/client/audio-board.ts` 的**纯函数**里
-(`summarizeAudioBoard`,有守卫):渠道没配好 → 先**说清为什么**,再决定给不给按钮。
+**面板**:**两张卡**(「音乐生成」与「语音生成」),各自渠道处境 + 自己那一类任务的队列 +
+**"跑队列(N 条)"** —— N 就是这一下会真发出去的上游请求数,而且**只数本用途的任务**
+(音乐卡上的"排队 3 条"不会把语音的算进来)。判断在 `src/client/audio-board.ts` 的**纯函数**里
+(`summarizeAudioBoard(purpose, …)`,有守卫):渠道没配好 → 先**说清是哪一条**没配,再决定给不给按钮。
+「语音批量清单」(不花额度那条路)挂在**语音那张卡**上。
+**agent 读入口**:`galfree_audio_channel`(两条渠道的配没配与目录 —— 建任务前先看它)。
 
 **密钥的三条不许**(AC 第五条,两个守卫各守一半):不进项目目录与账本(直接读盘断言)、
 **不进快照**(走 git 自己来证:写批留下的提交,消息与 diff 里都不含密钥明文)。
@@ -891,11 +911,11 @@ N 就是这一下会真发出去的上游请求数)。判断在 `src/client/audi
    并过慢集成带 —— 那是**另一张票**。
 2. **池是磁盘真相当下的读**(与槽的悬空引用同一口径),不是从写网关的版本索引推的:
    网关管的是**写**,不是"项目里现在有什么"(ADR-0003 磁盘为真相)。
-3. **`voice` 声道照解析器如实呈现**(`play voice …` 在子集里),但 v1 **不生成任何音频**:
-   没有音乐生成、没有 TTS,试听靠试玩。
-   **v3 方向**:生成那条路见 ADR-0012/0013(票 #33–#38);接线口径会从 `play voice` 改成
-   **对话 id + `config.auto_voice`**(理由:引擎在下一次交互就会停掉上一句语音,而
+3. **`voice` 声道照解析器如实呈现**(`play voice …` 在子集里),而**语音的接线口径已经改成
+   对话 id + `config.auto_voice`**(ADR-0013:引擎在下一次交互就会停掉上一句语音,而
    `play voice` 需要每句手动 `stop`;auto_voice 是官方为配音留的那条路)。
+   **生成那一半 v3 已批准**:音乐与语音**各一条渠道**(ADR-0012),票 #33–#38 已交付;
+   试听仍靠试玩,认可仍靠人盖场景戳。
 
 ## 界面图:三张是**给人/给工具换的**(T24 之后再追加,为 #38 备料)
 

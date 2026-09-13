@@ -11,6 +11,10 @@
  *  - 而且因为面板的保存是**按自己那份键清单**逐条 set/unset 的,那四个键
  *    面板**既不写也不清** —— 想配只能手改设置文档。
  *
+ * 2026-09-13 复核:那四个键后来被**拆成两条渠道**(`music*` / `voice*` 各四个,见 ADR-0012
+ * "三条生成线各自一条渠道"),这张清单跟着改成八个 —— 而"拆键时忘了改界面"正是这条守卫
+ * 要挡的第二种形状(凭空多出四个没有输入框的键)。
+ *
  * ## 为什么这守卫直接 import 面板文件
  *
  * 这是快带里少数几处碰客户端的断言,但值的:`settings-card.tsx` 的那份 key 清单是**纯数据**
@@ -44,13 +48,25 @@ describe('设置面板与 schema 的键一一对应(T27)', () => {
     expect(orphans, `这些键有 schema 但没有任何界面:${orphans.join(', ')}`).toEqual([])
   })
 
-  it('频道卡**逐字**管着两族渠道键 + 发布目录(少一个就有设置没有输入框)', () => {
+  it('频道卡**逐字**管着三族渠道键(图像 / 音乐 / 语音)+ 发布目录(少一个就有设置没有输入框)', () => {
     const expected = [
       'imageBaseUrl', 'imageApiKey', 'imageChannelName', 'imageModels',
-      'audioBaseUrl', 'audioApiKey', 'audioChannelName', 'audioModels',
+      // 音乐与语音**各四个键**:ADR-0012 的三条生成线各自一条渠道。
+      'musicBaseUrl', 'musicApiKey', 'musicChannelName', 'musicModels',
+      'voiceBaseUrl', 'voiceApiKey', 'voiceChannelName', 'voiceModels',
       'publishDir',
     ]
     expect([...SETTINGS_CARD_KEYS].sort()).toEqual(expected.sort())
+  })
+
+  it('两条音频渠道的键**成对出现**(只剩一半 = 拆到一半的残局)', () => {
+    // 这条挡的是"拆渠道时漏了半条":比如加了 musicBaseUrl 却忘了 voiceBaseUrl,
+    // 上面那条逐字断言会红,但这条能把"是哪一族缺了"说清楚。
+    for (const family of ['image', 'music', 'voice']) {
+      const keys = SETTINGS_CARD_KEYS.filter((key) => key.startsWith(family))
+      expect(keys.map((key) => key.replace(family, '')).sort(),
+        `${family} 那一族少了键`).toEqual(['ApiKey', 'BaseUrl', 'ChannelName', 'Models'])
+    }
   })
 
   it('面板不会管 schema 里不存在的键(否则保存时会被拒/静默丢)', () => {

@@ -450,9 +450,10 @@ export function WorkbenchPanel() {
           onNotice={pushNotice}
         />
 
-        {/* 音频生成(T27 / ADR-0012):渠道处境 + 任务队列。**跑之前看得见要花几条请求** ——
-            音乐按次、TTS 按台词行计费,不看清就点很危险。 */}
-        <AudioCard api={api} hasProject={hasProject} onNotice={pushNotice} />
+        {/* 音频生成(T27 / ADR-0012):**音乐与语音各一张卡** —— 它们各自一条渠道(上游与协议
+            不重叠),而"跑之前看得见要花几条请求"也必须分开看(音乐按次、TTS 按台词行计费)。 */}
+        <AudioCard purpose="music" api={api} hasProject={hasProject} onNotice={pushNotice} onChanged={() => refresh()} />
+        <AudioCard purpose="voice" api={api} hasProject={hasProject} onNotice={pushNotice} onChanged={() => refresh()} />
 
         {/* 界面换皮(T31 / #39):给 Ren'Py 自带的界面生成器一组参数。
             **不是 AI 出图** —— 那一整套 game/gui/*.png 是引擎按九宫格模板画的。 */}

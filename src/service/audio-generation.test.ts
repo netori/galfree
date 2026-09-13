@@ -1,8 +1,9 @@
 /**
  * T27(#35)守卫 —— 音频生成通道骨架(渠道 + 任务账本 + 三道门)。
  *
- * 这一票是**音乐与语音共用的地基**,所以守卫盯的是"地基那几条纪律":
- *  1. **没配渠道 = 无渠道**:如实拒绝(`no-audio-channel`),不假装能生成;
+ * 这一票是**音乐与语音两条渠道共用的地基**(ADR-0012:三条线各自一条渠道),所以守卫盯的是
+ * "地基那几条纪律" —— 其中一条就是**两条渠道各算各的**:
+ *  1. **那条**渠道没配 = 没渠道:如实拒绝(`no-music-channel` / `no-voice-channel`),不假装能生成;
  *  2. 模型不在目录里 → 拒绝并**列出目录里有什么**(不猜、不静默换个模型);
  *  3. 目标路径的形状:必须落在 `game/` 下、必须是相对路径(引擎的 searchpath 只有 `game/`);
  *  4. **密钥不进项目/账本**:账本里只许有渠道名与模型 id;
@@ -16,32 +17,48 @@ import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
 import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 import { assertAudioOutputPath, AUDIO_TASKS_FILE, clearAudioAdapters, purposeOfPath, registerAudioAdapter, type AudioHttpRequest } from './audio-generation.ts'
 
-/** 一条能用假的音频渠道(端点是假的,快带不出网)。 */
-const CHANNEL = {
-  name: 'test-audio',
-  baseUrl: 'http://127.0.0.1:9/v1',
-  apiKey: 'sk-audio-secret',
-  models: [
-    {
-      id: 'music-3.0',
-      purpose: 'music' as const,
-      adapter: 'sync-http' as const,
-      capabilities: {
-        textToMusic: true, instrumental: true, lyrics: true, audioReference: false,
-        textToSpeech: false, voiceCloning: false, voiceId: false,
+/**
+ * 两条**假**渠道(端点都是假的,快带不出网)。
+ *
+ * 刻意给**不同的端点与密钥**:拆渠道这件事如果只在类型上成立、装配处还读同一组键,
+ * 这里就会露馅(别名与真名的差别正是这条守卫要抓的)。
+ */
+const CHANNELS = {
+  music: {
+    name: 'test-music',
+    baseUrl: 'http://127.0.0.1:9/music',
+    apiKey: 'sk-music-secret',
+    models: [
+      {
+        id: 'music-3.0',
+        purpose: 'music' as const,
+        adapter: 'sync-http' as const,
+        capabilities: {
+          textToMusic: true, instrumental: true, lyrics: true, audioReference: false,
+          textToSpeech: false, voiceCloning: false, voiceId: false,
+        },
       },
-    },
-    {
-      id: 'speech-2.6',
-      purpose: 'voice' as const,
-      adapter: 'sync-http' as const,
-      capabilities: {
-        textToMusic: false, instrumental: false, lyrics: false, audioReference: true,
-        textToSpeech: true, voiceCloning: true, voiceId: true,
+    ],
+  },
+  voice: {
+    name: 'test-voice',
+    baseUrl: 'http://127.0.0.1:9/voice',
+    apiKey: 'sk-voice-secret',
+    models: [
+      {
+        id: 'speech-2.6',
+        purpose: 'voice' as const,
+        adapter: 'sync-http' as const,
+        capabilities: {
+          textToMusic: false, instrumental: false, lyrics: false, audioReference: true,
+          textToSpeech: true, voiceCloning: true, voiceId: true,
+        },
       },
-    },
-  ],
+    ],
+  },
 }
+
+type FakeChannels = { music: (typeof CHANNELS)['music'] | null; voice: (typeof CHANNELS)['voice'] | null }
 
 describe('音频生成通道骨架(T27)', () => {
   let sdkDir: string
@@ -49,12 +66,18 @@ describe('音频生成通道骨架(T27)', () => {
   let projectsRoot: string
   let service: ProjectService
 
-  /** 造一个服务;`channel` 传 null = 没配渠道。 */
-  function makeService(tag: string, channel: typeof CHANNEL | null): ProjectService {
+  /** 造一个服务;哪条渠道传 null = 那条没配(两条独立)。 */
+  function makeService(tag: string, channels: FakeChannels): ProjectService {
+    const bare = channels.music === null && channels.voice === null
     return createProjectService({
       dataDir: dataDir + tag,
       uiTemplate: fakeUiTemplate(sdkDir),
-      ...(channel === null ? {} : { audio: { http: { send: async () => ({ status: 200, text: '{}' }) }, channel: () => channel } }),
+      ...(bare ? {} : {
+        audio: {
+          http: { send: async () => ({ status: 200, text: '{}' }) },
+          channel: (purpose) => channels[purpose],
+        },
+      }),
     })
   }
 
@@ -62,7 +85,7 @@ describe('音频生成通道骨架(T27)', () => {
     sdkDir = await makeFakeSdk()
     dataDir = await makeTempDir('galfree-t27-data-')
     projectsRoot = await makeTempDir('galfree-t27-projects-')
-    service = makeService('-main', CHANNEL)
+    service = makeService('-main', CHANNELS)
     await service.createProject({ projectsRoot, name: 'audio', title: undefined })
   })
 
@@ -73,26 +96,57 @@ describe('音频生成通道骨架(T27)', () => {
 
   // ─── 纪律 1:没配渠道 = 无渠道 ──────────────────────────────────────
 
-  it('没配渠道 → 建任务如实拒绝(`no-audio-channel`),不假装能生成', async () => {
-    const bare = makeService('-bare', null)
+  it('那条渠道没配 → 建任务如实拒绝,而且**报的是哪一条**(音乐 / 语音两个码)', async () => {
+    const bare = makeService('-bare', { music: null, voice: null })
     await bare.createProject({ projectsRoot, name: 'bare', title: undefined })
     await expect(bare.createAudioTask('bare', {
       outputPath: 'game/audio/bgm/rain.ogg', model: 'music-3.0', prompt: '雨天的钢琴',
-    })).rejects.toMatchObject({ code: 'no-audio-channel' })
+    })).rejects.toMatchObject({ code: 'no-music-channel' })
+    await expect(bare.createAudioTask('bare', {
+      outputPath: 'game/voice/start_0000.ogg', model: 'speech-2.6', prompt: '平静地读',
+    })).rejects.toMatchObject({ code: 'no-voice-channel' })
     // 而且**一个任务都没建**(不是"建了但跑不了")。
     expect(await bare.audioTasks('bare')).toEqual([])
     await bare.dispose()
   })
 
-  it('渠道读法:报得出配没配、有哪些模型、每个模型声明了什么 —— 但**不报密钥本身**', async () => {
-    const view = await service.audioChannel()
-    expect(view.configured).toBe(true)
-    expect(view.name).toBe('test-audio')
-    expect(view.apiKeyConfigured).toBe(true)
-    // 关键:整个视图里不许出现密钥明文。
-    expect(JSON.stringify(view)).not.toContain('sk-audio-secret')
-    expect(view.models.map((model) => model.id).sort()).toEqual(['music-3.0', 'speech-2.6'])
-    expect(view.models.find((model) => model.id === 'music-3.0')?.capabilities.instrumental).toBe(true)
+  it('**两条渠道各算各的**:语音配好了、音乐没配 → 语音能建、音乐如实拒', async () => {
+    // 这正是拆开渠道的意义:人可以先只把本地 TTS 配上,音乐那条留着以后再说。
+    const half = makeService('-half', { music: null, voice: CHANNELS.voice })
+    await half.createProject({ projectsRoot, name: 'half', title: undefined })
+    await expect(half.createAudioTask('half', {
+      outputPath: 'game/audio/bgm/rain.ogg', model: 'music-3.0', prompt: '雨天的钢琴',
+    })).rejects.toMatchObject({ code: 'no-music-channel' })
+    const task = await half.createAudioTask('half', {
+      outputPath: 'game/voice/start_0000.ogg', model: 'speech-2.6', prompt: '平静地读',
+    })
+    expect(task).toMatchObject({ purpose: 'voice', model: 'speech-2.6', channel: 'test-voice' })
+    await half.dispose()
+  })
+
+  it('渠道读法:**两条一起给**,各自报模型与"配没配" —— 但**不报密钥本身**', async () => {
+    const view = await service.audioChannels()
+    expect(view.music.configured).toBe(true)
+    expect(view.music.name).toBe('test-music')
+    expect(view.music.apiKeyConfigured).toBe(true)
+    expect(view.music.models.map((model) => model.id)).toEqual(['music-3.0'])
+    expect(view.voice.configured).toBe(true)
+    expect(view.voice.name).toBe('test-voice')
+    expect(view.voice.models.map((model) => model.id)).toEqual(['speech-2.6'])
+    // 关键:整个视图里不许出现**任何一把**密钥明文。
+    const text = JSON.stringify(view)
+    expect(text).not.toContain('sk-music-secret')
+    expect(text).not.toContain('sk-voice-secret')
+  })
+
+  it('音乐模型的 id 递到语音那条 → 拒绝(两条目录**不互相兜底**)', async () => {
+    // 拆渠道之后这条是新的错法:模型名对了、但不属于这条渠道 —— 不能"在另一条里找到了就用它"。
+    await expect(service.createAudioTask('audio', {
+      outputPath: 'game/voice/start_0000.ogg', model: 'music-3.0', prompt: '平静地读',
+    })).rejects.toMatchObject({ code: 'unknown-audio-model' })
+    await expect(service.createAudioTask('audio', {
+      outputPath: 'game/voice/start_0000.ogg', model: 'music-3.0', prompt: '平静地读',
+    })).rejects.toThrow(/语音/)
   })
 
   // ─── 纪律 2:模型目录是唯一出处 ────────────────────────────────────
@@ -131,7 +185,7 @@ describe('音频生成通道骨架(T27)', () => {
     })
     expect(task).toMatchObject({
       kind: 'music', purpose: 'music', state: 'queued', outputPath: 'game/audio/bgm/rain.ogg',
-      model: 'music-3.0', channel: 'test-audio', loop: true, dialogueId: null,
+      model: 'music-3.0', channel: 'test-music', loop: true, dialogueId: null,
       attempts: [], rejections: [],
     })
     // 账本真的落盘了(项目文件,经网关 → 进快照)。
@@ -139,7 +193,7 @@ describe('音频生成通道骨架(T27)', () => {
     const text = await readFile(join(root, AUDIO_TASKS_FILE), 'utf8')
     expect(JSON.parse(text).tasks).toHaveLength(1)
     // **密钥不许出现在账本里**(ADR-0010/0012 的硬边界)。
-    expect(text).not.toContain('sk-audio-secret')
+    expect(text).not.toContain('sk-music-secret')
     // 与图像各落各的文件:图像那个账本不该被动过。
     await expect(readFile(join(root, '.studio/image-tasks.json'), 'utf8')).rejects.toThrow()
   })
@@ -207,8 +261,8 @@ describe('音频生成通道骨架(T27)', () => {
       expect(run!.attempts).toHaveLength(1)
       expect(run!.attempts[0]).toMatchObject({ outcome: 'ok', bytes: bytes.byteLength })
       // 请求真的发出去了,而且**带上渠道密钥的只有请求头**(账本里没有)。
-      expect(sent!.url).toBe('http://127.0.0.1:9/v1/music_generation')
-      expect(sent!.headers.authorization).toBe('Bearer sk-audio-secret')
+      expect(sent!.url).toBe('http://127.0.0.1:9/music/music_generation')
+      expect(sent!.headers.authorization).toBe('Bearer sk-music-secret')
       // 产物经网关落盘:文件真在,而且**池里立刻有它**(与手丢文件同一条推导)。
       const root = (await service.listProjects()).find((project) => project.name === 'audio')!.root
       expect(new Uint8Array(await readFile(join(root, 'game/audio/bgm/rain.ogg')))).toEqual(bytes)
@@ -262,6 +316,28 @@ describe('音频生成通道骨架(T27)', () => {
       expect(again).toEqual([])
       const all = await service.audioTasks('audio')
       expect(all.every((task) => task.attempts.length === 1)).toBe(true)
+    })
+
+    it('跑队列:**按用途分开跑** —— 音乐那一下不动语音的任务(两张卡各写各的"会发出 N 条")', async () => {
+      fakeAdapter(new Uint8Array([7, 7]))
+      await service.createAudioTask('audio', { outputPath: 'game/audio/bgm/m1.ogg', model: 'music-3.0', prompt: 'm1' })
+      await service.createAudioTask('audio', { outputPath: 'game/voice/v1.ogg', model: 'speech-2.6', prompt: '平静地读' })
+
+      // 音乐卡那一下:只跑音乐那条 —— 语音的任务**必须原封不动**留在 queued。
+      const musicRun = await service.runAudioQueue('audio', { purpose: 'music' })
+      expect(musicRun.map((task) => task.purpose)).toEqual(['music'])
+      const afterMusic = await service.audioTasks('audio')
+      expect(afterMusic.find((task) => task.purpose === 'voice')).toMatchObject({ state: 'queued', attempts: [] })
+
+      // 语音卡那一下:才轮到语音那条。
+      const voiceRun = await service.runAudioQueue('audio', { purpose: 'voice' })
+      expect(voiceRun.map((task) => task.purpose)).toEqual(['voice'])
+      expect((await service.audioTasks('audio')).every((task) => task.state === 'awaiting-review')).toBe(true)
+
+      // 不给用途 = 全跑(CLI/工具那条路的语义没变):再排两条,一次跑完。
+      await service.createAudioTask('audio', { outputPath: 'game/audio/bgm/m2.ogg', model: 'music-3.0', prompt: 'm2' })
+      await service.createAudioTask('audio', { outputPath: 'game/voice/v2.ogg', model: 'speech-2.6', prompt: '平静地读' })
+      expect((await service.runAudioQueue('audio')).map((task) => task.purpose).sort()).toEqual(['music', 'voice'])
     })
 
     it('重 roll:保留历史、追加一次尝试,并记下**被覆盖那一版**的指纹', async () => {
@@ -318,10 +394,10 @@ describe('音频生成通道骨架(T27)', () => {
         expect(history.length).toBeGreaterThan(0)
         for (const entry of history) {
           // 提交消息里不能有(消息里塞了 `channel:<名>` 这类上下文,正是容易漏的地方)。
-          expect(entry.subject).not.toContain('sk-audio-secret')
+          expect(entry.subject).not.toContain('sk-music-secret')
           // 内容 diff 里也不能有(账本是文本,产物是二进制 —— 两条都扫)。
           const diff = await service.snapshotDiff('audio', path, `${entry.commit}^`, entry.commit)
-          expect(diff).not.toContain('sk-audio-secret')
+          expect(diff).not.toContain('sk-music-secret')
         }
       }
     })

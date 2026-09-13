@@ -15,7 +15,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createProjectService } from './service/project-service.ts'
 import { createNodeHttpClient, type ImageChannelSettings, type ImageModelDescriptor } from './service/images.ts'
-import type { AudioChannelSettings, AudioModelDescriptor } from './service/audio-generation.ts'
+import type { AudioChannelSettings, AudioModelDescriptor, AudioPurpose } from './service/audio-generation.ts'
 import { registerAudioAdapter } from './service/audio-generation.ts'
 import { createIndexttsAdapter } from './service/audio-adapter-indextts.ts'
 import { createSunoAdapter } from './service/audio-adapter-suno-register.ts'
@@ -103,23 +103,43 @@ export interface Config {
    */
   imageModels?: string
   /**
-   * **音频生成渠道**(T27 / ADR-0012):音乐与语音共用这一条。
+   * **音乐生成渠道**(T27 / ADR-0012):音乐与语音**各自一条**。
    *
-   * 与图像渠道**分开配置**不是偷懒:三条生成线上游与协议不重叠(图像有 OpenAI 兼容那样的
-   * 事实标准,音乐与语音各家私有)。端点是**可填的** —— 聚合站 / 自建反代 / 本地 TTS
-   * 服务走同一条路,插件不写死厂商域名。
+   * 为什么必须分开(ADR-0012 的原话:三条线各自一条渠道):它们的上游与协议**不重叠** ——
+   * 音乐多是"提交 → 轮询 → 拿 URL"(Suno 类聚合),语音那条是本地服务或另一家 API。
+   * 合成一条渠道的表现是:人换了音乐上游,语音那半跟着坏;或者干脆配不了两组——
+   * 而"音乐与语音共用一个端点"在现实里根本不是一回事。
+   *
+   * 端点是**可填的**:聚合站 / 自建反代 / 本地服务走同一条路,插件不写死厂商域名。
    */
-  audioBaseUrl?: string
-  audioApiKey?: string
-  audioChannelName?: string
+  musicBaseUrl?: string
+  musicApiKey?: string
+  musicChannelName?: string
   /**
-   * 音频模型目录(JSON 数组)。每条要声明**用途**(`music` / `voice`)、
-   * **协议**(`sync-http` 一次拿回 / `async-task` 提交后轮询)与**能力**
-   * (纯音乐?能收歌词?能克隆音色?)—— 与图像同一态度:上游支不支持由人声明,代码不猜。
+   * 音乐模型目录(JSON 数组)。
    *
-   * 形如:`[{"id":"music-3.0","purpose":"music","adapter":"sync-http","capabilities":{"textToMusic":true,"instrumental":true}}]`
+   * 每条要声明**协议**(`sync-http` 一次拿回 / `async-task` 提交后轮询)与**能力**
+   * (纯音乐?能收歌词?能收参考音频?)—— 与图像同一态度:上游支不支持由人声明,代码不猜。
+   *
+   * 形如:`[{"id":"V6","adapter":"async-task","capabilities":{"textToMusic":true,"instrumental":true}}]`
    */
-  audioModels?: string
+  musicModels?: string
+  /**
+   * **语音(TTS)生成渠道**(T27 / ADR-0012):与音乐那条**分开配**。
+   *
+   * 典型形态是**本机服务**(IndexTTS 2.5 那类:`http://127.0.0.1:<端口>`)——
+   * 与音乐那条八竿子打不着,共用一组端点只会让人两头都配不对。
+   */
+  voiceBaseUrl?: string
+  voiceApiKey?: string
+  voiceChannelName?: string
+  /**
+   * 语音模型目录(JSON 数组)。
+   *
+   * 能力那一栏是 TTS 专有的:能不能克隆音色、能不能指定音色 id、收不收参考音频。
+   * 本地服务的嗓子写在 `note` 里(如 `speaker=default;audio=参考音频.wav`)。
+   */
+  voiceModels?: string
   /**
    * 发布输出目录(T18)。**留空 = 数据目录下的 `publish/<项目名>`**。
    * 每个项目在它下面各占一个子目录;配到项目源树里会被如实拒绝(产物不该混进快照)。
@@ -135,10 +155,14 @@ export const Config: z<Config> = z.object({
   imageApiKey: z.string().default(''),
   imageChannelName: z.string().default(''),
   imageModels: z.string().default(''),
-  audioBaseUrl: z.string().default(''),
-  audioApiKey: z.string().default(''),
-  audioChannelName: z.string().default(''),
-  audioModels: z.string().default(''),
+  musicBaseUrl: z.string().default(''),
+  musicApiKey: z.string().default(''),
+  musicChannelName: z.string().default(''),
+  musicModels: z.string().default(''),
+  voiceBaseUrl: z.string().default(''),
+  voiceApiKey: z.string().default(''),
+  voiceChannelName: z.string().default(''),
+  voiceModels: z.string().default(''),
   publishDir: z.string().default(''),
 })
 
@@ -153,10 +177,14 @@ export const GalfreeSettingsSchema: z<Required<Config>> = z.object({
   imageApiKey: z.string().default(''),
   imageChannelName: z.string().default(''),
   imageModels: z.string().default(''),
-  audioBaseUrl: z.string().default(''),
-  audioApiKey: z.string().default(''),
-  audioChannelName: z.string().default(''),
-  audioModels: z.string().default(''),
+  musicBaseUrl: z.string().default(''),
+  musicApiKey: z.string().default(''),
+  musicChannelName: z.string().default(''),
+  musicModels: z.string().default(''),
+  voiceBaseUrl: z.string().default(''),
+  voiceApiKey: z.string().default(''),
+  voiceChannelName: z.string().default(''),
+  voiceModels: z.string().default(''),
   publishDir: z.string().default(''),
 })
 
@@ -243,18 +271,30 @@ export function parseAudioModelCatalog(text: string): AudioModelDescriptor[] {
 }
 
 /**
- * 从设置拼出音频渠道(T27)。
+ * 从设置拼出**一条**音频渠道(T27 / ADR-0012:音乐与语音各自一条)。
  *
- * **没填端点 = 没渠道**(`null`),不是"一个空渠道" —— 于是生成动作如实拒绝
- * `no-audio-channel`,与图像那条同一个态度(不假装能生成)。
+ * **没填端点 = 没那条渠道**(`null`),不是"一个空渠道" —— 于是生成动作如实拒绝
+ * `no-music-channel` / `no-voice-channel`,与图像那条同一个态度(不假装能生成)。
+ *
+ * 为什么把"拼渠道"抽成一份而调用两次:两条渠道的**形状完全一样**(端点/密钥/名字/目录),
+ * 差别只在读哪四个键与目录里那条模型该声明什么能力。各写一遍的话,将来加一个字段
+ * (比如超时)就会漏掉一条线。
  */
-export function audioChannelFromSettings(settings: Required<Config>): AudioChannelSettings | null {
-  if (settings.audioBaseUrl.trim() === '') return null
+export function audioChannelFromSettings(settings: Required<Config>, purpose: AudioPurpose): AudioChannelSettings | null {
+  const baseUrl = (purpose === 'music' ? settings.musicBaseUrl : settings.voiceBaseUrl).trim()
+  if (baseUrl === '') return null
+  const apiKey = purpose === 'music' ? settings.musicApiKey : settings.voiceApiKey
+  const name = (purpose === 'music' ? settings.musicChannelName : settings.voiceChannelName).trim()
+  const models = parseAudioModelCatalog(purpose === 'music' ? settings.musicModels : settings.voiceModels)
+    // 目录里那条模型必须**属于这条渠道**:音乐渠道里混进一条 `purpose: "voice"`,
+    // 只会在选模型时被拒(或者更坏:把 TTS 模型递给了音乐上游)。这里按用途过滤,
+    // 而且**不静默改它的 purpose** —— 它就不该出现在这条渠道里。
+    .filter((model) => model.purpose === purpose)
   return {
-    baseUrl: settings.audioBaseUrl.trim(),
-    apiKey: settings.audioApiKey,
-    ...(settings.audioChannelName.trim() === '' ? {} : { name: settings.audioChannelName.trim() }),
-    models: parseAudioModelCatalog(settings.audioModels),
+    baseUrl,
+    apiKey,
+    ...(name === '' ? {} : { name }),
+    models,
   }
 }
 
@@ -327,6 +367,9 @@ export function parseModelCatalog(text: string): ImageModelDescriptor[] {
 }
 
 export function apply(ctx: Context, config?: Config): void {
+  // 组合里给的 config 值进 `base`(设置页的"尚未覆盖"那一层)。
+  // **三族渠道键一个都不能漏**:漏了的表现是"config 里配好了、设置页却显示没配" ——
+  // 而那正是拆渠道时最容易忘的地方(T27 那次的音频四键就在这里丢过一半)。
   const base: Partial<Required<Config>> = {
     enabled: config?.enabled ?? true,
     defaultProjectsRoot: config?.defaultProjectsRoot ?? '',
@@ -335,6 +378,15 @@ export function apply(ctx: Context, config?: Config): void {
     imageApiKey: config?.imageApiKey ?? '',
     imageChannelName: config?.imageChannelName ?? '',
     imageModels: config?.imageModels ?? '',
+    musicBaseUrl: config?.musicBaseUrl ?? '',
+    musicApiKey: config?.musicApiKey ?? '',
+    musicChannelName: config?.musicChannelName ?? '',
+    musicModels: config?.musicModels ?? '',
+    voiceBaseUrl: config?.voiceBaseUrl ?? '',
+    voiceApiKey: config?.voiceApiKey ?? '',
+    voiceChannelName: config?.voiceChannelName ?? '',
+    voiceModels: config?.voiceModels ?? '',
+    publishDir: config?.publishDir ?? '',
   }
   const settingsScope = ctx.settings.register(CONFIG_NAMESPACE, GalfreeSettingsSchema, { base })
   const current = () => settingsScope.get()
@@ -429,10 +481,11 @@ export function apply(ctx: Context, config?: Config): void {
       http: imageHttp,
       channel: () => channelFromSettings(current()),
     },
-    // 音频生成子系统(T27 / ADR-0012):与图像**同形不同渠道**(上游与协议不重叠)。
+    // 音频生成子系统(T27 / ADR-0012):**音乐与语音各一条渠道**(上游与协议不重叠)。
+    // 出网那份是共用的(发一个 HTTP 请求没有两条),渠道按用途现读。
     audio: {
       http: audioHttp,
-      channel: () => audioChannelFromSettings(current()),
+      channel: (purpose: AudioPurpose) => audioChannelFromSettings(current(), purpose),
     },
     // 本地发布(T18):真构建(钉版 SDK 的 launcher 项目跑 distribute)。
     // 输出目录:设置里给了就用它,否则落数据目录下的 publish/<项目名>。

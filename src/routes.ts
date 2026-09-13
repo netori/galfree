@@ -914,12 +914,12 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
   // 三道门(没配渠道 / 模型不在目录 / 路径形状)都在**接缝上**拦 —— 路由只搬运,
   // 不在这一层各判一遍(与 T20 那条适配器纪律同一个道理)。
 
-  // 渠道处境:配没配、有哪些模型、每个模型声明了什么(**不含密钥**)。
+  // 渠道处境:**音乐与语音各一条**(配没配、有哪些模型、每个模型声明了什么;**不含密钥**)。
   //
   // 路径是 `/audio/channel` 而**不是** `/audio` —— 后者是**音频池**(T17)那条读法,
   // 已经有主人了。同名路由会让两条完全不同的读法互相顶掉(写这段时差点真撞上)。
   if (method === 'GET' && path === '/audio/channel') {
-    writeJson(res, 200, await service.audioChannel())
+    writeJson(res, 200, await service.audioChannels())
     return
   }
 
@@ -959,10 +959,15 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
   }
 
   // 推进音频队列(串行;失败留在 failed,等人的重试)。
+  //
+  // `purpose` 可选,但**面板一定会给**:音乐与语音各自一条渠道,两张卡各跑各的 ——
+  // 给了就只跑那一类(面板上"跑队列(N 条)"那个 N 才是**这一下真会发出去的条数**)。
   if (method === 'POST' && path === '/audio/tasks/run') {
+    const body = await readJsonBody(req)
     const active = await service.getActiveProject()
     if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
-    writeJson(res, 200, { tasks: await service.runAudioQueue(active.id) })
+    const purpose = body.purpose === 'music' || body.purpose === 'voice' ? body.purpose : undefined
+    writeJson(res, 200, { tasks: await service.runAudioQueue(active.id, purpose === undefined ? {} : { purpose }) })
     return
   }
 
@@ -1141,8 +1146,8 @@ export function makeRoutes(deps: RouteDeps): GalfreeRoute[] {
             : error.code === 'picker-timeout' ? 504
             : error.code === GATE.bibleNotFinal ? 409
             // 没配渠道 = 能力未就绪(与 SDK 未就绪同性质),不是服务端故障。
-            // 图像与音频各有一条(ADR-0012:三条生成线各自一条渠道)。
-            : error.code === GATE.noImageChannel || error.code === GATE.noAudioChannel ? 503
+            // 图像一条、音乐一条、语音一条(ADR-0012:三条生成线各自一条渠道)。
+            : error.code === GATE.noImageChannel || error.code === GATE.noMusicChannel || error.code === GATE.noVoiceChannel ? 503
             : error.code === 'version-drift' || error.code === 'expect-required' || error.code === 'path-escape' || error.code === GATE.stampForbidden || error.code === 'slot-not-filled' || error.code === GATE.sdkNotReady
               || error.code === 'scene-not-editable' || error.code === 'scene-read-only' || error.code === 'scene-label-elsewhere'
               || error.code === 'scene-target-exists' || error.code === 'scene-already-canonical' ? 409

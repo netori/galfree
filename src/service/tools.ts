@@ -149,7 +149,7 @@ export function registerGalfreeTools(
             })),
             missing: progress.audio.missing.map((reference) => reference.ref),
             unused: progress.audio.unused,
-            note: '接线写在 .rpy 里(`play music "audio/x.ogg" [loop]` / `stop music`);引用是**相对 game/ 的路径**。本票不做音乐生成与 TTS;试听靠试玩,认可靠人盖场景戳。',
+            note: '接线写在 .rpy 里(`play music "audio/x.ogg" [loop]` / `stop music`);引用是**相对 game/ 的路径**。音乐与语音**也能生成**(v3 已批准:各自一条渠道,见 `galfree_audio_channel`),但接线与生成是两件事;试听靠试玩,认可靠人盖场景戳。',
           },
           lint: progress.lint,
           playtest: progress.playtest,
@@ -896,7 +896,7 @@ export function registerGalfreeTools(
   disposers.push(ctx.tools.register(defineTool({
     name: 'galfree_wire_audio',
     description: [
-      '音频:看池 / 接线 / 停声道。**BGM 与 SE 是接进来的,不是生成的**(这一票不做音乐生成与 TTS)。',
+      '音频:看池 / 接线 / 停声道。**接线**这一半是把文件接进来(池是派生的:文件在 `game/` 下就有它);**生成**那一半走 galfree_audio_channel 看渠道。',
       '**pool** 列 `game/` 下的音频文件(池是派生的:人把文件丢进去就有它,删掉就没了)与引用处境。',
       '**wire / stop** 就是往场景里写一行 `play music "audio/rain.ogg" loop` / `stop music` —— 引用是',
       '**相对 `game/` 的路径**。写完当场把池与引用处境报回来:文件不在池里会**立刻**显示成悬空',
@@ -1239,6 +1239,55 @@ export function registerGalfreeTools(
         return `不认识的 action:${action} —— 只有 list / import。`
       } catch (error) {
         return `语音批量清单没跑成:${describe(error)}`
+      }
+    },
+  })))
+
+  // ─── 音频生成渠道(T27 / ADR-0012):**音乐与语音各一条**,建任务之前先看这个 ──
+  //
+  // 为什么给它一个读入口:建音乐/语音任务要一个**属于那条渠道**的 model id,
+  // 而"音乐那条配了没、语音那条配了没、各自的目录里有什么"在别处看不到
+  // (账本只记跑过什么)。两张卡各配各的之后,这一步更必要:两条渠道的模型目录**不通用**。
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_audio_channel',
+    description: [
+      '读**两条**音频生成渠道的处境:音乐一条、语音(TTS)一条(配没配、有哪些模型、每个模型声明了什么能力)。',
+      '**建音频任务之前先看这个**:模型的 id 必须属于**那条**渠道的目录 —— 两条目录不通用',
+      '(把音乐模型 id 递到语音那条会被如实拒绝)。',
+      '**不含密钥**:只说配没配。没配时照着返回里的 `where` 去设置那一段填(音乐与语音是两段)。',
+      '语音还有一条**不花额度**的路:没有 TTS 渠道也能做 —— 用 `galfree_voice_batch` 导出清单,本地工具跑完再按 id 导回。',
+    ].join(' '),
+    parameters: {},
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute() {
+      try {
+        const channels = await service.audioChannels()
+        const view = (purpose: 'music' | 'voice') => {
+          const channel = channels[purpose]
+          const label = purpose === 'music' ? '音乐生成' : '语音(TTS)生成'
+          const where = purpose === 'music'
+            ? '设置 → 插件 → GALFree 的「音乐生成渠道」那一段(端点 + 密钥 + 模型目录)'
+            : '设置 → 插件 → GALFree 的「语音生成渠道」那一段(端点 + 模型目录);或者走 galfree_voice_batch 那条不花额度的路'
+          return {
+            purpose,
+            configured: channel.configured,
+            ...(channel.name === undefined ? {} : { name: channel.name }),
+            ...(channel.baseUrl === undefined ? {} : { baseUrl: channel.baseUrl }),
+            apiKeyConfigured: channel.apiKeyConfigured,
+            models: channel.models.map((model) => ({ id: model.id, label: model.label, adapter: model.adapter, capabilities: model.capabilities, note: model.note })),
+            ...(channel.configured && channel.models.length > 0 ? {} : { where }),
+            note: channel.configured
+              ? `${label}渠道配好了:${channel.models.length} 个模型`
+              : `还没配${label}渠道 —— 建那一类任务会被如实拒绝(不假装能生成)`,
+          }
+        }
+        return JSON.stringify({ music: view('music'), voice: view('voice') }, null, 2)
+      } catch (error) {
+        return `读不到音频渠道:${describe(error)}`
       }
     },
   })))
