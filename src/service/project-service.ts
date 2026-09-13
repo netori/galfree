@@ -2659,6 +2659,109 @@ export class ProjectService {
   }
 
   /**
+   * **按上游任务 id 把产物取回来**(T34)—— "上游已经生成了,但我们没拿到"时的那条路。
+   *
+   * 为什么必须有它:异步制的一次提交**是真金**(那家网关按 credits 计费,实测 0.5/次)。
+   * 而"我们没拿到"有几种很现实的原因:响应形状没认出来(2026-09-13 真发生过一次)、
+   * 下载口没装配、进程中途被杀…… 那些时候上游的产物**还在它那边**(文档:48 小时内可取),
+   * 而账本上那个 `upstreamTaskId` 就是唯一线索。没有这个动作,线索就只是句纪念品。
+   *
+   * 语义:**不重新提交**、不改词 —— 只按 id 问一次状态,成了就下载 + 经网关落盘。
+   * 三种如实结局:还在跑(`running`)/ 上游说失败(`failed`)/ 取回来了(`awaiting-review`)。
+   */
+  async collectAudioTask(
+    projectRef: string,
+    id: string,
+    upstreamTaskId: string,
+  ): Promise<{ state: 'running' | 'failed' | 'awaiting-review'; note: string; task: AudioTask }> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const task = (await this.audioTasks(projectRef)).find((candidate) => candidate.id === id)
+    if (task === undefined) throw new GalfreeError('unknown-task', `没有这个音频任务:${id}`)
+    if (upstreamTaskId.trim() === '') throw new GalfreeError('invalid-request', 'collect 需要 `upstream_task_id`(上游那一次的任务 id)')
+    const { channel, model } = this.#requireAudioModel(task.model, task.purpose)
+    const adapter = audioAdapterFor(model.adapter)
+    if (adapter.poll === undefined || adapter.buildPollRequest === undefined) {
+      throw new GalfreeError('invalid-request', `协议「${model.adapter}」是同步的:它没有"上游任务 id"这回事,collect 用不上`)
+    }
+    const request = adapter.buildPollRequest(
+      {
+        channel,
+        model,
+        task: {
+          purpose: task.purpose,
+          prompt: task.prompt,
+          dialogueId: task.dialogueId,
+          referenceAudio: task.referenceAudio,
+        },
+      },
+      upstreamTaskId,
+    )
+    const response = await this.#audioPorts!.http.send(request)
+    const step = adapter.poll(response, upstreamTaskId)
+
+    if (step.kind === 'running') {
+      // 还在跑:**不改账本**(它此刻的状态与刚才一样,写一笔"没变化"只是噪声)。
+      return { state: 'running', note: `上游还在跑(${step.note})—— 过一会儿再 collect 一次`, task }
+    }
+    if (step.kind === 'failed') {
+      const failed = await this.#audioLedger.mutate(projectRef, (document, writers) => {
+        const found = document.tasks.find((candidate) => candidate.id === id)!
+        const next: AudioTask = {
+          ...found,
+          state: 'failed',
+          lastError: `按上游任务 id ${upstreamTaskId} 取回时,上游说失败:${step.error}`,
+          upstreamTaskId,
+          updatedAt: new Date().toISOString(),
+        }
+        writers.push(next)
+        return Promise.resolve(next)
+      })
+      return { state: 'failed', note: `上游说这一版没了:${step.error}`, task: failed }
+    }
+
+    // 成了:下载 + 经网关落盘(与跑任务那条**同一套落盘纪律**)。
+    const download = this.#audioPorts!.http.download
+    if (download === undefined) {
+      throw new GalfreeError('audio-unavailable', '上游给的是一个音频 URL,而这台宿主没装配音频下载口 —— 拿不到产物(不假装成功)')
+    }
+    if (step.url === undefined) throw new GalfreeError('invalid-request', '上游说完成了,但既没给字节也没给 URL')
+    const fetched = await download(step.url)
+    if (fetched.status < 200 || fetched.status >= 300) {
+      throw new GalfreeError('invalid-request', `下载音频失败(HTTP ${fetched.status}):${step.url}`)
+    }
+    if (fetched.bytes.byteLength === 0) throw new GalfreeError('invalid-request', `下载回来的音频是空文件:${step.url}`)
+    const gateway = await this.#gatewayFor(projectRef)
+    const current = await gateway.read(task.outputPath)
+    const replacedFingerprint = current.missing ? undefined : current.version
+    const result = await gateway.writeBatch(
+      [{ path: task.outputPath, content: fetched.bytes, expectVersion: current.version }],
+      { origin: 'agent', reason: 'queue' },
+    )
+    const written = result.versions[task.outputPath] ?? fingerprint(fetched.bytes)
+    const at = new Date().toISOString()
+    const done = await this.#audioLedger.mutate(projectRef, (document, writers) => {
+      const found = document.tasks.find((candidate) => candidate.id === id)!
+      const next: AudioTask = {
+        ...found,
+        state: 'awaiting-review',
+        upstreamTaskId,
+        attempts: [...found.attempts, this.#audioAttempt(found.attempts.length + 1, at, 'ok', {
+          fingerprint: written,
+          bytes: fetched.bytes.byteLength,
+          ...(replacedFingerprint === undefined ? {} : { replacedFingerprint }),
+        })],
+        updatedAt: at,
+      }
+      // 取回来了 ⇒ 上次那条"没拿到"的失败原因**不再成立**,删掉它(留着就是过期的话)。
+      delete next.lastError
+      writers.push(next)
+      return Promise.resolve(next)
+    })
+    return { state: 'awaiting-review', note: `取回来了:${task.outputPath}(经写网关落盘 → 进了快照)`, task: done }
+  }
+
+  /**
    * 重 roll 一个音频任务(与图像那条同一语义):保留历史、追加一次尝试,可改词;
    * **拒收注记**只追加并指向被拒那一版(空注记/超长都拒)。
    *

@@ -1507,7 +1507,7 @@ export function registerGalfreeTools(
     },
   })))
 
-  // ─── 音频队列(T33 / #41):读 / 跑 / 重 roll(与图像那对工具同形)────────
+  // ─── 音频队列(T33 / #41):读 / 跑 / 重 roll / 按上游 id 取回 ────────────
   //
   // 为什么与"建任务"分开:一个工具一个动作(与 `galfree_art_queue` / `galfree_reroll_image`
   // 同一套分工)。**成本就是这一层的意义**:`run` 之前先看得见"这一跑真发几条",
@@ -1516,17 +1516,20 @@ export function registerGalfreeTools(
   disposers.push(ctx.tools.register(defineTool({
     name: 'galfree_audio_queue',
     description: [
-      '音频任务队列:**读** / **跑** / **重 roll**(音乐与语音两条渠道各自排队,分开看)。',
-      '`action: "list"`(缺省)给任务清单(状态、目标路径、模型、这条用的音色、末次错误)。',
+      '音频任务队列:**读** / **跑** / **重 roll** / **按上游 id 取回**(音乐与语音两条渠道各自排队,分开看)。',
+      '`action: "list"`(缺省)给任务清单(状态、目标路径、模型、这条用的音色、末次错误、上游任务 id)。',
       '`action: "run"` 推进**排队中**的(给 `purpose` 就只跑那一类)—— 返回里说清"这一跑真发了几条上游请求"。',
       '`action: "retry"` 重 roll 一条(要 `task_id`;可改 `prompt`;**拒收注记**只记人给的原话,agent 不编)。',
+      '`action: "collect"` **不重新提交**,按 `upstream_task_id` 把上游那一次的产物取回来 ——',
+      '用在"上游已经生成了、但我们没拿到"的时候(认不出响应 / 下载失败 / 中途被杀;上游那边一般留 48 小时)。',
       '失败**不自动重试**:留在账本里等人看(与出图那条同一纪律)。',
     ].join(' '),
     parameters: {
       project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
-      action: { type: 'string', description: 'list(缺省)/ run / retry' },
+      action: { type: 'string', description: 'list(缺省)/ run / retry / collect' },
       purpose: { type: 'string', description: 'run / list 用:music = 只音乐,voice = 只语音(省略 = 全都看 / 全都跑)' },
-      task_id: { type: 'string', description: 'retry 用:要重 roll 的任务 id(见 list)' },
+      task_id: { type: 'string', description: 'retry / collect 用:任务 id(见 list)' },
+      upstream_task_id: { type: 'string', description: 'collect 用:上游那一次的任务 id(见任务的 lastError 或 upstreamTaskId)' },
       prompt: { type: 'string', description: 'retry 用:新的制作指令(省略 = 沿用原词)' },
       note: { type: 'string', description: 'retry 用:**人的**拒收理由原话(省略 = 没给理由,不编)' },
     },
@@ -1566,6 +1569,27 @@ export function registerGalfreeTools(
               : `${failed.length} 条失败(见 lastError,上游原话)—— 不自动重试,等人决定。`,
           }, null, 2)
         }
+        if (action === 'collect') {
+          const id = String(args.task_id ?? '')
+          const upstreamTaskId = String(args.upstream_task_id ?? '')
+          if (id === '') return 'collect 需要 `task_id`(见 action:"list")。'
+          if (upstreamTaskId === '') {
+            return 'collect 需要 `upstream_task_id`(上游那一次的任务 id):它在任务的 `lastError` 或 `upstreamTaskId` 里。'
+          }
+          const collected = await service.collectAudioTask(active, id, upstreamTaskId)
+          return JSON.stringify({
+            state: collected.state,
+            note: collected.note,
+            outputPath: collected.task.outputPath,
+            upstreamTaskId: collected.task.upstreamTaskId ?? upstreamTaskId,
+            lastError: collected.task.lastError ?? null,
+            next: collected.state === 'awaiting-review'
+              ? '取回来了,等人在试玩里听;不满意用 action:"retry" 改词重来。'
+              : collected.state === 'running'
+                ? '还在跑:过一会儿再 collect 一次(**不重新提交,不再花钱**)。'
+                : '上游说这一版没了 —— 只能重新跑一次(action:"retry",会再花一次额度)。',
+          }, null, 2)
+        }
         if (action === 'retry') {
           const id = String(args.task_id ?? '')
           if (id === '') return 'retry 需要 `task_id`(见 action:"list")。'
@@ -1583,7 +1607,7 @@ export function registerGalfreeTools(
             next: task?.state === 'awaiting-review' ? '重 roll 成了,待复审。' : '没成,看 lastError。',
           }, null, 2)
         }
-        if (action !== 'list') return `不认识的 action:${action} —— 只有 list / run / retry。`
+        if (action !== 'list') return `不认识的 action:${action} —— 只有 list / run / retry / collect。`
 
         const tasks = await service.audioTasks(active)
         const channels = await service.audioChannels()
@@ -1604,6 +1628,8 @@ export function registerGalfreeTools(
               prompt: task.prompt.slice(0, 60),
               // 语音那条:用的是谁的嗓子(服务端音色库里的文件名)。
               voiceSample: task.voiceSample ?? null,
+              /** 上游那一次的 id(T34):"产物还在上游"时的唯一线索。 */
+              upstreamTaskId: task.upstreamTaskId ?? null,
               degradation: task.degradation?.code ?? null,
               attempts: task.attempts.length,
               lastError: task.lastError ?? null,

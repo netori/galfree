@@ -75,10 +75,26 @@ describe('资源式 REST 异步适配器(T34)', () => {
     // 上游拒绝:带上它的 code 与原话。
     expect(readMusicRestSubmit(JSON.stringify({ code: 429, msg: '积分不足' })))
       .toMatchObject({ ok: false, error: expect.stringContaining('积分不足') as unknown as string })
-    const noId = readMusicRestSubmit(JSON.stringify({ code: 200, data: { status: 'queued' } }))
+    const noId = readMusicRestSubmit(JSON.stringify({ code: 200, data: [{ status: 'queued' }] }))
     expect(noId.ok).toBe(false)
     expect(noId.ok === false && noId.error).toMatch(/却没给任务 id/)
     expect(noId.ok === false && noId.error).toMatch(/queued/)
+    // **真机实测的那一条**(2026-09-13 打了一次真上游,那次就是栽在这一处):
+    // `data` 是**数组**,id 叫 `task_id` —— 原话照抄进守卫,别让它再犯。
+    expect(readMusicRestSubmit('{"code":200,"data":[{"status":"submitted","task_id":"task_tFwiNjcX1UYM12QHE7EwHvaCLCC1i0I9"}]}'))
+      .toEqual({ ok: true, taskId: 'task_tFwiNjcX1UYM12QHE7EwHvaCLCC1i0I9' })
+  })
+
+  it('轮询的中间态:报出进度与预计时间(音乐要跑几分钟,只说"还在跑"像卡住了)', () => {
+    // 真机实测的中间态原话(`data` 在这一边是**对象**)。
+    const running = readMusicRestPoll(JSON.stringify({
+      code: 200,
+      data: {
+        cost: 0.05, created: 1789305395, credits_cost: 0.5, estimated_time: 180,
+        id: 'task_tFwi', progress: 50, status: 'processing', task_id: 'task_tFwi',
+      },
+    }))
+    expect(running).toEqual({ kind: 'running', note: 'processing 50%(预计 180 秒)' })
   })
 
   it('轮询:completed + 找得到音频 → done;failed / 中间态各有去处', () => {
@@ -217,8 +233,7 @@ describe('资源式 REST 适配器:端到端(注入假上游)', () => {
     expect(task.lastError).toMatch(/适配器还没实现/)
   })
 
-  it('**认不出产物地址也要保住那条线索**:失败原因里带上上游任务 id(产物在它那边放 48 小时)', async () => {
-    // 把上游做成"说 completed 但响应里没有任何音频字段" —— 这正是文档被截断那一处的风险。
+  it('**认不出产物地址也要保住那条线索**:失败原因里带上上游任务 id(产物在它那边放 48 小时)', async () => {    // 把上游做成"说 completed 但响应里没有任何音频字段" —— 这正是文档被截断那一处的风险。
     service = createProjectService({
       dataDir: `${dataDir}-blind`,
       uiTemplate: fakeUiTemplate(sdkDir),
@@ -263,5 +278,99 @@ describe('资源式 REST 适配器:端到端(注入假上游)', () => {
     // 产物没落盘(不写空文件).
     expect((await service.audioPool('blind')).files).toEqual([])
     expect(downloaded).toEqual([])
+
+    // **然后按那条线索取回来**(collect:不重新提交、不再花钱)。
+    // 把上游切成"这次真的完成了",再用账本里那个 id 去取。
+    service = createProjectService({
+      dataDir: `${dataDir}-blind2`,
+      uiTemplate: fakeUiTemplate(sdkDir),
+      audio: {
+        http: {
+          send: async (request: AudioHttpRequest) => {
+            sent.push({ url: request.url, method: request.method, body: request.body })
+            return {
+              status: 200,
+              text: JSON.stringify({ code: 200, data: { status: 'completed', task_id: 't-blind', audio_url: 'https://cdn.example/late.mp3' } }),
+            }
+          },
+          download: async (url: string) => {
+            downloaded.push(url)
+            return { status: 200, bytes: new TextEncoder().encode('MP3-late'), contentType: 'audio/mpeg' }
+          },
+        },
+        channel: (purpose) => purpose === 'music'
+          ? {
+              name: 'seedance-music',
+              baseUrl: 'https://api.seedance.nz/v1',
+              models: [{
+                id: 'suno-generation', purpose: 'music', adapter: 'async-task-rest',
+                capabilities: {
+                  textToMusic: true, instrumental: true, lyrics: false, audioReference: false,
+                  textToSpeech: false, voiceCloning: false, voiceId: false, urlResult: true,
+                },
+              }],
+            }
+          : null,
+      },
+    })
+    await service.createProject({ projectsRoot, name: 'blind3', title: undefined })
+    const parked = await service.createAudioTask('blind3', {
+      outputPath: 'game/audio/bgm/x.ogg', model: 'suno-generation', prompt: 'x', run: false,
+    })
+    // 从这一刻起只记 collect 发出的请求(前面那条失败任务也用过同一个记录器)。
+    sent.length = 0
+    const collected = await service.collectAudioTask('blind3', parked.id, 't-blind')
+    expect(collected.state).toBe('awaiting-review')
+    // 只发了一次**轮询**(没有重新提交 —— collect 的全部意义就在这)。
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.method).toBe('GET')
+    expect(sent[0]!.url).toBe('https://api.seedance.nz/v1/music/tasks/t-blind')
+    expect(downloaded).toEqual(['https://cdn.example/late.mp3'])
+    expect((await service.audioPool('blind3')).files.map((file) => file.path)).toEqual(['audio/bgm/x.ogg'])
+    // 取回来了 ⇒ 上次那条"没拿到"的失败原因不再成立(不留过期的话)。
+    expect(collected.task.lastError).toBeUndefined()
+    expect(collected.task.upstreamTaskId).toBe('t-blind')
+  })
+
+  it('collect 撞上"上游还在跑" → 如实说还在跑,**不改账本**(不写一笔"没变化")', async () => {
+    const parked = await service.createAudioTask('rest', {
+      outputPath: 'game/audio/bgm/waiting.ogg', model: 'suno-generation', prompt: 'x', run: false,
+    })
+    // 记下**这一边的**处境:另一个项目的 collect 不该动它一分一毫。
+    const before = await service.audioTasks('rest')
+    // 让假上游回一个中间态(这一条用同一份 service,只换响应)。
+    const running = createProjectService({
+      dataDir: `${dataDir}-running`,
+      uiTemplate: fakeUiTemplate(sdkDir),
+      audio: {
+        http: {
+          send: async () => ({ status: 200, text: JSON.stringify({ code: 200, data: { status: 'processing', progress: 50, estimated_time: 180 } }) }),
+          download: async () => ({ status: 200, bytes: new Uint8Array(), contentType: '' }),
+        },
+        channel: (purpose) => purpose === 'music'
+          ? {
+              name: 'seedance-music', baseUrl: 'https://api.seedance.nz/v1',
+              models: [{
+                id: 'suno-generation', purpose: 'music', adapter: 'async-task-rest',
+                capabilities: {
+                  textToMusic: true, instrumental: true, lyrics: false, audioReference: false,
+                  textToSpeech: false, voiceCloning: false, voiceId: false, urlResult: true,
+                },
+              }],
+            }
+          : null,
+      },
+    })
+    await running.createProject({ projectsRoot, name: 'running', title: undefined })
+    const task = await running.createAudioTask('running', {
+      outputPath: 'game/audio/bgm/waiting.ogg', model: 'suno-generation', prompt: 'x', run: false,
+    })
+    const got = await running.collectAudioTask('running', task.id, 't-running')
+    expect(got.state).toBe('running')
+    expect(got.note).toMatch(/processing 50%/)
+    expect((await running.audioTasks('running')).find((candidate) => candidate.id === task.id)!.state).toBe('queued')
+    expect(before).toEqual(await service.audioTasks('rest'))
+    expect(parked.state).toBe('queued')
+    await running.dispose()
   })
 })

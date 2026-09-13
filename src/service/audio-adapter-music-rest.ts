@@ -25,10 +25,16 @@
  * | 参数 | `model`(默认 `suno`)/ `version`(`v6`/`v6-5`/`v6-mini`,或自定义模型 id,二者不同时用)/ `custom`(`false`=prompt 是**灵感描述**,`true`=prompt 是歌词)/ `instrumental`(`true`=纯音乐)/ `title` / `style` / `vocal_gender` / `audio_format`(`mp3`/`m4a`/`wav`)/ `duration`(10–360)… |
  * | 完成响应 | `{ code: 200, data: { status: "completed", usage: { amount, currency } } }`;任务完成后 **48 小时**过期 |
  *
- * **两条如实标注的不确定**(文档那一页被截断,拿到完整示例后收窄并加守卫):
- *  1. **提交响应里任务 id 的字段名**:按 `data.id` → `data.task_id` → `data.taskId` → `data.task.id` 顺次取;
- *  2. **完成响应里音频地址的字段名**:在 `data` 下按"像音频/像 URL"的名字找(见 [`findAudioUrl`])。
- * 两者都**取不到就贴响应原话**当失败原因 —— 不假装成功、也不写一个空文件进项目。
+ * **两条来自真机的实测**(2026-09-13,打了一次真上游 + 只读轮询了一次;文档那一页没写响应体):
+ *  1. **提交响应的 `data` 是数组**:`{"code":200,"data":[{"status":"submitted","task_id":"task_…"}]}`;
+ *  2. **轮询响应的 `data` 是对象**:`{id, task_id, status, progress, estimated_time, cost, credits_cost}`,
+ *     中间态字面量是 `processing`(带百分比进度)。
+ * 两边形状不一样,所以两处各认各的(**数组与对象都认**)——「看着像就成」在这里是不够的:
+ * 认错一次的代价是一次真生成(那次就是这么丢的,好在有 48 小时可取回)。
+ *
+ * **一条如实标注的不确定**(等第一次跑到 `completed` 才知道):完成响应里音频地址的字段名
+ * —— [`findAudioUrl`] 按"名字像音频 → 值像 http(s) 音频链接"找;**找不到就把响应原话贴出来**
+ * 当失败原因(不假装成功、也不写一个空文件进项目),同时把上游任务 id 记进账本备查。
  */
 import type { AudioAdapter, AudioAdapterId, AudioPollStep, AudioSubmission } from './audio-generation.ts'
 
@@ -111,15 +117,18 @@ export function readMusicRestSubmit(text: string): { ok: true; taskId: string } 
   if (typeof parsed.code === 'number' && parsed.code !== 200) {
     return { ok: false, error: `上游拒绝(code ${parsed.code}):${parsed.msg ?? parsed.message ?? clip(text)}` }
   }
-  const data = (parsed.data ?? {}) as Record<string, unknown>
-  // 任务 id 的字段名文档那一页没写全 —— 按常见几个顺次取,取不到就**贴原话**。
-  const candidates: unknown[] = [
-    data.id,
-    data.task_id,
-    data.taskId,
-    (data.task as Record<string, unknown> | undefined)?.id,
-    parsed.data,
-  ]
+  // **真机实测的形状**(2026-09-13 打了一次真上游才知道:文档那一页没写响应体):
+  // `data` 是一个**数组** —— `{"code":200,"data":[{"status":"submitted","task_id":"task_…"}]}`。
+  // 所以对象与数组都要认(数组取每一项;对象直接取那几个字段名)。
+  const candidates: unknown[] = []
+  for (const bucket of Array.isArray(parsed.data) ? parsed.data : [parsed.data]) {
+    if (bucket === null || typeof bucket !== 'object') {
+      candidates.push(bucket)
+      continue
+    }
+    const record = bucket as Record<string, unknown>
+    candidates.push(record.id, record.task_id, record.taskId, (record.task as Record<string, unknown> | undefined)?.id)
+  }
   for (const candidate of candidates) {
     if (typeof candidate === 'string' && candidate !== '') return { ok: true, taskId: candidate }
   }
@@ -186,7 +195,7 @@ function weight(key: string): number {
 
 /** 轮询的一步:还在跑 / 成了(音色地址)/ 上游明说失败。 */
 export function readMusicRestPoll(text: string): MusicRestPollStep {
-  let parsed: { code?: number; msg?: string; message?: string; data?: Record<string, unknown> }
+  let parsed: { code?: number; msg?: string; message?: string; data?: unknown }
   try {
     parsed = JSON.parse(text) as typeof parsed
   } catch {
@@ -195,7 +204,10 @@ export function readMusicRestPoll(text: string): MusicRestPollStep {
   if (typeof parsed.code === 'number' && parsed.code !== 200) {
     return { kind: 'failed', error: `轮询被拒(code ${parsed.code}):${parsed.msg ?? parsed.message ?? clip(text)}` }
   }
-  const data = parsed.data ?? {}
+  // **真机实测**:这一边 `data` 是**对象**(与提交那一边的数组不同!字段是
+  // `{id, task_id, status, progress, estimated_time, cost, credits_cost}`)——
+  // 两边形状不一样,所以两处各认各的;数组也照认(别因为形状换了就整条读不出来)。
+  const data = (Array.isArray(parsed.data) ? parsed.data[0] : parsed.data) as Record<string, unknown> | undefined ?? {}
   const status = typeof data.status === 'string' ? data.status : ''
   const lower = status.toLowerCase()
   if (FAILED_STATUS.has(lower) || lower.startsWith('fail')) {
@@ -205,13 +217,21 @@ export function readMusicRestPoll(text: string): MusicRestPollStep {
   if (DONE_STATUS.has(lower)) {
     const audioUrl = findAudioUrl(data)
     if (audioUrl === null) {
-      // **不猜、也不假装成功**:认不出的形状把原话贴出来(改解析的人照着它改)。
+      // **不猜、也不假装成功**:认不出的形状把原话贴出来(改解析的人照着它改),
+      // 而且调用方会把上游任务 id 一起记进账本(48 小时内可取回)。
       return { kind: 'failed', error: `上游说 ${status} 却在响应里找不到音频地址(把原话带回来):${clip(text, 600)}` }
     }
     return { kind: 'done', audioUrl }
   }
-  // 排队 / 生成中,以及将来可能新增的中间态。
-  return { kind: 'running', note: status === '' ? '上游没给状态' : status }
+  // 排队 / 生成中,以及将来可能新增的中间态。**进度也报出来** ——
+  // 音乐要跑几分钟,只说"还在跑"让人以为卡住了(实测那家会给 `progress` 与 `estimated_time`)。
+  const progress = typeof data.progress === 'number' ? data.progress : undefined
+  const estimate = typeof data.estimated_time === 'number' ? data.estimated_time : undefined
+  const label = status === '' ? '上游没给状态' : status
+  return {
+    kind: 'running',
+    note: `${label}${progress === undefined ? '' : ` ${progress}%`}${estimate === undefined ? '' : `(预计 ${estimate} 秒)`}`,
+  }
 }
 
 export function createMusicRestAdapter(): AudioAdapter {
