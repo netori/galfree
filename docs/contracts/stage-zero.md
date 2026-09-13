@@ -1523,3 +1523,111 @@ T19 往会话的 system prompt 注入一段指引,T20 把工具面补成 16 个,
 **可红的守卫**:`playtest.test.ts` 的"真 spawn:取消要立刻杀掉子进程"(真起进程 + 真杀)与
 工具面那三条"取消已经发生 / 跑到一半被取消 / 人没关窗口" —— 后者的夹具 `spawn` **永不退出**,
 正是"人没关窗口"的形状;红了就是"等到 15 分钟"。
+
+## 游戏内界面换皮(T31 / #39 之后追加)
+
+发起人要的是"能自动化做出有特色的 UI"。这一票的结论是:**那不是 AI 出图,是给
+Ren'Py 自带的界面生成器一组参数** —— 理由见「界面图:三张是给人/给工具换的」那一节:
+`game/gui/` 下整套(52 张)是 `launcher/game/gui7/` 按**九宫格模板 + 参数**画的,
+尺寸全是有意的像素值(滚动条 12px、按钮边距)。拿 AI 出 100 张尺寸敏感的图 = 把边距交给概率。
+
+### 参数就是四个(外加一个模板)
+
+`GuiParameters(prefix, template, width, height, accent, boring, light, language, …)`:
+
+| 参数 | 我们的口径 |
+|---|---|
+| `accent` | **必给**(`#rrggbb`);校验失败**如实拒绝**,不猜一个颜色 |
+| `boring` | 辅色(文本框/底衬那一族);缺省 `#000000` |
+| `light` | 明/暗主题:决定文本色那一族与菜单底色的取值(暗 `.25` / 亮 `.75`) |
+| `width/height` | **默认取项目当前的分辨率**(`gui.init(w, h)` 那一行);给一个对不上的值 → `theme-resolution-mismatch` 拒绝 |
+| `template` | SDK 的 GUI 模板(`sdk/gui/game`)—— 我们只用它当 `generate_gui` 的入参,产物一律以项目自己的文件为准 |
+
+**分辨率为什么必须对得上**:生成器的缩放是 `scale = min(w/1280, h/720)`,
+整套图的像素尺寸都从它派生。尺寸错了引擎**不报错**(它只是把图拉伸),画面就歪了 ——
+所以这一条只能在入口拦(`theme.slow.test.ts` 里那条"1080p 项目按 1.5 重出,文本框 185→277"
+就是量出来的守卫:错尺寸只有量像素才看得见)。
+
+### 怎么跑:在 staging 副本里跑一次引擎(**真项目一个字节都不动**)
+
+界面图分两半:一半是 `gui7.ImageGenerator` 画的(文本框/按钮/菜单/图标),另一半是
+**引擎自己**画的(`renpy/common/00gui.rpy:469` 的 `_gui_images()`:条、滑块、滚动条、存档格 ——
+它读的是**渲染真正用的** `gui.*` 变量,含 `config.thumbnail_width` 这种要跑起来才有的值)。
+把后者重写一遍等于把引擎实现抄一份、再跟着 SDK 升级慢慢歪掉。所以做法是:
+
+```
+复制项目 → <staging>                       (真项目只读)
+  ├─ 把 SDK 的 launcher/game/gui7/*.py 摆进 <staging>/game/galfree_gui7/
+  ├─ 删掉 <staging>/game/gui/              ← **必须**:引擎只覆盖它画的那几十张,
+  │                                          不清的话旧主题多出来的图会被当成"这次的产物"写回项目
+  ├─ 写驱动脚本 <staging>/game/zz_galfree_theme_stage.py
+  │    (照 guisupport.rpy 的形状:sys.path 那一行 + ImageGenerator.generate_all() + _gui_images())
+  └─ renpy.exe <staging> quit              (跑完 init 就够;lint 会白多跑一遍全项目解析)
+→ 收 <staging>/game/gui/** 的 PNG → 数一遍哨兵 → 经写网关一个写批落进项目
+```
+
+**为什么用 `quit` 而不是 `lint`**:那套图在 **init 阶段**就画完了,跑完 init 即达目的。
+**退出码 0 不等于图齐了**(生成器内部的异常会被 init 阶段吞掉),所以收完产物要**逐张点数** ——
+少一张就 `theme-images-missing` 并且**一个字节都不写进项目**(残缺的界面图 = 主菜单缺块)。
+
+### 写进项目的东西(一个写批,一条快照)
+
+| 写什么 | 口径 |
+|---|---|
+| `game/gui/**` 整套图 | 二进制,经写网关(T14 就把口子开到了 `Uint8Array`) |
+| 新一套里**没有**而项目里有的旧图 | **删掉**(`content: null`)—— 留一张旧主题的图 = 界面上留一块旧颜色 |
+| `game/gui.rpy` 的颜色 define | 见下 |
+| `.studio/theme.json` | 事实:`{schemaVersion, spec, appliedAt, sdkVersion, images}` |
+
+**`game/gui.rpy` 只动那 13 行颜色 define**(`theme.ts` 的 `writeThemeDefines`):
+逐行替换 `^define <名字> = …`,模板里缺哪条就补在末尾;**别的字节(含中文字体补丁那一段)原样保留**;
+换行符按文件自己的那种(Windows 上 SDK 写的是 CRLF —— 只按 `\n` 切再拼回去会把被改的行变成 LF,
+一份文件里混两种换行,实测踩过)。值是**单引号**:与引擎自己的 `update_defines`(`repr(hexcode)`)
+逐字一致,所以"引擎再跑一次"也不会把文件改成另一种写法(实测 12 行逐字相同)。
+
+### 颜色推导:移植了引擎的数学,而且**是三处实测踩出来的**
+
+`theme.ts` 的 `derivePalette` 是 `parameters.py` + `renpy/color.py` 的移植(面板要能**立刻**
+给人看"这套主题长什么样",不该为了看一眼颜色起一次引擎)。三处反直觉的地方都实测过:
+
+1. **`tint` / `shade` 是线性 RGB 插值,不是 HLS**。判据:
+   `Color('#ff0000').tint(.5)` = `#ff7f7f`(=(255,127,127));HLS 那条路会给 `#df9f9f`。
+   *照 `renpy/color.py` 的 docstring 想象会得到后者* —— 这一条害我先写错了一版。
+2. **`replace_hsv_saturation` → `replace_value` 的中间值留在浮点里**。引擎的 `Color` 自己缓存 hsv,
+   第二步读到的饱和度是精确的 `.25`;若中途"转成 RGB 字节再转回来",会得到 `.2396` ——
+   颜色差一个色阶(`#2f3f3f` vs 引擎的 `#2f3e3f`)。
+3. **读 `.hsv` 时分量 round 到 8 位小数**。不照做就差一格:`#c94f7c` 的 title 色全精度算 `#ff7ead`,
+   引擎给 `#ff7fae`(全精度下常数项落到 `0.9999999…`,round8 之后是 `1.0`)。
+   同理 `insensitive` 的 alpha 是 **`7f`(127)不是 `80`**。
+
+守卫分两层:`theme.test.ts` 用**引擎自己吐出来的值**当期望(SDK 模板里写死的
+`gui.muted_color = "#00494e"` / `gui.hover_muted_color = "#006e75"` 就是默认主色算出来的现成真值),
+`theme.slow.test.ts` 再拿**真引擎**跑同一组参数逐值对一遍。
+
+### 事实、推导与"看得见"
+
+- `.studio/theme.json` 记**事实**(哪次换的、什么参数、几张图);`progress.theme` 只回答
+  "它还是不是当前这一版项目的主题":记录里的分辨率 ≠ 项目现在的 → `stale: true`(整套图要重出);
+- `themeViewOf` 同时给出**那套颜色**(面板的色块条直接读它),没换过皮时 `palette` 是 `null`
+  —— 不编一套默认色出来;
+- 面板卡(`theme-card.tsx`)显示:当前主题那句话 + `stale` 徽标 + 参数输入 + 四套现成配色 +
+  色块条 + **整套替换的告知**(要写多少文件/覆盖多少/新增多少/删哪些 —— 数字读接缝的
+  `previewTheme`,面板不自己数)+ 一句"好不好看只有人能说,请人跑一次试玩看一眼"。
+
+### 路由与工具面
+
+| 路由 | 语义 |
+|---|---|
+| `GET /theme` | 主题处境(纯读) |
+| `POST /theme/preview` `{accent?, boring?, light?, width?, height?}` | 要动多少文件(纯读,不起引擎) |
+| `POST /theme/apply` 同上 | 真换 → 200 `{report}`;没装配端口 → `theme-unavailable`;SDK 没就绪 → `sdk-not-ready` |
+
+agent:**`galfree_theme`**(`read` / `preview` / `apply`),`galfree_project_status` 多一段 `theme`。
+
+### 与封面那三张的分工(别混)
+
+生成器对 `main_menu.png` / `game_menu.png` / `window_icon.png` 是 `overwrite=False` ——
+**换皮不覆盖它们**。所以"整套替换"指的是一套图里**非封面**的那些;那三张归 #38 的
+`galfree_cover_art`(AI 出图,走图像渠道)。反过来说:换主题时菜单底**不会**跟着变颜色
+—— 那是**有意留给人/工具的那三张**,想让它跟着主题走就重新出一张封面。
+

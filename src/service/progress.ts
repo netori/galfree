@@ -14,6 +14,7 @@ import { OUTLINE_FILE } from './bible.ts'
 import type { DerivedSlot, SlotOrigin } from './slots.ts'
 import type { AudioPoolView } from './audio.ts'
 import type { PublishView } from './publish.ts'
+import type { ThemeView } from './theme.ts'
 
 export type StampState = 'none' | 'pending' | 'approved' | 'stale' | 'missing'
 
@@ -478,6 +479,13 @@ export interface ProgressSnapshot {
    * 与 `problems` 分工:那个说哪里坏了(定位缺陷),这个说接着做什么(给动作)。
    */
   nextActions: NextAction[]
+  /**
+   * 界面主题处境(T31 / #39):换过皮没有、现在是什么主题、项目分辨率。
+   *
+   * 与发布/试玩同一种态度:事实记在 `.studio/theme.json`,这里只回答"它还是不是
+   * 当前这一版项目的主题"(`stale` = 记录里的分辨率与项目现在的不一致 → 整套图要重出)。
+   */
+  theme: ThemeView
   summary: ProgressSummary
   degraded: boolean
 }
@@ -616,6 +624,8 @@ export interface ProgressInputs {
   playtest?: { last: PlaytestRun | null; currentFingerprint: string }
   /** 此刻有没有试玩在跑(运行时事实,不是从磁盘推的;缺省 false)。 */
   playtestRunning?: boolean
+  /** 界面主题处境(T31):记录 + 项目分辨率在调用方读好后传进来。 */
+  theme: ThemeView
 }
 
 /** 纯推导:读磁盘(戳账本 + 素材文件指纹)+ 已解析结构 → 进度快照。 */
@@ -838,6 +848,8 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
     lint: { ok: lintErrors === 0, errors: lintErrors, warnings: lintWarnings },
     playtest,
     playtestRunning: inputs.playtestRunning === true,
+    // 界面主题原样带出去(它是推导输入,不是这里算的):板子与面板读同一份。
+    theme: inputs.theme,
     nextActions,
     summary,
     degraded: summary.degraded > 0 || problems.length > 0,

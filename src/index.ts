@@ -24,9 +24,10 @@ import { makeRoutes } from './routes.ts'
 import { GalfreeError } from './service/error.ts'
 import { SdkProvisioner, probeOverrideSdk } from './service/sdk-provision.ts'
 import { extractZip, httpsDownloader } from './service/sdk-real.ts'
-import { findLauncher, platformLauncherName } from './service/hash.ts'
+import { findLauncher, platformLauncherName, detectSdkVersion } from './service/hash.ts'
 import { realSpawn } from './service/playtest.ts'
 import { realDistribute } from './service/publish.ts'
+import { defaultThemePorts, realThemeRun } from './service/theme-runner.ts'
 import { createCompositeValidator } from './service/validation/composite-validator.ts'
 import { registerGalfreeTools } from './service/tools.ts'
 import { registerGalfreePlaybook, toolPresenceProbe, type ToolRegistrySeat } from './service/playbook.ts'
@@ -342,19 +343,30 @@ export function apply(ctx: Context, config?: Config): void {
   const pinnedSdkDir = join(dataDir, 'sdk')
   const sdkDir = () => current().sdkPath !== '' ? current().sdkPath : pinnedSdkDir
 
-  /** 解析可用启动器:覆盖路径直接用;钉版目录若未就绪,不自动下载(试玩时如实报缺)。 */
-  const resolveLauncher = async (): Promise<string | null> => {
-    if (current().sdkPath !== '') return findLauncher(current().sdkPath)
-    // 钉版:仅在已就绪时返回(下载由 /sdk/ensure 或首次试玩前显式触发,避免隐性大下载)。
-    return findLauncher(pinnedSdkDir)
-  }
-
   // 钉版 SDK 供给(首次需要时下载;进度经 /sdk/status 可见)。
   const provisioner = new SdkProvisioner(pinnedSdkDir, {
     download: httpsDownloader,
     extract: extractZip,
     launcherName: platformLauncherName(),
   })
+
+  /**
+   * **确保钉版 SDK 就绪并给出启动器**(试玩 / 发布 / 换皮三条路共用这一段)。
+   *
+   * 覆盖路径直接用;钉版目录未就绪时先供给一次(首次是下载,进度经 `/sdk/status` 可见),
+   * 供不出来就返回 null —— 调用方据此如实报 `sdk-not-ready`,不假装有 SDK。
+   * 抽成一处是因为三个入口**要的是同一件事**:各写一遍的话,"什么时候允许触发下载"
+   * 这条规则就会活三份,迟早有一份漏掉(那条规则本身是刻意的:**不在工具调用里偷偷下载**)。
+   */
+  const ensureLauncher = async (): Promise<string | null> => {
+    if (current().sdkPath !== '') return findLauncher(current().sdkPath)
+    const dir = pinnedSdkDir
+    if ((await findLauncher(dir)) === null) {
+      const status = await provisioner.ensure().catch(() => null)
+      if (status === null || status.state !== 'ready') return null
+    }
+    return findLauncher(dir)
+  }
 
   /** 图像子系统的出网端口(生产 fetch);模型发现与出图共用同一个。 */
   const imageHttp = createNodeHttpClient()
@@ -408,15 +420,8 @@ export function apply(ctx: Context, config?: Config): void {
       overrideSdkPath: () => current().sdkPath,
     }),
     playtest: {
-      resolveLauncher: async () => {
-        const dir = sdkDir()
-        // 钉版且未就绪 → 先供给(首次下载,进度可见),再取启动器。
-        if (current().sdkPath === '' && (await findLauncher(dir)) === null) {
-          const status = await provisioner.ensure().catch(() => null)
-          if (status === null || status.state !== 'ready') return null
-        }
-        return findLauncher(dir)
-      },
+      // 三条路(试玩 / 发布 / 换皮)共用 `ensureLauncher` —— 同一件事只有一个实现。
+      resolveLauncher: ensureLauncher,
       spawn: realSpawn,
     },
     // 图像子系统(T14):出网走真 fetch;渠道现读设置(改了立刻生效)。
@@ -433,14 +438,7 @@ export function apply(ctx: Context, config?: Config): void {
     // 输出目录:设置里给了就用它,否则落数据目录下的 publish/<项目名>。
     publish: {
       ports: {
-        resolveLauncher: async () => {
-          const dir = sdkDir()
-          if (current().sdkPath === '' && (await findLauncher(dir)) === null) {
-            const status = await provisioner.ensure().catch(() => null)
-            if (status === null || status.state !== 'ready') return null
-          }
-          return findLauncher(dir)
-        },
+        resolveLauncher: ensureLauncher,
         run: realDistribute,
       },
       destination: (project) => {
@@ -448,6 +446,15 @@ export function apply(ctx: Context, config?: Config): void {
         return join(configured === '' ? join(dataDir, 'publish') : configured, project.name)
       },
     },
+    // 界面换皮(T31 / #39):真跑一次钉版 SDK 的界面生成器(在 staging 副本里)。
+    theme: defaultThemePorts({
+      run: realThemeRun,
+      // 生成器住在 SDK 里(`launcher/game/gui7`),所以"SDK 目录"与"启动器"要的是同一件事。
+      resolveSdkDir: async () => (await ensureLauncher()) === null ? null : sdkDir(),
+      resolveLauncher: ensureLauncher,
+      // 版本记进主题账本:将来 SDK 升了,"这套图是哪版画的"有据可查(探测不到就如实 null)。
+      sdkVersion: async () => (await detectSdkVersion(sdkDir())) ?? null,
+    }),
   })
 
   ctx.effect(

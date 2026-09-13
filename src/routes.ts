@@ -11,7 +11,7 @@ import { createSubdirectory, describePath, listDirectories } from './service/dir
 import { COVER_TARGETS, expectedCoverSize } from './service/covers.ts'
 import { renderVoiceBatchCsv, renderVoiceBatchJson } from './service/voice-batch.ts'
 import type { SceneEdit } from './service/scene-form.ts'
-import type { ProjectService } from './service/project-service.ts'
+import type { ProjectService, ThemeSpecInput } from './service/project-service.ts'
 import type { ImageModelCapabilities } from './service/images.ts'
 import { mimeOfPath } from './service/images.ts'
 import type { ProvisionStatus } from './service/sdk-provision.ts'
@@ -153,6 +153,10 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   // 封面类目标与规格(T30)。
   ['/covers', ['GET']],
   ['/covers/create', ['POST']],
+  // 界面换皮(T31):读现状 / 预演(要动多少)/ 真换(写整套界面图 + 一条快照)。
+  ['/theme', ['GET']],
+  ['/theme/preview', ['POST']],
+  ['/theme/apply', ['POST']],
   // 语音批量清单(T29):导出 / 导回。
   ['/voice/batch', ['GET']],
   ['/voice/import', ['POST']],
@@ -227,6 +231,20 @@ async function buildTree(root: string, dir: string, depth: number, budget: { lef
     }
   }
   return nodes
+}
+
+/**
+ * 请求体 → 换皮参数(**只搬运**:颜色/分辨率的合法性与缺省都在接缝上判 ——
+ * 面板与 agent 走的是同一条路,在这层各判一遍就等于规则活了两份)。
+ */
+function themeSpecOf(body: Record<string, unknown>): ThemeSpecInput {
+  return {
+    ...(typeof body.accent === 'string' && body.accent !== '' ? { accent: body.accent } : {}),
+    ...(typeof body.boring === 'string' && body.boring !== '' ? { boring: body.boring } : {}),
+    ...(typeof body.light === 'boolean' ? { light: body.light } : {}),
+    ...(typeof body.width === 'number' ? { width: body.width } : {}),
+    ...(typeof body.height === 'number' ? { height: body.height } : {}),
+  }
 }
 
 async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -856,6 +874,37 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
       ...(body.run === true ? { run: true } : {}),
     })
     writeJson(res, body.run === true ? 200 : 201, { task })
+    return
+  }
+
+  // ─── 界面换皮(T31 / #39)────────────────────────────────────────────
+  //
+  // 三条:读现状 / 预演(要动多少)/ 真换。**游戏内主题不是 AI 出图** —— 那整套
+  // `game/gui/*.png` 是 Ren'Py 自带的界面生成器按参数画的(`gui7`),所以入口是"给参数"。
+  // 门槛与写盘纪律都在接缝上(分辨率对不上会拒、整套替换经写网关 + 一条快照),
+  // 路由只搬运。
+  if (method === 'GET' && path === '/theme') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    writeJson(res, 200, await service.theme(active.id))
+    return
+  }
+
+  if (method === 'POST' && path === '/theme/preview') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    writeJson(res, 200, await service.previewTheme(active.id, { spec: themeSpecOf(body) }))
+    return
+  }
+
+  if (method === 'POST' && path === '/theme/apply') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    // `via: 'human'`:这条路是**人在面板上点的** —— 写批的 origin 因此记 workbench,
+    // 快照 commit message 与写日志才不会把人的动作说成 agent 的(审计链)。
+    writeJson(res, 200, await service.applyTheme(active.id, { spec: themeSpecOf(body) }, { via: 'human' }))
     return
   }
 

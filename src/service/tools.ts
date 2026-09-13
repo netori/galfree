@@ -153,6 +153,9 @@ export function registerGalfreeTools(
           },
           lint: progress.lint,
           playtest: progress.playtest,
+          // 界面主题(T31):换过皮没有、现在是什么主题、项目分辨率;`stale` = 记录的分辨率
+          // 与项目现在的不一致(整套图要重出)。
+          theme: progress.theme,
           // 「下一步」(T21):与面板那行「下一步」读的是**同一份推导** —— agent 不必自己从
           // problems 里推顺序(推法只有一份,长在 progress.ts 里)。
           nextActions: progress.nextActions,
@@ -1236,6 +1239,105 @@ export function registerGalfreeTools(
         return `不认识的 action:${action} —— 只有 list / import。`
       } catch (error) {
         return `语音批量清单没跑成:${describe(error)}`
+      }
+    },
+  })))
+
+  // ─── 界面换皮(T31 / #39):给 Ren'Py 自带的界面生成器一组参数 ──────────
+  //
+  // 这一票**不是 AI 出图**:`game/gui/*.png` 那一整套是引擎自己按九宫格模板画的
+  // (`launcher/game/gui7/` + `_gui_images()`)。所以入口是"给参数":主色 / 辅色 / 明暗 /
+  // 分辨率。产物经写网关落盘 + 一条快照;人看得见"当前主题是什么"。
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_theme',
+    description: [
+      "**游戏内界面换皮**:给 Ren'Py 自带的界面生成器一组参数(主色 accent / 辅色 boring / 明暗 light / 分辨率),",
+      '在 staging 副本里跑一次钉版 SDK,把整套界面图(`game/gui/`,五十来张)**经写网关**写进项目 + 一条快照。',
+      '`action: "read"` 先看现状:当前是什么主题、项目分辨率、这套颜色长什么样(`palette` 按引擎的 tint/shade/HSV 规则算)。',
+      '`action: "preview"` 看这一下要动多少文件(整套替换,不是增量)。',
+      '`action: "apply"` 真换(要 `accent`;会真起一次引擎、真写几十个文件)。',
+      '**分辨率**默认取项目当前的那个:界面图是按它缩放的,给一个对不上的值会被**如实拒绝**'
+        + '(不出一套歪的图)。',
+      '**整套替换**:`game/gui/` 下新的一套里没有的旧图会被删掉(留一张旧主题的图 = 界面上留一块旧颜色)。',
+      '封面 / 主菜单背景 / 窗口图标是**例外**(生成器不覆盖那三张)—— 那三张走 `galfree_cover_art`。',
+      '**好不好看只有人能说**:换完请人跑一次试玩看一眼(本工具不替人拍板)。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      action: { type: 'string', description: 'read = 看现状(缺省);preview = 看要动多少;apply = 真换' },
+      accent: { type: 'string', description: 'apply 用:主色(#rrggbb),如 #c94f7c' },
+      boring: { type: 'string', description: 'apply 用:辅色(文本框/底衬那一族;缺省 #000000)' },
+      light: { type: 'boolean', description: 'apply 用:亮色主题(缺省 false = 暗色)' },
+      width: { type: 'number', description: 'apply 用:分辨率宽(缺省 = 项目当前那个;对不上会被拒)' },
+      height: { type: 'number', description: 'apply 用:分辨率高(缺省 = 项目当前那个)' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目:先建一个(galfree_create_project)。'
+      const action = String(args.action ?? 'read')
+      try {
+        if (action === 'read') {
+          const view = await service.theme(active)
+          return JSON.stringify({
+            applied: view.applied,
+            appliedAt: view.appliedAt,
+            resolution: view.resolution,
+            palette: view.palette,
+            stale: view.stale,
+            label: view.label,
+            note: 'palette 是按引擎的 tint/shade/HSV 规则算出来的那一套(会写进 gui.rpy 的颜色 define)。'
+              + 'stale = 记录的分辨率与项目现在的不一致 → 整套图要按新分辨率重出。'
+              + '封面那三张(main_menu / game_menu / window_icon)不在这里,走 galfree_cover_art。',
+          }, null, 2)
+        }
+        const spec = {
+          ...(typeof args.accent === 'string' && args.accent !== '' ? { accent: args.accent } : {}),
+          ...(typeof args.boring === 'string' && args.boring !== '' ? { boring: args.boring } : {}),
+          ...(typeof args.light === 'boolean' ? { light: args.light } : {}),
+          ...(typeof args.width === 'number' ? { width: args.width } : {}),
+          ...(typeof args.height === 'number' ? { height: args.height } : {}),
+        }
+        if (action === 'preview') {
+          const preview = await service.previewTheme(active, { spec })
+          return JSON.stringify({
+            spec: preview.spec,
+            resolution: preview.resolution,
+            from: preview.from,
+            // 图归图、别的那两份(`gui.rpy` 与 `.studio/theme.json`)另记 —— 混成一个数
+            // 会让"整套替换"那句话对不上账。
+            images: preview.images,
+            extraWrites: preview.extraWrites,
+            added: preview.added,
+            replaced: preview.replaced,
+            removed: preview.removed,
+            note: `换皮是**整套替换**:这一次要写 ${preview.images} 张界面图`
+              + `(${preview.replaced} 张覆盖 + ${preview.added} 张新增),另加 ${preview.extraWrites} 份`
+              + `(gui.rpy 的颜色 define 与 .studio/theme.json)`
+              + `${preview.removed.length === 0 ? ';删掉哪些旧图要等出完图才知道' : `,并删掉 ${preview.removed.length} 个旧图`}`
+              + ' —— 一条快照,可回滚。',
+          }, null, 2)
+        }
+        if (action !== 'apply') return `不认识的 action:${action} —— 只有 read / preview / apply。`
+        if (spec.accent === undefined) return 'apply 至少要给 `accent`(主色,如 #c94f7c)。'
+        const report = await service.applyTheme(active, { spec }, { via: 'agent' })
+        return JSON.stringify({
+          ok: true,
+          label: report.label,
+          images: report.images,
+          added: report.added,
+          replaced: report.replaced,
+          removed: report.removed,
+          batchId: report.batchId,
+          next: '整套界面图换完了。**好不好看只有人能说** —— 请人跑一次试玩(工作台/`galfree_playtest`)看一眼。'
+            + '不满意就用同样的参数换一个配色,或改 accent / light 再来一次(每次一条快照,能回滚)。',
+        }, null, 2)
+      } catch (error) {
+        return `界面换皮没成:${describe(error)}`
       }
     },
   })))

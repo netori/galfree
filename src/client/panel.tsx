@@ -19,6 +19,7 @@ import { AudioCard } from './audio-card.tsx'
 import { BibleCard } from './bible-card.tsx'
 import { SceneWorkbench } from './scene-workbench.tsx'
 import { PublishCard } from './publish-card.tsx'
+import { ThemeCard } from './theme-card.tsx'
 import { FileInspector } from './file-inspector.tsx'
 import { DirectoryPicker } from './directory-picker.tsx'
 import { ProjectSwitcher } from './project-switcher.tsx'
@@ -452,6 +453,10 @@ export function WorkbenchPanel() {
         {/* 音频生成(T27 / ADR-0012):渠道处境 + 任务队列。**跑之前看得见要花几条请求** ——
             音乐按次、TTS 按台词行计费,不看清就点很危险。 */}
         <AudioCard api={api} hasProject={hasProject} onNotice={pushNotice} />
+
+        {/* 界面换皮(T31 / #39):给 Ren'Py 自带的界面生成器一组参数。
+            **不是 AI 出图** —— 那一整套 game/gui/*.png 是引擎按九宫格模板画的。 */}
+        <ThemeCard api={api} hasProject={hasProject} onChanged={() => refresh()} onNotice={pushNotice} />
 
         <SceneWorkbench
           api={api}

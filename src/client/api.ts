@@ -298,9 +298,77 @@ export interface PublishReadinessView {
   last: PublishView | null
 }
 
+// ─── 界面换皮(T31 / #39):与接缝的 `ThemeView` / `ThemePreview` / `ThemeApplyReport` 同形 ──
+
+/** 一组换皮参数(都可省 —— 缺省由接缝给:主色 #00b8c3 / 暗色 / 项目当前分辨率)。 */
+export interface ThemeSpecInput {
+  accent?: string
+  boring?: string
+  light?: boolean
+  width?: number
+  height?: number
+}
+
+export interface ThemeSpecView {
+  accent: string
+  boring: string
+  light: boolean
+  width: number
+  height: number
+}
+
+/** accent + light 推出来的那一整套颜色(值就是引擎会写进 `gui.rpy` 的那些)。 */
+export interface ThemePaletteView {
+  accent: string
+  selected: string
+  hover: string
+  muted: string
+  hoverMuted: string
+  title: string
+  menu: string
+  idle: string
+  idleSmall: string
+  insensitive: string
+  text: string
+  choice: string
+}
+
+export interface ThemeView {
+  applied: ThemeSpecView | null
+  appliedAt: string | null
+  resolution: { width: number; height: number }
+  palette: ThemePaletteView | null
+  /** 记录的分辨率与项目现在的不一致 → 整套图是按旧尺寸出的,要重出。 */
+  stale: boolean
+  label: string
+}
+
+export interface ThemePreviewView {
+  spec: ThemeSpecView
+  resolution: { width: number; height: number }
+  from: string
+  added: number
+  replaced: number
+  removed: string[]
+  /** 这一次要写几张**图**(整套重出,不是增量)。 */
+  images: number
+  /** 除图之外还要写的两份:`game/gui.rpy` 与 `.studio/theme.json`。 */
+  extraWrites: number
+}
+
+export interface ThemeApplyView {
+  spec: ThemeSpecView
+  appliedAt: string
+  images: number
+  added: number
+  replaced: number
+  removed: string[]
+  batchId: number
+  label: string
+}
+
 /** 一次构建的结果(与接缝的 `PublishRun` 同形)。 */
-export interface PublishRunView {
-  at: string
+export interface PublishRunView {  at: string
   ok: boolean
   packages: string[]
   destination: string
@@ -792,6 +860,31 @@ export class GalfreeApi {
     return body.task
   }
 
+  // ─── 界面换皮(T31 / #39):给引擎自带的界面生成器一组参数 ────────────
+
+  /** 当前主题处境:换过皮没有、什么主题、项目分辨率、`stale`(要不要按新分辨率重出)。 */
+  async theme(): Promise<ThemeView> {
+    return readJson(await fetch('/api/galfree/theme'))
+  }
+
+  /** 预演:这一下要动多少文件(整套替换,不是增量)。不写盘、不起引擎。 */
+  async previewTheme(spec: ThemeSpecInput): Promise<ThemePreviewView> {
+    return readJson(await fetch('/api/galfree/theme/preview', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(spec),
+    }))
+  }
+
+  /** 真换:跑一次引擎、把整套界面图经写网关写进项目 + 一条快照。 */
+  async applyTheme(spec: ThemeSpecInput): Promise<ThemeApplyView> {
+    return readJson(await fetch('/api/galfree/theme/apply', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(spec),
+    }))
+  }
+
   // ─── 语音批量清单(T29 / #37):不花上游额度的那条路 ─────────────────
 
   /** 导出清单(逐行:场景/行号/说话人/台词/id/目标文件名)。 */
@@ -875,7 +968,8 @@ export class GalfreeApi {
   }
 
   /** 一键发布(T18):产物落**项目源树之外**;前置没过就如实阻止并列缺项。 */
-  async publish(payload: { packages?: string[] } = {}): Promise<PublishReportView> {    return readJson(await fetch('/api/galfree/publish', {
+  async publish(payload: { packages?: string[] } = {}): Promise<PublishReportView> {
+    return readJson(await fetch('/api/galfree/publish', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),

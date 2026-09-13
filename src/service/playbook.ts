@@ -118,12 +118,12 @@ export const GALFREE_WORKFLOW: readonly WorkflowStage[] = [
   },
   {
     name: '素材',
-    what: '给 `.rpy` 引用到的每个素材槽出图(立绘表情差分 / 背景 / CG);封面 / 主菜单 / 窗口图标也走这条(那是 Ren\'Py 的界面生成器**不覆盖**的三张)',
+    what: '给 `.rpy` 引用到的每个素材槽出图(立绘表情差分 / 背景 / CG);封面 / 主菜单 / 窗口图标也走这条(那是 Ren\'Py 的界面生成器**不覆盖**的三张);**游戏内界面换皮**走另一条 —— 那不是 AI 出图,是给引擎自带的界面生成器一组参数',
     tools: [
       'galfree_image_channel', 'galfree_art_queue',
       'galfree_generate_image', 'galfree_reroll_image',
       'galfree_fill_missing_art', 'galfree_character_art', 'galfree_reference_chain',
-      'galfree_cover_art',
+      'galfree_cover_art', 'galfree_theme',
     ],
     gate: {
       code: GATE.noImageChannel,

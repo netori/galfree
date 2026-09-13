@@ -9,6 +9,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { TEMPLATE_CJK_FONT, TEMPLATE_UI_FILES, TEMPLATE_WINDOW_ICON } from '../service/template.ts'
+import { GUI7_PACKAGE } from '../service/theme.ts'
 import { GalfreeError } from '../service/error.ts'
 import { makeTempDir } from './tmp.ts'
 
@@ -20,12 +21,23 @@ export async function makeFakeSdk(overrides: Record<string, string> = {}): Promi
   for (const name of TEMPLATE_UI_FILES) {
     // 假 SDK 的界面文件只放**方言子集内的最小构造**:快带断言的是"拷过去了、路径对";
     // 真 SDK 的 screens.rpy 长什么样(几百个 style/init)是慢带与真 SDK 的事。
-    const content = overrides[name] ?? [
-      `# 假 SDK 的 ${name}(快带夹具;内容极简,只为验"拷过去了")`,
-      'label _galfree_fake_ui_start:',
-      '    return',
-      '',
-    ].join('\n')
+    //
+    // `gui.rpy` 多一行 `gui.init(w, h)`:那是**项目分辨率的真相**(T31 的换皮按它算缩放,
+    // 面板与 agent 也读它说"当前主题是什么")。夹具少了这一行,分辨率就只能靠"读不到就
+    // 当 720p"糊过去 —— 那条路正是分辨率的坑(整套界面图会歪),不该被夹具掩掉。
+    const content = overrides[name] ?? (name === 'gui.rpy'
+      ? [
+        `# 假 SDK 的 ${name}(快带夹具;内容极简,只为验"拷过去了")`,
+        'init python:',
+        '    gui.init(1280, 720)',
+        '',
+      ].join('\n')
+      : [
+        `# 假 SDK 的 ${name}(快带夹具;内容极简,只为验"拷过去了")`,
+        'label _galfree_fake_ui_start:',
+        '    return',
+        '',
+      ].join('\n'))
     await writeFile(join(target, name), content, 'utf8')
   }
   // 缺失场景要用:让调用方点名少拷哪个。
@@ -47,6 +59,13 @@ export async function makeFakeSdk(overrides: Record<string, string> = {}): Promi
   // 所以假 SDK 得像真 SDK 一样"有它",否则这条路在快带里测的就不是产品行为。
   await mkdir(join(dir, 'launcher', 'game', 'gui7'), { recursive: true })
   await writeFile(join(dir, 'launcher', 'game', 'gui7', 'icon.png'), MINIMAL_PNG)
+  // 界面生成器那四个 .py(T31 / #39 的换皮要把它摆进 staging)。
+  // 快带只用得上"文件在不在、叫什么"(生成器跑起来是慢带与真 SDK 的事),
+  // 所以内容写成最小的 `__init__.py` 那种形状即可。
+  await mkdir(join(dir, ...GUI7_PACKAGE.relative.split('/')), { recursive: true })
+  for (const name of GUI7_PACKAGE.pythonFiles) {
+    await writeFile(join(dir, ...GUI7_PACKAGE.relative.split('/'), name), `# 假 SDK 的 gui7/${name}(快带夹具)\n`, 'utf8')
+  }
   return dir
 }
 

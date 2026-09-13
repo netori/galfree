@@ -69,6 +69,11 @@ import {
   type AudioChannelSettings, type AudioModelDescriptor, type AudioPorts, type AudioTask, type CreateAudioTaskInput,
 } from './audio-generation.ts'
 import { ABSENT, fileFingerprint, fingerprint, pathExists } from './hash.ts'
+import {
+  GUI_CODE_FILE, GUI_IMAGE_DIR, THEME_FILE, parseThemeRecord, parseThemeSpec, projectResolutionOf, themeLabel, themeViewOf,
+  writeThemeDefines, type ThemeRecord, type ThemeSpec, type ThemeView,
+} from './theme.ts'
+import { generateThemedImages, type ThemePorts } from './theme-runner.ts'
 import { WriteGateway, type ChangeEvent, type FileSnapshot, type GatewayError, type WriteLogEntry, type WriteOp, type WriteResult } from './write-gateway.ts'
 import type { WriteBatchReason } from './write-gateway.ts'
 import type { ValidationReport } from './validation/contract.ts'
@@ -164,6 +169,55 @@ export interface GenerateSceneReport {
  */
 export type ValidatorPort = (project: ProjectInfo) => Promise<ValidationReport>
 
+/** 换皮参数的面(与 `ThemeSpec` 同形,只是都可省 —— 缺省有据)。 */
+export type ThemeSpecInput = Partial<ThemeSpec>
+
+/**
+ * 分辨率那道门(预演与真换**同一道**)。
+ *
+ * 界面图整套按项目分辨率缩放;尺寸错的那一刻引擎**不报错**(它只是把图拉伸),
+ * 画面就歪了 —— 所以这一条只能在入口拦,而且要在**预演**就拦:
+ * 让人看到漂亮的数字、点下去才吃拒绝,等于把"能不能做"藏到最后一刻。
+ */
+function assertThemeResolution(spec: ThemeSpec, resolution: { width: number; height: number }): void {
+  if (spec.width === resolution.width && spec.height === resolution.height) return
+  throw new GalfreeError(
+    'theme-resolution-mismatch',
+    `主题给的是 ${spec.width}×${spec.height},而项目现在是 ${resolution.width}×${resolution.height}`
+    + ' —— 界面图是按项目分辨率缩放出来的,尺寸对不上会整屏歪掉。'
+    + `要么按 ${resolution.width}×${resolution.height} 重出一套;要么先改项目的分辨率(那是另一件事)。`,
+  )
+}
+
+/** 换皮的预演(面板照它说清"要动什么")。 */
+export interface ThemePreview {
+  spec: ThemeSpec
+  /** 项目当前分辨率(界面图就是按它缩放的)。 */
+  resolution: { width: number; height: number }
+  /** 现在是什么主题(人话)。 */
+  from: string
+  added: number
+  replaced: number
+  /** 会被删掉的旧文件(新的一套里没有的那些)。 */
+  removed: string[]
+  /** 这一次要写几个**图**文件(整套重出,不是增量)。 */
+  images: number
+  /** 除图之外还要写的两份:`game/gui.rpy` 与 `.studio/theme.json`(写批里总有它们)。 */
+  extraWrites: number
+}
+
+/** 换皮的结果(如实报数:写了几张、几张是新的、删了什么、快照是哪一条)。 */
+export interface ThemeApplyReport {
+  spec: ThemeSpec
+  appliedAt: string
+  images: number
+  added: number
+  replaced: number
+  removed: string[]
+  batchId: number
+  label: string
+}
+
 export interface ProjectServiceOptions {
   /** 插件数据目录(注册表等宿主侧状态落这里)。 */
   dataDir: string
@@ -203,6 +257,13 @@ export interface ProjectServiceOptions {
     /** 这个项目的输出目录(绝对路径;生产 = 设置里的目录 / 数据目录下的默认位置)。 */
     destination: (project: ProjectInfo) => string
   }
+  /**
+   * 界面换皮端口(T31 / #39):跑一次钉版 SDK 的界面生成器(staging → 收整套界面图)。
+   *
+   * **缺省 = 没装配** → 换皮如实报 `theme-unavailable`(与"没配渠道"同一种态度)。
+   * 生产注入真引擎(`realRenpyRun`);快带注入假生成器(往 staging 里写一批假 PNG)。
+   */
+  theme?: ThemePorts
 }
 
 /** 图像子系统的注入端口(T14)。 */
@@ -224,6 +285,10 @@ export class ProjectService {
   /** 音频任务账本(T27)。 */
   #audioLedger: ReturnType<typeof makeTaskLedger<AudioTask>>
   #publishPorts: NonNullable<ProjectServiceOptions['publish']> | null
+  /** 界面换皮端口(T31);缺省 = 没装配 → 换皮如实拒绝。 */
+  #themePorts: ThemePorts | null
+  /** 换皮的串行:同一时刻只跑一次引擎(而且它要在 staging 上复制整份项目)。 */
+  #themeQueue: Promise<unknown> = Promise.resolve()
   #uiTemplate: (sdkDir: string | undefined) => Promise<{ files: Array<{ path: string; content: string }>; binaryFiles: Array<{ path: string; content: Uint8Array }> }>
   #gateways = new Map<string, Promise<WriteGateway>>()
   /** 图像任务账本的写串行(与网关的串行合起来构成"读-改-写"原子性)。 */
@@ -242,6 +307,7 @@ export class ProjectService {
     this.#imagePorts = options.images ?? null
     this.#audioPorts = options.audio ?? null
     this.#publishPorts = options.publish ?? null
+    this.#themePorts = options.theme ?? null
     this.#uiTemplate = options.uiTemplate ?? ((sdkDir) => this.#uiFilesFrom(sdkDir))
     // 两份账本走**同一个**工厂(不同的只是文件与"形状对不对"那一条)。
     // 读-改-写经网关(ADR-0004)→ 自动进快照(ADR-0011)。
@@ -453,6 +519,9 @@ export class ProjectService {
       readBible(entry.path),
       readOutline(entry.path),
     ])
+    // 界面主题(T31):记录 + 项目当前分辨率 → 推导"现在是什么主题 / 是不是要重出"。
+    // 读不到界面代码时**不抛**:板子照出,主题那一格如实说"看不出分辨率"。
+    const theme = await this.#themeView(projectRef)
     const derived = deriveSlots({ parsed, ledger, characters })
     // 项目级完整性(T13):孤立场景 / 结局不可达,外加把全局问题**定位到场景**。
     const completeness = deriveCompleteness(graph)
@@ -484,7 +553,24 @@ export class ProjectService {
       playtest: { last: playtest?.last ?? null, currentFingerprint: contentFingerprint(graph) },
       // 运行时事实(不是从磁盘推的):面板那颗"取消"按钮据此显示。
       playtestRunning: this.playtestRunning(),
+      theme,
     })
+  }
+
+  /**
+   * 主题处境的**推导形态**(给板子用):读不到 `gui.rpy` 时退成"看不出分辨率"(不抛)。
+   *
+   * 与 `theme()`(明确问"当前主题是什么")分开:那个是接口,缺文件要如实拒绝;
+   * 这个是板子的一格,缺文件时整块板不该跟着塌。
+   */
+  async #themeView(projectRef: string): Promise<ThemeView> {
+    const gateway = await this.#gatewayFor(projectRef)
+    const [code, record] = await Promise.all([gateway.read(GUI_CODE_FILE), this.#readThemeRecord(projectRef)])
+    if (!code.missing) {
+      return themeViewOf(record?.spec ?? null, record?.appliedAt ?? null, projectResolutionOf(code.content))
+    }
+    const view = themeViewOf(record?.spec ?? null, record?.appliedAt ?? null, { width: 0, height: 0 })
+    return { ...view, label: `看不出项目分辨率(${GUI_CODE_FILE} 不在)—— 界面换皮要先有这个文件` }
   }
 
   /** 解析项目的全部 `.rpy`(场景 + 顶层角色定义);`branchGraph` 与槽派生共用。 */
@@ -1852,6 +1938,193 @@ export class ProjectService {
     }
   }
 
+  // ─── 界面换皮(T31 / #39)─────────────────────────────────────────────
+
+  /**
+   * 主题处境(纯推导:记录 + 项目当前分辨率)。
+   *
+   * 读不到界面代码(`gui.rpy` 不在)时**不假装知道分辨率** —— 那说明这不是本产品的项目,
+   * 如实报 `not-a-project`。
+   */
+  async theme(projectRef: string): Promise<ThemeView> {
+    const { record, resolution } = await this.#readThemeInput(projectRef)
+    return themeViewOf(record?.spec ?? null, record?.appliedAt ?? null, resolution)
+  }
+
+  /**
+   * 换皮要读的那两样:**界面代码**(分辨率的真相 + 颜色 define 的宿主)与**主题记录**。
+   *
+   * 抽成一处是因为三个入口(`theme()` / `previewTheme()` / `applyTheme()`)读的是同一对东西
+   * —— 各读一遍的话,"gui.rpy 不在怎么办"这条规则就会活成三份,迟早有一份漏掉。
+   */
+  async #readThemeInput(projectRef: string): Promise<{ code: FileSnapshot; record: ThemeRecord | null; resolution: { width: number; height: number } }> {
+    const gateway = await this.#gatewayFor(projectRef)
+    const [code, record] = await Promise.all([gateway.read(GUI_CODE_FILE), this.#readThemeRecord(projectRef)])
+    if (code.missing) {
+      throw new GalfreeError('not-a-project', `项目里没有 ${GUI_CODE_FILE}:界面换皮要它才谈得上"当前主题是什么"`)
+    }
+    return { code, record, resolution: projectResolutionOf(code.content) }
+  }
+
+  /** 读 `.studio/theme.json`(坏形状 = null,当成"没换过皮")。 */
+  async #readThemeRecord(projectRef: string): Promise<ThemeRecord | null> {
+    const gateway = await this.#gatewayFor(projectRef)
+    const current = await gateway.read(THEME_FILE)
+    return parseThemeRecord(current.missing ? null : current.content)
+  }
+
+  /**
+   * 换皮的**预演**:要动哪些文件、哪些是新增、哪些会被删掉。
+   *
+   * 面板上那句"这会把 `game/gui/` 下的图整套替换"就是这个接口给的(AC 要求如实说清),
+   * 而不是面板自己数一遍 —— 数法只有一份(与服务同一个)。
+   *
+   * **分辨率对不上在这里就拦**(和真换同一道门):预演不拦的话,人会看到一个漂亮的数字,
+   * 点下去才吃一句拒绝 —— 那是把"能不能做"这件事藏到最后一刻。
+   */
+  async previewTheme(projectRef: string, input: { spec: ThemeSpecInput }): Promise<ThemePreview> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const { record, resolution } = await this.#readThemeInput(projectRef)
+    const spec = parseThemeSpec(input.spec)
+    assertThemeResolution(spec, resolution)
+    const plan = await this.#planTheme(await this.#existingGuiFiles(entry), [])
+    return {
+      spec,
+      resolution,
+      from: themeViewOf(record?.spec ?? null, record?.appliedAt ?? null, resolution).label,
+      ...plan,
+    }
+  }
+
+  /**
+   * 换皮(要写盘:整套界面图 + 颜色 define + 一条主题记录,同一个写批 + 一条快照)。
+   *
+   * 顺序是刻意的:**先在 staging 里把图出齐、点完数,再一次性写进项目**。
+   * 引擎退出码 0 不等于图齐了(生成器内部的异常会被吞),残缺的一套写进去会让主菜单缺块。
+   *
+   * `actor` **必给**:这一条会改整个项目的界面资产,而写批的 `origin`(谁发起)进快照 commit
+   * message 与写日志 —— 人在面板上点的那一下不该被记成 agent(审计链会失真)。口径与别的入口
+   * 一致:`human` = 工作台那条路,`agent` = 工具那条路。
+   */
+  async applyTheme(
+    projectRef: string,
+    input: { spec: ThemeSpecInput },
+    actor: { via: 'human' | 'agent' },
+  ): Promise<ThemeApplyReport> {
+    return await this.#serializeTheme(async () => {
+      const entry = await this.#resolve(projectRef)
+      await this.#assertPresent(entry)
+      const ports = this.#themePorts
+      if (ports === null) {
+        throw new GalfreeError('theme-unavailable', '这台宿主没装配界面生成器端口:换皮跑不了(不假装换好了)')
+      }
+      const sdkDir = await ports.resolveSdkDir()
+      const launcher = sdkDir === null || sdkDir === '' ? null : await ports.resolveLauncher()
+      if (launcher === null) {
+        throw new GalfreeError(GATE.sdkNotReady, '钉版 SDK 尚未就绪,无法换皮(先到工作台/设置完成 SDK 供给)')
+      }
+      const { code, resolution } = await this.#readThemeInput(projectRef)
+      const spec = parseThemeSpec(input.spec)
+      assertThemeResolution(spec, resolution)
+
+      // 守卫已经保证 sdkDir 不是空的(`launcher` 只在 sdkDir 有值时才去取)。
+      const generated = await generateThemedImages({ projectRoot: entry.path, sdkDir: sdkDir!, launcher, spec, ports })
+      const current = await this.#existingGuiFiles(entry)
+      const plan = await this.#planTheme(current, generated.images.map((image) => image.path))
+
+      const appliedAt = new Date().toISOString()
+      const record: ThemeRecord = {
+        schemaVersion: 1,
+        spec,
+        appliedAt,
+        sdkVersion: await ports.sdkVersion(),
+        images: generated.images.length,
+      }
+      const gateway = await this.#gatewayFor(projectRef)
+      const themeFile = await gateway.read(THEME_FILE)
+      const outcome = await gateway.writeBatch([
+        ...generated.images.map((image) => ({
+          path: image.path,
+          content: image.bytes,
+          // 引擎产物:文件在不在由引擎说了算,所以 CAS 用"当前读到的版本"(缺 = absent)。
+          expectVersion: current[image.path] ?? ABSENT,
+        })),
+        ...plan.removed.map((path) => ({ path, content: null, expectVersion: current[path] ?? ABSENT })),
+        { path: GUI_CODE_FILE, content: writeThemeDefines(code.content, spec), expectVersion: code.version },
+        { path: THEME_FILE, content: `${JSON.stringify(record, null, 2)}\n`, expectVersion: themeFile.version },
+      ], {
+        // 谁发起就记谁:人在面板上点的换皮被记成 agent,审计链就失真了。
+        origin: actor.via === 'human' ? 'workbench' : 'agent',
+        reason: `theme:${spec.accent}${spec.light ? ':light' : ''}`,
+      })
+
+      return {
+        spec,
+        appliedAt,
+        images: generated.images.length,
+        added: plan.added,
+        replaced: plan.replaced,
+        removed: plan.removed,
+        batchId: outcome.batchId,
+        label: themeLabel(spec),
+      }
+    })
+  }
+
+  /** 项目现在 `game/gui/` 下有哪些文件 → 各自当前的版本戳(换皮要按它做 CAS)。 */
+  async #existingGuiFiles(entry: RegistryEntry): Promise<Record<string, string>> {
+    const gateway = await this.#gatewayFor(entry.id)
+    const current: Record<string, string> = {}
+    for (const relative of await listFilesRecursive(join(entry.path, 'game', 'gui'))) {
+      const path = `${GUI_IMAGE_DIR}/${relative}`
+      current[path] = (await gateway.read(path)).version
+    }
+    return current
+  }
+
+  /**
+   * 算这一次换皮要动哪些**图**文件(纯读)。
+   *
+   * 换皮是一整套重出,不是增量:`replaced + added = images`。
+   *
+   * **预演**(没有产出清单那种)与**真换**(拿到了引擎产物)的差别只在"数量哪来":
+   *  - 预演:还不知道新一套有几张(那要跑完引擎),所以按"现在这些都要重写"说
+   *    —— 那正是换皮这件事的规模,而且它**不假装知道会删掉什么**(`removed` 留空);
+   *  - 真换:按引擎真产出的清单算,多出来的旧图就是 `removed`(它们会被删掉:
+   *    留一张旧主题的图等于界面上留一块旧颜色)。
+   *
+   * 界面代码与主题记录那两份**另算**(`extraWrites`):它们不是图,混进这个数字
+   * 会让"整套替换"那句话对不上账。
+   */
+  async #planTheme(
+    current: Record<string, string>,
+    produced: readonly string[],
+  ): Promise<{ added: number; replaced: number; removed: string[]; images: number; extraWrites: number }> {
+    const existing = new Set(Object.keys(current))
+    const next = new Set(produced)
+    // 换皮的写批里除图之外总有这两份:`game/gui.rpy` 与 `.studio/theme.json`。
+    const extraWrites = 2
+    if (produced.length === 0) {
+      return { added: 0, replaced: existing.size, removed: [], images: existing.size, extraWrites }
+    }
+    const added = produced.filter((path) => !existing.has(path)).length
+    return {
+      added,
+      replaced: produced.length - added,
+      removed: [...existing].filter((path) => !next.has(path)).sort(),
+      images: produced.length,
+      extraWrites,
+    }
+  }
+
+  /** 换皮的串行(引擎重、而且要在 staging 上复制整份项目:同时跑两次没有意义)。 */
+  async #serializeTheme<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.#themeQueue.then(work)
+    this.#themeQueue = run.catch(() => {})
+    return await run
+  }
+
   /** 音频任务账本(读):全部任务,最新的在前。 */
   async audioTasks(projectRef: string): Promise<AudioTask[]> {
     const entry = await this.#resolve(projectRef)
@@ -2404,8 +2677,13 @@ export function createProjectService(options: ProjectServiceOptions): ProjectSer
   return new ProjectService(options)
 }
 
-/** 递归列出一个目录下的文件(相对 POSIX 路径;缺目录 = 空)。模板拷界面图用。 */
-async function listFilesRecursive(dir: string, prefix = ''): Promise<string[]> {
+/**
+ * 递归列出一个目录下的文件(相对 POSIX 路径;缺目录 = 空)。
+ *
+ * **导出**是因为换皮那条路(`theme-runner.ts` 的端口)也要走同一份实现:
+ * 两边各写一份,"缺目录算空"这条规则就会活两次,迟早分叉。
+ */
+export async function listFilesRecursive(dir: string, prefix = ''): Promise<string[]> {
   let entries
   try {
     entries = await readdir(dir, { withFileTypes: true })
