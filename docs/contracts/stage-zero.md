@@ -822,6 +822,29 @@ Ren'Py Script` —— **第一列就是语音文件名要用的那个标识符**
 真引擎验过三件:lint 干净、导出的是**我们盖的 id**、**缺语音文件不崩**(退出码 0 无 traceback)。
 守卫:`dialogue-id.test.ts`(快带 16 条)+ `dialogue-id.slow.test.ts`(慢带)。
 
+### 音频生成通道(T27 / #35,2026-09-12;音乐与语音共用)
+
+与图像**同形、不同渠道**(ADR-0012:三条生成线上游与协议不重叠):
+
+- **设置里四个键**:`audioBaseUrl`(端点,**可填** —— 聚合站/自建反代/本地 TTS 同一条路)、
+  `audioApiKey`、`audioChannelName`、`audioModels`(JSON 目录:每条声明 `purpose`
+  (`music`/`voice`)、`adapter`(`sync-http`/`async-task`)、`capabilities`)。
+  **没填端点 = 没渠道** → 生成动作如实拒绝 `no-audio-channel`;
+- **认不出的 `purpose`/`adapter` 一律跳过那一条**(不猜默认值);**能力缺省 = 全 false**;
+- **账本** `.studio/audio-tasks.json`(与图像各一份文件、**同一个底层** `tasks.ts`):
+  `queued → running → awaiting-review | failed`、尝试历史(含被覆盖那版的指纹)、
+  拒收注记、降级说明;
+- **接缝**:`audioChannel()` / `audioTasks()` / `createAudioTask()` / `runAudioTask()` /
+  `runAudioQueue()` / `retryAudioTask()`;三道门在**接缝上**拦
+  (`no-audio-channel` / `unknown-audio-model` / `invalid-audio-path`),
+  路径必须落 `game/` 下且相对(引擎 searchpath 只有 `game/`);
+- **产物经写网关落盘**(ADR-0004)→ 音频池立刻派生得到它(T17 的池口径不变);
+- **适配器按协议收**:`AudioAdapter`(`buildRequest` / `onSubmit` / 可选 `poll`),
+  注册表此刻**是空的**且如实:没有适配器 → 任务记 `failed` 并指名道姓,不假装成功。
+  适配器是 #36(音乐)/ #37(TTS)的活。
+
+**还没接线**:路由(`/audio/*`)与面板(队列可见、"这一跑要花几条请求")。
+
 ### 已知边界(这一票**没有**覆盖的,别当成"已经管了")
 
 1. **只有子集内的形态会被校验**。`play <channel> "<文件>" [loop]` 之外的一切
