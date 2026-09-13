@@ -153,14 +153,25 @@ function clip(text: string, limit = 400): string {
 /**
  * 在完成响应里找**音频地址**。
  *
- * 文档那一页只露出 `data.status` 与 `data.usage`,音频字段被截断,所以这里按
- * "名字像音频 / 值像 http(s) 音频链接"找,**并只认第一个**(与 suno 那条"一次请求出多个变体、
- * 我们只取第一个"同一取舍:多版对比是账本该管的事)。
+ * **真机实测的形状**(2026-09-13,那次生成完成后 `GET /music/tasks/{id}` 的原话):
  *
- * 找不到就返回 null —— 调用方据此**贴原话**,而不是写一个空文件。
+ * ```jsonc
+ * { "code": 200, "data": { "status": "completed", "progress": 100, "actual_time": 61,
+ *   "result": { "music": [ { "audio_id": "…", "audio_url": "https://…mp3", "duration": 213.6,
+ *                            "title": "雨前教室", "lyrics": "[Instrumental]", "status": "complete" }, … ] },
+ *   "usage": { "amount": 0.4375, "currency": "¥" } } }
+ * ```
+ *
+ * 所以:**`data.result.music[]`.`audio_url`** 是那条路(一次请求给**两个变体**,我们取第一个
+ * —— 与 suno 那条同一取舍:多版对比是账本该管的事)。
+ *
+ * 但这里**不只认这一条**:先按"名字像音频/像列表"的键找(见得多的那些名字优先),
+ * 再退一步**整棵树walk一遍**找 http(s) 链接 —— 因为"认不出形状"的代价是一句
+ * "拿不到产物",而那时一次真生成已经花掉了(这条协议的第一版就是这么栽的:
+ * 文档没写响应体,靠猜)。真的什么都没有才返回 null,由调用方**贴原话**。
  */
 export function findAudioUrl(value: unknown, depth = 0): string | null {
-  if (depth > 4 || value === null || typeof value !== 'object') return null
+  if (depth > 5 || value === null || typeof value !== 'object') return null
   if (Array.isArray(value)) {
     for (const item of value) {
       const found = findAudioUrl(item, depth + 1)
@@ -169,28 +180,41 @@ export function findAudioUrl(value: unknown, depth = 0): string | null {
     return null
   }
   const record = value as Record<string, unknown>
-  // 先看"名字像音频"的键(顺序即优先级:越具体的越靠前)。
   const keys = Object.keys(record)
-  const audioish = keys
-    .filter((key) => /audio|url|file|src|stream|download|output|items?|clips?|tracks?|songs?|variants?|results?|data$/i.test(key))
+  // 第一轮:名字像音频 / 像列表的键(顺序即优先级:越具体的越靠前)。
+  const named = keys
+    .filter((key) => /audio|music|url|file|src|stream|download|output|result|items?|clips?|tracks?|songs?|variants?|data$/i.test(key))
     .sort((a, b) => weight(a) - weight(b))
-  for (const key of audioish) {
+  for (const key of named) {
     const found = findAudioUrl(record[key], depth + 1)
     if (found !== null) return found
   }
-  // 再放宽:任何 http(s) 链接(音频扩展名优先)。
-  const values = keys.map((key) => record[key])
-  const urls = values.filter((item): item is string => typeof item === 'string' && /^https?:\/\//.test(item))
-  return urls.find((url) => /\.(mp3|m4a|wav|ogg|flac)(\?|$)/i.test(url)) ?? urls[0] ?? null
+  // 第二轮(**兜底**):名字一个都不像时,整棵子树里找 http(s) 链接 —— 音频扩展名优先。
+  const loose: string[] = []
+  const walk = (node: unknown, level: number): void => {
+    if (level > 5 || loose.length > 50 || node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, level + 1)
+      return
+    }
+    for (const item of Object.values(node as Record<string, unknown>)) {
+      if (typeof item === 'string' && /^https?:\/\//.test(item)) loose.push(item)
+      else walk(item, level + 1)
+    }
+  }
+  walk(record, depth)
+  return loose.find((url) => /\.(mp3|m4a|wav|ogg|flac)(\?|$)/i.test(url)) ?? loose[0] ?? null
 }
 
 function weight(key: string): number {
   const lower = key.toLowerCase()
   if (lower === 'audio_url' || lower === 'audiourl') return 0
+  if (lower === 'music' || lower === 'musics') return 1
   if (lower.includes('audio')) return 1
   if (lower === 'url') return 2
-  if (lower === 'items' || lower === 'data' || lower === 'results') return 3
-  return 4
+  if (lower === 'result' || lower === 'results') return 3
+  if (lower === 'items' || lower === 'data' || lower === 'clips' || lower === 'tracks') return 4
+  return 5
 }
 
 /** 轮询的一步:还在跑 / 成了(音色地址)/ 上游明说失败。 */

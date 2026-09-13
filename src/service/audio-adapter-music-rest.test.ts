@@ -131,6 +131,33 @@ describe('资源式 REST 异步适配器(T34)', () => {
     // 没有名字线索时,退而认"像音频的链接"。
     expect(findAudioUrl({ data: { something: 'https://x/c.m4a' } })).toBe('https://x/c.m4a')
   })
+
+  it('**真机那条完成响应**能认出音频(原话照抄;`result.music[0].audio_url`)', () => {
+    const real = JSON.stringify({
+      code: 200,
+      data: {
+        actual_time: 61, completed: 1789305456, cost: 0.05, created: 1789305395, credits_cost: 0.5,
+        estimated_time: 180, id: 'task_tFwiNjcX1UYM12QHE7EwHvaCLCC1i0I9', progress: 100,
+        result: {
+          music: [
+            {
+              audio_id: '35fd46a1-824d-4d2f-93f9-c85191763908',
+              audio_url: 'https://getapib.org/audio/9998210694546506-….mp3',
+              display_tags: 'ambient, neoclassical, cinematic', duration: 213.6,
+              image_url: 'https://cdn2.suno.ai/image_….jpeg', lyrics: '[Instrumental]',
+              status: 'complete', title: '雨前教室',
+            },
+            { audio_id: 'db3ae9e5-…', audio_url: 'https://getapib.org/audio/second.mp3', duration: 183.2, status: 'complete' },
+          ],
+        },
+        status: 'completed', task_id: 'task_tFwiNjcX1UYM12QHE7EwHvaCLCC1i0I9',
+        usage: { amount: 0.4375, currency: '¥' },
+      },
+    })
+    // 取**第一个变体**(一次请求给两条,我们只要一条 —— 多版对比是账本该管的事);
+    // 注意不能误取 `image_url`(那也是 http 链接,但名字与扩展名都不是音频)。
+    expect(readMusicRestPoll(real)).toEqual({ kind: 'done', audioUrl: 'https://getapib.org/audio/9998210694546506-….mp3' })
+  })
 })
 
 describe('资源式 REST 适配器:端到端(注入假上游)', () => {
