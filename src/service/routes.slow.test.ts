@@ -981,6 +981,52 @@ describe('路由适配层(/api/galfree)', () => {
     await rm(empty, { recursive: true, force: true })
   })
 
+  it('声音锚路由(T32):嗓子清单可读、音色档案能写(**改参考链不会冲掉它**)、没配渠道时读音色库如实拒绝', async () => {
+    await freshProject()
+    // 没读过音色库 → `files: null`(**不谎报"库里没有"**),而且每个角色一行。
+    const before = await req('/api/galfree/audio/voice/anchors')
+    expect(before.status).toBe(200)
+    expect(before.body.library.files).toBeNull()
+    expect(before.body.libraryReadAt).toBeNull()
+
+    // 写一条音色档案:样本是**服务端音色库里的文件名**。
+    const saved = await postJson('/api/galfree/cast/characters/upsert', {
+      id: 'xiao_tang', name: '小棠', voice: 'xiao_tang', appearance: {},
+      voiceProfile: { sample: 'xiao_tang.wav', speaker: 'default', emotion: { mode: 'vector', vector: [0, 0, 0, 0, 0, 0, 0, 1] } },
+    })
+    expect(saved.status).toBe(200)
+    const withProfile = await req('/api/galfree/audio/voice/anchors')
+    const row = (withProfile.body.rows as Array<{ character: string; sample: string | null }>).find((entry) => entry.character === 'xiao_tang')!
+    expect(row.sample).toBe('xiao_tang.wav')
+
+    // **改参考链**那一下(面板的保存链)不会把这个字段冲掉:body 里没有 `voiceProfile` 键 = 别动它。
+    const chainOnly = await postJson('/api/galfree/cast/characters/upsert', {
+      id: 'xiao_tang', name: '小棠', voice: 'xiao_tang', appearance: {}, references: [{ path: 'game/images/xiao_tang-base.png' }],
+    })
+    expect(chainOnly.status).toBe(200)
+    const afterChain = await req('/api/galfree/audio/voice/anchors')
+    const stillThere = (afterChain.body.rows as Array<{ character: string; sample: string | null }>).find((entry) => entry.character === 'xiao_tang')!
+    expect(stillThere.sample).toBe('xiao_tang.wav')
+
+    // 明确清掉(给 `null`)= 真的清掉。
+    expect((await postJson('/api/galfree/cast/characters/upsert', {
+      id: 'xiao_tang', name: '小棠', voice: 'xiao_tang', appearance: {}, voiceProfile: null,
+    })).status).toBe(200)
+    const cleared = await req('/api/galfree/audio/voice/anchors')
+    expect((cleared.body.rows as Array<{ character: string; sample: string | null }>).find((entry) => entry.character === 'xiao_tang')!.sample).toBeNull()
+
+    // 写**项目内路径**当样本 → 400(两个命名空间不许混,拦在写入之前)。
+    const badSample = await postJson('/api/galfree/cast/characters/upsert', {
+      id: 'xiao_tang', name: '小棠', voice: 'xiao_tang', appearance: {}, voiceProfile: { sample: 'game/voice/x.wav' },
+    })
+    expect(badSample.status).toBe(400)
+    expect(badSample.body.code).toBe('character-invalid')
+
+    // 这个夹具没装配音频端口 → 读音色库如实拒(不是 500,也不是一个空库)。
+    const library = await postJson('/api/galfree/audio/voice/library', {})
+    expect(library.status).toBe(503)
+  })
+
   it('停用开关:仅 /state 可读,其余 503', async () => {
     const offline = createProjectService({ dataDir: join(dataDir, 'disabled'), uiTemplate: fakeUiTemplate(sdkDir) })
     const routes = makeRoutes({ service: offline, config: () => ({ enabled: false, defaultProjectsRoot: '' }) })

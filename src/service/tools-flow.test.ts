@@ -575,6 +575,78 @@ describe('全流程工具面(T20)', () => {
     })
   })
 
+  describe('声音锚(galfree_voice_anchor)', () => {
+    /** 登记两个角色:一个有档案、一个没有(正是"还差谁没有嗓子"那条清单)。 */
+    async function seedCast(project = 'flow'): Promise<void> {
+      await service.upsertCharacter(project, { id: 'xiao_tang', name: '小棠', voice: 'xiao_tang', appearance: {}, references: [] })
+      await service.upsertCharacter(project, { id: 'ghost', name: '幽灵', voice: 'ghost', appearance: {}, references: [] })
+    }
+
+    it('set → read:档案落进登记簿,清单立刻能看出"谁还没有嗓子"', async () => {
+      await seedScene()
+      await seedCast()
+      const written = JSON.parse(await find('galfree_voice_anchor').execute({
+        project: 'flow', action: 'set', character: 'xiao_tang', sample: 'xiao_tang.wav', lang: 'ZH',
+      })) as { wrote: string; rows: Array<{ character: string; sample: string | null; lang?: string }>; withoutProfile: string[]; next: string }
+      expect(written.wrote).toBe('xiao_tang')
+      expect(written.rows.find((row) => row.character === 'xiao_tang')!.sample).toBe('xiao_tang.wav')
+      // 幽灵还没有档案:那句台词会听起来跟别人一样 —— 这是这一票要显形的事。
+      expect(written.withoutProfile).toEqual(['ghost'])
+      expect(written.next).toContain('1')
+
+      // 写的是**同一份登记簿**(面板与 agent 读同一处,不是工具专用状态)。
+      const record = (await service.characters('flow')).find((candidate) => candidate.id === 'xiao_tang')!
+      expect(record.voiceProfile).toMatchObject({ sample: 'xiao_tang.wav', lang: 'ZH' })
+    })
+
+    it('情感也是档案的一部分(vector 8 维);形状不对如实交回,不抛栈', async () => {
+      await seedScene()
+      await seedCast()
+      const out = JSON.parse(await find('galfree_voice_anchor').execute({
+        project: 'flow', action: 'set', character: 'xiao_tang', sample: 'xiao_tang.wav',
+        emotion: { mode: 'vector', vector: [0, 0, 0, 0, 0, 0, 0, 1], weight: 0.5 },
+      })) as { rows: Array<{ character: string; emotion: string | null }> }
+      expect(out.rows.find((row) => row.character === 'xiao_tang')!.emotion).toBe('vector')
+
+      const bad = await find('galfree_voice_anchor').execute({
+        project: 'flow', action: 'set', character: 'xiao_tang', sample: 'xiao_tang.wav',
+        emotion: { mode: 'vector', vector: [0, 0, 0] },
+      })
+      expect(bad).toMatch(/声音锚操作没执行/)
+      expect(bad).toMatch(/8 个数/)
+    })
+
+    it('**项目内路径当样本** → 在写入之前拦下(两个命名空间不许混)', async () => {
+      await seedScene()
+      await seedCast()
+      const out = await find('galfree_voice_anchor').execute({
+        project: 'flow', action: 'set', character: 'xiao_tang', sample: 'game/voice/xiao_tang.wav',
+      })
+      expect(out).toMatch(/音色库/)
+      expect((await service.characters('flow')).find((candidate) => candidate.id === 'xiao_tang')!.voiceProfile).toBeUndefined()
+    })
+
+    it('clear:真的清掉;没登记的角色如实说清(不静默什么都不做)', async () => {
+      await seedScene()
+      await seedCast()
+      await find('galfree_voice_anchor').execute({ project: 'flow', action: 'set', character: 'xiao_tang', sample: 'xiao_tang.wav' })
+      const cleared = JSON.parse(await find('galfree_voice_anchor').execute({ project: 'flow', action: 'clear', character: 'xiao_tang' })) as {
+        rows: Array<{ character: string; sample: string | null }>
+      }
+      expect(cleared.rows.find((row) => row.character === 'xiao_tang')!.sample).toBeNull()
+      expect(await find('galfree_voice_anchor').execute({ project: 'flow', action: 'set', character: 'nobody', sample: 'x.wav' }))
+        .toMatch(/登记簿里没有角色/)
+    })
+
+    it('library:这台宿主没装配音频出网端口 → 如实拒绝(不是"空库")', async () => {
+      await seedScene()
+      await seedCast()
+      const out = await find('galfree_voice_anchor').execute({ project: 'flow', action: 'library' })
+      expect(out).toMatch(/声音锚操作没执行/)
+      expect(out).toMatch(/出网端口|audio-unavailable/)
+    })
+  })
+
   describe('快照(galfree_snapshot)', () => {
     it('history:每次写批都有记录,作者是 GALFree(与面板「历史」同一份 git)', async () => {
       await seedScene()

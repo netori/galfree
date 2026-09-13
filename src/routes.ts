@@ -1221,7 +1221,9 @@ export function makeRoutes(deps: RouteDeps): GalfreeRoute[] {
             : error.code === GATE.bibleNotFinal ? 409
             // 没配渠道 = 能力未就绪(与 SDK 未就绪同性质),不是服务端故障。
             // 图像一条、音乐一条、语音一条(ADR-0012:三条生成线各自一条渠道)。
-            : error.code === GATE.noImageChannel || error.code === GATE.noMusicChannel || error.code === GATE.noVoiceChannel ? 503
+            // `audio-unavailable` 同性质:"这台宿主没装配音频出网端口"也不是故障。
+            : error.code === GATE.noImageChannel || error.code === GATE.noMusicChannel || error.code === GATE.noVoiceChannel
+              || error.code === 'audio-unavailable' ? 503
             : error.code === 'version-drift' || error.code === 'expect-required' || error.code === 'path-escape' || error.code === GATE.stampForbidden || error.code === 'slot-not-filled' || error.code === GATE.sdkNotReady
               || error.code === 'scene-not-editable' || error.code === 'scene-read-only' || error.code === 'scene-label-elsewhere'
               || error.code === 'scene-target-exists' || error.code === 'scene-already-canonical' ? 409

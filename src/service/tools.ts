@@ -16,6 +16,7 @@ import { GalfreeError } from './error.ts'
 import { PLAYTEST_DEFAULT_WAIT_MINUTES, PLAYTEST_MAX_WAIT_MS, PLAYTEST_TIMEOUT_MS } from './playtest.ts'
 import { COVER_TARGETS, expectedCoverSize } from './covers.ts'
 import { renderVoiceBatchCsv, renderVoiceBatchJson } from './voice-batch.ts'
+import { voiceEmotionFromInput } from './voice-anchor.ts'
 import type { ProjectService } from './project-service.ts'
 import type { BibleChapter } from './bible.ts'
 import type { SceneEdit } from './scene-form.ts'
@@ -1288,6 +1289,130 @@ export function registerGalfreeTools(
         return JSON.stringify({ music: view('music'), voice: view('voice') }, null, 2)
       } catch (error) {
         return `读不到音频渠道:${describe(error)}`
+      }
+    },
+  })))
+
+  // ─── 声音锚(T32 / #40):每个角色一份参考音频 ─────────────────────────
+  //
+  // 这一票的起因是发起人的那个问题:「IndexTTS 没有设计音色的功能,该如何保持声音一致性?」
+  // 答案(调研 `docs/research-indextts-voice.md` 坐实的):音色**只由参考音频决定**,
+  // 所以"同一把嗓子"= 每个角色固定一段音色库里的参考样本,建语音任务时**自动带上**。
+  // 工具面因此只需要一件事:读处境 + 写那条档案(读目录/清掉/读音色库各一个 action)。
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_voice_anchor',
+    description: [
+      '**声音锚**(T32):每个角色一份参考音频(音色档案),让跨场同角色**同一把嗓子**。',
+      '`action: "read"`(缺省)给整部戏的嗓子清单:每个角色用的是哪段参考、谁还没有档案、',
+      '剧本里哪些说话人还没登记。建语音任务时会**自动**按 `dialogueId` 派生的说话人携链 —— 所以缺档案的角色会听起来跟别人一样。',
+      '`action: "set"` 给一个角色写/改音色档案(要 `character` + `sample`);`action: "clear"` 清掉它。',
+      '`action: "library"` 去问那台语音服务**它有哪些嗓子**(`GET /health` `/speakers` `/voices`;不花额度)——',
+      '`voices` 是**参考样本文件名**,`dir` 是你要把音频文件丢进去的那个目录。',
+      '**硬事实**(实测,不是猜):`sample` 与 `ref_sample` 是**服务端音色库里的文件名**,不是项目内路径 ——',
+      '那台服务没有上传接口,只能人把文件放进 `voices/`;`speaker` 是 LoRA 适配器名(**不是音色**,缺省 `default`);',
+      '改音色是**设定改动**,不是主观认可(审读戳仍只能由人盖)。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      action: { type: 'string', description: 'read(缺省)/ set / clear / library' },
+      character: { type: 'string', description: 'set / clear 用:登记簿里的角色 id(如 xiao_tang)' },
+      sample: { type: 'string', description: 'set 用:**服务端音色库里的文件名**(如 xiao_tang.wav),不是项目内路径' },
+      speaker: { type: 'string', description: 'set 用:LoRA 适配器名(缺省 default;**它不是音色**)' },
+      lang: { type: 'string', description: 'set 用:语言(缺省由适配器给,如 ZH)' },
+      emotion: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'set 用:情感输入(不给 = 服务端自己的缺省,通常是"跟着参考样本走")',
+        properties: {
+          mode: { type: 'string', description: 'follow = 跟着参考样本 / reference = 另给情感参考音频 / vector = 8 维向量 / text = 情感描述文本' },
+          ref_sample: { type: 'string', description: 'mode=reference:情感参考音频(**也在音色库里**按文件名找)' },
+          weight: { type: 'number', description: '情感强度 0–1' },
+          vector: { type: 'array', items: { type: 'number' }, description: 'mode=vector:**恰好 8 个数**(喜/怒/哀/惧/厌恶/低落/惊喜/平静)' },
+          text: { type: 'string', description: 'mode=text:情感描述' },
+        },
+      },
+      note: { type: 'string', description: 'set 用:制作备注(这段样本哪儿来的、什么情绪)' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目。'
+      const action = String(args.action ?? 'read')
+      try {
+        if (action === 'set' || action === 'clear') {
+          const id = String(args.character ?? '')
+          if (id === '') return `${action} 需要 \`character\`(要改哪个角色的嗓子;id 见 read 的返回)。`
+          const record = (await service.characters(active)).find((candidate) => candidate.id === id)
+          if (record === undefined) return `登记簿里没有角色「${id}」:先把它登记上,再给它记音色档案。`
+          if (action === 'clear') {
+            await service.upsertCharacter(active, { ...record, voiceProfile: undefined })
+          } else {
+            const mode = (args.emotion as { mode?: unknown } | undefined)?.mode
+            const emotion = mode === undefined
+              ? undefined
+              : voiceEmotionFromInput({
+                  mode,
+                  refSample: (args.emotion as { ref_sample?: unknown }).ref_sample,
+                  weight: (args.emotion as { weight?: unknown }).weight,
+                  vector: (args.emotion as { vector?: unknown }).vector,
+                  text: (args.emotion as { text?: unknown }).text,
+                })
+            await service.upsertCharacter(active, {
+              ...record,
+              voiceProfile: {
+                sample: String(args.sample ?? ''),
+                ...(typeof args.speaker === 'string' && args.speaker !== '' ? { speaker: args.speaker } : {}),
+                ...(typeof args.lang === 'string' && args.lang !== '' ? { lang: args.lang } : {}),
+                ...(emotion === undefined ? {} : { emotion }),
+                ...(typeof args.note === 'string' && args.note !== '' ? { note: args.note } : {}),
+              },
+            })
+          }
+        } else if (action !== 'read' && action !== 'library') {
+          return `不认识的 action:${action} —— 只有 read / set / clear / library。`
+        }
+
+        const library = action === 'library' ? await service.readVoiceLibrary(active) : null
+        const board = await service.voiceAnchors(active)
+        return JSON.stringify({
+          wrote: action === 'set' || action === 'clear' ? String(args.character ?? '') : null,
+          rows: board.rows.map((row) => ({
+            character: row.character,
+            name: row.name,
+            speakerVar: row.speakerVar ?? null,
+            sample: row.sample,
+            speaker: row.speaker,
+            emotion: row.emotion?.mode ?? null,
+            inLibrary: row.inLibrary,
+            note: row.note ?? null,
+          })),
+          withoutProfile: board.withoutProfile,
+          unregisteredSpeakers: board.unregisteredSpeakers,
+          unusedSamples: board.unusedSamples,
+          library: {
+            files: board.library.files,
+            dir: board.library.dir ?? null,
+            /** `null` = 还没核对过(不是"库里没有")。 */
+            readAt: service.voiceLibrary()?.at ?? null,
+            ...(library === null ? {} : {
+              reachable: library.reachable,
+              speakers: library.speakers ?? null,
+              // `default` 是**LoRA 名**(本机没训过 LoRA ⇒ 恒只有它),不是"一个可选音色"。
+              speakersNote: '这些是 LoRA 适配器名(不是音色);只有 default = 没训过任何说话人模型',
+              health: library.health ?? null,
+              problems: library.problems,
+            }),
+          },
+          next: board.withoutProfile.length === 0
+            ? '每个角色都有音色档案了 —— 建语音任务时会自动带上(触发重合成要看账本里的 queued)。'
+            : `还差 ${board.withoutProfile.length} 个角色没嗓子(见 withoutProfile):给它们各记一条音色档案,否则那几句会用服务端缺省(听起来跟别人一样)。`,
+        }, null, 2)
+      } catch (error) {
+        return `声音锚操作没执行:${describe(error)}`
       }
     },
   })))

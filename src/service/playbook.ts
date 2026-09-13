@@ -134,8 +134,8 @@ export const GALFREE_WORKFLOW: readonly WorkflowStage[] = [
   },
   {
     name: '音频',
-    what: 'BGM/SE 是**接进来的**,不是生成的:把音频文件放进 `game/`,再在场景里接线(引用是**相对 `game/` 的路径**);**语音**走"批量清单"那条路(导出 → 本地 TTS → 按 id 导回),不需要先有 API 渠道。音乐与语音**各自一条生成渠道**(ADR-0012)—— 建任务前用 `galfree_audio_channel` 看两条渠道各配没配',
-    tools: ['galfree_wire_audio', 'galfree_voice_batch', 'galfree_audio_channel'],
+    what: 'BGM/SE 是**接进来的**,不是生成的:把音频文件放进 `game/`,再在场景里接线(引用是**相对 `game/` 的路径**);**语音**走"批量清单"那条路(导出 → 本地 TTS → 按 id 导回),不需要先有 API 渠道。音乐与语音**各自一条生成渠道**(ADR-0012)—— 建任务前用 `galfree_audio_channel` 看两条渠道各配没配。**每个角色的嗓子**由登记簿的**音色档案**锚住(T32):参考样本是**服务端音色库里的文件名**(不是项目内路径),建语音任务时按台词派生的说话人**自动带上** —— 所以别让某个角色缺档案,否则那几句会听起来跟别人一样(`galfree_voice_anchor` 一句话就能看出还差谁)',
+    tools: ['galfree_wire_audio', 'galfree_voice_batch', 'galfree_audio_channel', 'galfree_voice_anchor'],
     gate: { what: '池是派生的(文件丢进 `game/` 就有,不用登记),但**引用必须落地**:悬空的音频引用在板上是一条 error(定位到哪一场哪一行),发布前置也会被它拦下' },
     done: [{ path: 'audio.missing', op: 'empty' }],
     human: '试听靠试玩,认可靠人盖场景戳',
