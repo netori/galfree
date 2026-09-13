@@ -1495,12 +1495,122 @@ export function registerGalfreeTools(
           next: task.state === 'awaiting-review'
             ? `产物已落盘,用 galfree_wire_audio 接进场景(引用是**相对 game/ 的路径**);试听后由人盖场景戳。`
             : task.state === 'failed'
-              ? `没跑成,看 lastError(上游原话)。`
-              : `已入队;跑它用工作台的「跑队列」或再调一次同一个工具(给 run: true)。`,
+              ? `没跑成,看 lastError(上游原话);改词重来用 galfree_audio_queue(action:"retry")。`
+              : `已入队,等一个"跑"的动作:galfree_audio_queue(action:"run")会一次说清这一跑真发几条。`,
         }, null, 2)
       } catch (error) {
         // 接缝的拒绝是**可执行的指令**(先配哪条渠道 / 模型不在目录 / 路径形状),原样交回。
         return `音频任务未建:${describe(error)}`
+      }
+    },
+  })))
+
+  // ─── 音频队列(T33 / #41):读 / 跑 / 重 roll(与图像那对工具同形)────────
+  //
+  // 为什么与"建任务"分开:一个工具一个动作(与 `galfree_art_queue` / `galfree_reroll_image`
+  // 同一套分工)。**成本就是这一层的意义**:`run` 之前先看得见"这一跑真发几条",
+  // 而 TTS 按台词行计费、音乐单次最贵 —— 这是 ADR-0012 的闸门。
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_audio_queue',
+    description: [
+      '音频任务队列:**读** / **跑** / **重 roll**(音乐与语音两条渠道各自排队,分开看)。',
+      '`action: "list"`(缺省)给任务清单(状态、目标路径、模型、这条用的音色、末次错误)。',
+      '`action: "run"` 推进**排队中**的(给 `purpose` 就只跑那一类)—— 返回里说清"这一跑真发了几条上游请求"。',
+      '`action: "retry"` 重 roll 一条(要 `task_id`;可改 `prompt`;**拒收注记**只记人给的原话,agent 不编)。',
+      '失败**不自动重试**:留在账本里等人看(与出图那条同一纪律)。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      action: { type: 'string', description: 'list(缺省)/ run / retry' },
+      purpose: { type: 'string', description: 'run / list 用:music = 只音乐,voice = 只语音(省略 = 全都看 / 全都跑)' },
+      task_id: { type: 'string', description: 'retry 用:要重 roll 的任务 id(见 list)' },
+      prompt: { type: 'string', description: 'retry 用:新的制作指令(省略 = 沿用原词)' },
+      note: { type: 'string', description: 'retry 用:**人的**拒收理由原话(省略 = 没给理由,不编)' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目。'
+      const action = String(args.action ?? 'list')
+      const purpose = args.purpose === 'music' || args.purpose === 'voice' ? args.purpose : undefined
+      try {
+        if (action === 'run') {
+          const targets = (await service.audioTasks(active))
+            .filter((task) => task.state === 'queued')
+            .filter((task) => purpose === undefined || task.purpose === purpose)
+          // **成本先说出来**:跑之前的那一句比跑完之后的解释有用。
+          const ran = await service.runAudioQueue(active, purpose === undefined ? {} : { purpose })
+          const failed = ran.filter((task) => task.state === 'failed')
+          return JSON.stringify({
+            ran: ran.length,
+            failed: failed.length,
+            spend: `这一跑真发了 ${targets.length} 条上游请求`,
+            tasks: ran.map((task) => ({
+              id: task.id,
+              purpose: task.purpose,
+              outputPath: task.outputPath,
+              state: task.state,
+              lastError: task.lastError ?? null,
+            })),
+            next: failed.length === 0
+              ? '都成了待复审 —— 试听靠试玩,认可靠人盖场景戳;不满意用 action:"retry" 改词重来。'
+              : `${failed.length} 条失败(见 lastError,上游原话)—— 不自动重试,等人决定。`,
+          }, null, 2)
+        }
+        if (action === 'retry') {
+          const id = String(args.task_id ?? '')
+          if (id === '') return 'retry 需要 `task_id`(见 action:"list")。'
+          const task = await service.retryAudioTask(active, id, {
+            run: true,
+            ...(typeof args.prompt === 'string' && args.prompt !== '' ? { prompt: args.prompt } : {}),
+            // 注记只有**人给了**才记(与出图那条同一口径:没理由就不记,agent 不编理由)。
+            ...(typeof args.note === 'string' && args.note !== '' ? { note: args.note, via: 'agent' as const } : {}),
+          })
+          return JSON.stringify({
+            id: task?.id ?? id,
+            state: task?.state ?? 'unknown',
+            lastError: task?.lastError ?? null,
+            note: task?.rejections.at(-1)?.note ?? null,
+            next: task?.state === 'awaiting-review' ? '重 roll 成了,待复审。' : '没成,看 lastError。',
+          }, null, 2)
+        }
+        if (action !== 'list') return `不认识的 action:${action} —— 只有 list / run / retry。`
+
+        const tasks = await service.audioTasks(active)
+        const channels = await service.audioChannels()
+        return JSON.stringify({
+          channels: {
+            music: channels.music.configured ? `${channels.music.name ?? '已配'} · ${channels.music.models.length} 个模型` : '没配',
+            voice: channels.voice.configured ? `${channels.voice.name ?? '已配'} · ${channels.voice.models.length} 个模型` : '没配',
+          },
+          tasks: tasks
+            .filter((task) => purpose === undefined || task.purpose === purpose)
+            .map((task) => ({
+              id: task.id,
+              purpose: task.purpose,
+              state: task.state,
+              outputPath: task.outputPath,
+              model: task.model,
+              prompt: task.prompt.slice(0, 60),
+              // 语音那条:用的是谁的嗓子(服务端音色库里的文件名)。
+              voiceSample: task.voiceSample ?? null,
+              degradation: task.degradation?.code ?? null,
+              attempts: task.attempts.length,
+              lastError: task.lastError ?? null,
+              rejections: task.rejections.map((rejection) => ({ note: rejection.note, via: rejection.via })),
+            })),
+          queued: {
+            music: tasks.filter((task) => task.purpose === 'music' && task.state === 'queued').length,
+            voice: tasks.filter((task) => task.purpose === 'voice' && task.state === 'queued').length,
+          },
+          next: '跑用 action:"run"(会真发上游请求:音乐最贵、TTS 按台词行计费);试听靠试玩,认可靠人盖场景戳。',
+        }, null, 2)
+      } catch (error) {
+        return `音频队列操作没成:${describe(error)}`
       }
     },
   })))

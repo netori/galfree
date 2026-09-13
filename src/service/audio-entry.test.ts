@@ -246,4 +246,40 @@ describe('建音频任务的入口(T33)', () => {
     for (const key of ['loop', 'dialogue_id', 'voice_id', 'run']) expect(tool.parameters.properties[key]).toBeDefined()
     expect(tool.parameters.properties.dialogue_id?.type).toBe('string')
   })
+
+  it('队列那三个动作(读 / 跑 / 重 roll)都在,而且**跑之前先说清真发几条**', async () => {
+    // 先攒两条(不跑)—— 这正是 `run: false` 存在的理由:攒一批,再一次性看清成本。
+    await find('galfree_generate_audio').execute({
+      project: 'entry', output_path: 'game/audio/bgm/a.ogg', model: 'suno-generation', prompt: '第一首', run: false,
+    })
+    await find('galfree_generate_audio').execute({
+      project: 'entry', output_path: 'game/audio/bgm/b.ogg', model: 'suno-generation', prompt: '第二首', run: false,
+    })
+
+    const listed = JSON.parse(await find('galfree_audio_queue').execute({ project: 'entry' })) as {
+      tasks: Array<{ state: string; purpose: string }>
+      queued: { music: number; voice: number }
+    }
+    expect(listed.tasks).toHaveLength(2)
+    expect(listed.tasks.every((task) => task.state === 'queued')).toBe(true)
+    expect(listed.queued).toMatchObject({ music: 2, voice: 0 })
+
+    const ran = JSON.parse(await find('galfree_audio_queue').execute({ project: 'entry', action: 'run', purpose: 'music' })) as {
+      ran: number
+      failed: number
+      spend: string
+    }
+    expect(ran.ran).toBe(2)
+    expect(ran.failed).toBe(0)
+    // 成本那句必须在返回里(音乐单次最贵)。
+    expect(ran.spend).toContain('2')
+
+    // 重 roll:改词重来一次,历史保留(attempts 累加)。
+    const retried = JSON.parse(await find('galfree_audio_queue').execute({
+      project: 'entry', action: 'retry', task_id: (await service.audioTasks('entry'))[0]!.id, prompt: '第一首(改过)',
+    })) as { state: string }
+    expect(retried.state).toBe('awaiting-review')
+    const first = (await service.audioTasks('entry')).find((task) => task.prompt === '第一首(改过)')
+    expect(first?.attempts.length).toBe(2)
+  })
 })

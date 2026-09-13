@@ -100,6 +100,42 @@ export function AudioCard({ purpose, api, hasProject, onNotice, onChanged }: {
     }
   }
 
+  // ─── 新建任务(T33):与 agent 的 `galfree_generate_audio` 同一条写路 ────
+  //
+  // 面板这一半的意义:人不必先教会 agent 才能出一条曲子(ADR-0002:面板是人用的那半)。
+  // **成本**在按钮上写着:勾了「立刻跑」= 这一下真发 1 条;不勾 = 入队,等「跑队列」一次看清条数。
+  const [draft, setDraft] = useState({ outputPath: '', model: '', prompt: '', dialogueId: '', loop: false, run: false })
+
+  const createTask = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      const task = await api.createAudioTask({
+        outputPath: draft.outputPath.trim(),
+        model: draft.model,
+        prompt: draft.prompt,
+        purpose,
+        ...(draft.dialogueId.trim() === '' ? {} : { dialogueId: draft.dialogueId.trim() }),
+        ...(purpose === 'music' ? { loop: draft.loop } : {}),
+        run: draft.run,
+      })
+      if (task.state === 'failed') {
+        onNotice('bad', `建了但没跑成:${task.lastError ?? '(看账本)'}`)
+      } else if (task.state === 'queued') {
+        onNotice('warn', `已入队:${task.outputPath} —— 点「跑队列」才会真发请求。`)
+      } else {
+        onNotice('warn', `跑完了:${task.outputPath} —— 试听在试玩里,认可靠人盖场景戳。`)
+      }
+      setDraft({ ...draft, outputPath: '', prompt: '' })
+      await refresh()
+      await onChanged?.()
+    } catch (error) {
+      // 接缝的拒绝是**可执行的指令**(没配渠道 / 模型不在目录 / 路径形状),原样显示。
+      onNotice('bad', `建任务没成:${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const reroll = async (task: AudioTaskView): Promise<void> => {
     setBusy(true)
     try {
@@ -247,8 +283,8 @@ export function AudioCard({ purpose, api, hasProject, onNotice, onChanged }: {
                 <div className={s.emptyTitle}>还没有{label.title}任务</div>
                 <div className={s.emptyHint}>
                   {purpose === 'music'
-                    ? '音乐从**任务**走:由 agent 建(galfree 工具)或在这里看队列。任务出一条、落一次盘、进一次快照;试听在试玩里完成。'
-                    : '语音从**两条路**走:这里有任务队列(agent 建),或者下面的「语音批量清单」——后者不需要 TTS 渠道。'}
+                    ? '音乐从**任务**走:在下面「新建任务」建一条(或让 agent 用 galfree_generate_audio 建)。任务出一条、落一次盘、进一次快照;试听在试玩里完成。'
+                    : '语音从**两条路**走:在下面「新建任务」建(或让 agent 建),或者走「语音批量清单」——后者不需要 TTS 渠道。'}
                 </div>
               </div>
             ) : (
@@ -283,6 +319,86 @@ export function AudioCard({ purpose, api, hasProject, onNotice, onChanged }: {
                 {tasks.length > 20 ? <div style={{ opacity: 0.6, paddingTop: 6 }}>还有 {tasks.length - 20} 条,见账本 `.studio/audio-tasks.json`</div> : null}
               </div>
             )}
+
+            {/* 「新建任务」(T33):面板这一半与 agent 的 `galfree_generate_audio` **同一条写路**
+                —— 建出来的都是同一份账本里的一条,「跑队列(N 条)」把两边一起算。 */}
+            <div className={s.form} style={{ marginTop: 12, borderTop: '1px solid var(--gf-line, #333)', paddingTop: 10 }}>
+              <div className={s.chips} style={{ marginBottom: 8 }}>
+                <span className={s.cardTitle} style={{ fontSize: 12 }}>新建任务</span>
+                <span className={s.emptyHint} style={{ flex: 1 }}>
+                  {purpose === 'music'
+                    ? '制作指令写**风格/情绪/场景**(如"雨夜的天台,钢琴与弦乐,慢速");产物要落在 game/ 下,别处引擎找不到'
+                    : '提示词写**要念的台词原文**;对话 id 给了就按它自动携音色档案(T32 的声音锚)'}
+                </span>
+              </div>
+              <div className={s.chips} style={{ marginBottom: 6 }}>
+                <input
+                  className={s.input}
+                  style={{ flex: 2, minWidth: 220 }}
+                  value={draft.outputPath}
+                  placeholder={purpose === 'music' ? 'game/audio/bgm/rain.ogg' : 'game/voice/<对话id>.ogg'}
+                  onChange={(event) => setDraft({ ...draft, outputPath: event.target.value })}
+                  aria-label={`${label.title}任务的目标路径`}
+                />
+                <select
+                  className={s.input}
+                  style={{ flex: 1, minWidth: 140 }}
+                  value={draft.model}
+                  onChange={(event) => setDraft({ ...draft, model: event.target.value })}
+                  aria-label={`${label.title}任务的模型`}
+                >
+                  <option value="">{channel === null || channel.models.length === 0 ? '(这条渠道没有模型)' : '选模型…'}</option>
+                  {(channel?.models ?? []).map((model) => (
+                    <option key={model.id} value={model.id}>{model.label ?? model.id}</option>
+                  ))}
+                </select>
+                {purpose === 'voice' ? (
+                  <input
+                    className={s.input}
+                    style={{ flex: 1, minWidth: 140 }}
+                    value={draft.dialogueId}
+                    placeholder="对话 id(可省)"
+                    title="填了就按台词派生的说话人自动携音色档案;id 见下面的清单"
+                    onChange={(event) => setDraft({ ...draft, dialogueId: event.target.value })}
+                    aria-label="语音任务的对话 id"
+                  />
+                ) : null}
+              </div>
+              <div className={s.chips} style={{ marginBottom: 6 }}>
+                <input
+                  className={s.input}
+                  style={{ flex: 3, minWidth: 240 }}
+                  value={draft.prompt}
+                  placeholder={purpose === 'music' ? '雨夜的天台,钢琴与弦乐,慢速' : '这句台词原文'}
+                  onChange={(event) => setDraft({ ...draft, prompt: event.target.value })}
+                  aria-label={`${label.title}任务的提示词`}
+                />
+                {purpose === 'music' ? (
+                  <label className={s.emptyHint} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <input type="checkbox" checked={draft.loop} onChange={(event) => setDraft({ ...draft, loop: event.target.checked })} />
+                    循环
+                  </label>
+                ) : null}
+                <label className={s.emptyHint} style={{ display: 'flex', alignItems: 'center', gap: 4 }}
+                  title="立刻跑 = 这一下真发一条上游请求(音乐最贵)">
+                  <input type="checkbox" checked={draft.run} onChange={(event) => setDraft({ ...draft, run: event.target.checked })} />
+                  立刻跑
+                </label>
+                <button
+                  type="button"
+                  className={`${s.button} ${s.primary}`}
+                  disabled={busy || draft.outputPath.trim() === '' || draft.model === '' || draft.prompt.trim() === ''}
+                  onClick={() => void createTask()}
+                  title={draft.run ? '建完立刻跑:会真发 1 条上游请求' : '只入队,等下面「跑队列」'}
+                >
+                  {busy ? <Spinner /> : draft.run ? '建并跑(1 条请求)' : '建任务(入队)'}
+                </button>
+              </div>
+              <span className={s.formHint} style={{ flexBasis: '100%' }}>
+                建出来的是**同一份账本**里的一条(与 agent 用 galfree_generate_audio 建的没有区别)——
+                下面那颗「跑队列」会真发**本卡排队中的全部**请求,点之前先看清条数。
+              </span>
+            </div>
 
             {purpose === 'voice' && voice !== null && voice.rows > 0 ? (
               <div className={s.form} style={{ marginTop: 12, borderTop: '1px solid var(--gf-line, #333)', paddingTop: 10 }}>
