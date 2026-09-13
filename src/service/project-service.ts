@@ -2152,11 +2152,18 @@ export class ProjectService {
       if (step.kind === 'done') {
         if (step.bytes !== undefined) return step.bytes
         if (step.url === undefined) throw new Error('上游说完成了,但既没给字节也没给 URL')
-        const download = await http.send({ url: step.url, method: 'GET', headers: {}, body: '' })
-        if (download.status < 200 || download.status >= 300) {
-          throw new Error(`下载音频失败(HTTP ${download.status}):${download.text.slice(0, 300)}`)
+        // 产物是一个**音频 URL**(Suno 类就是这样):下载口没装配就如实拒绝 ——
+        // 不假装"任务成功但没有产物"(那是"以为配齐了、玩的时候没声音"的另一种形状)。
+        const download = http.download
+        if (download === undefined) {
+          throw new Error('上游给的是一个音频 URL,而这台宿主没装配音频下载口 —— 拿不到产物(不假装成功)')
         }
-        return decodeBase64OrRaw(download.text)
+        const fetched = await download(step.url)
+        if (fetched.status < 200 || fetched.status >= 300) {
+          throw new Error(`下载音频失败(HTTP ${fetched.status}):${step.url}`)
+        }
+        if (fetched.bytes.byteLength === 0) throw new Error(`下载回来的音频是空文件:${step.url}`)
+        return fetched.bytes
       }
     }
     throw new Error(`等了 ${Math.round(AUDIO_POLL_TIMEOUT_MS / 1000)} 秒还没等到音频(上游一直在跑)—— 这次不算成功`)

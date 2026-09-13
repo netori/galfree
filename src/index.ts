@@ -18,6 +18,7 @@ import { createNodeHttpClient, type ImageChannelSettings, type ImageModelDescrip
 import type { AudioChannelSettings, AudioModelDescriptor } from './service/audio-generation.ts'
 import { registerAudioAdapter } from './service/audio-generation.ts'
 import { createIndexttsAdapter } from './service/audio-adapter-indextts.ts'
+import { createSunoAdapter } from './service/audio-adapter-suno-register.ts'
 import { discoverModels } from './service/discovery.ts'
 import { makeRoutes } from './routes.ts'
 import { GalfreeError } from './service/error.ts'
@@ -366,6 +367,9 @@ export function apply(ctx: Context, config?: Config): void {
    * `app_api.py`,默认 `127.0.0.1:9005`)。要接别家就在下面按同一个形状加一行。
    */
   registerAudioAdapter(createIndexttsAdapter())
+  // Suno 类聚合站(音乐):提交 → taskId → 轮询 → 音频 URL → 下载。
+  // 协议事实与出处见 `audio-adapter-suno.ts` 的表格;路径与模型版本可在模型目录的 note 里覆盖。
+  registerAudioAdapter(createSunoAdapter())
 
   /**
    * 音频生成子系统的出网端口(T27)。
@@ -375,8 +379,24 @@ export function apply(ctx: Context, config?: Config): void {
    */
   const audioHttp = {
     send: async (request: { url: string; method: string; headers: Record<string, string>; body: string }) => {
-      const response = await fetch(request.url, { method: request.method, headers: request.headers, body: request.body })
+      // **GET/HEAD 不能带 body**(fetch 直接抛 "Request with GET/HEAD method cannot have body")。
+      // 轮询那条路就是 GET,所以这里必须按方法决定带不带 —— 无脑 `body: ''` 会让轮询整个失败。
+      const method = request.method.toUpperCase()
+      const response = await fetch(request.url, {
+        method,
+        headers: request.headers,
+        ...(method === 'GET' || method === 'HEAD' ? {} : { body: request.body }),
+      })
       return { status: response.status, text: await response.text() }
+    },
+    // 产物是音频 URL 时用它取字节(Suno 类上游就是这样)。
+    download: async (url: string) => {
+      const response = await fetch(url)
+      return {
+        status: response.status,
+        bytes: new Uint8Array(await response.arrayBuffer()),
+        contentType: response.headers.get('content-type') ?? '',
+      }
     },
   }
 

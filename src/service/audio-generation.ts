@@ -91,7 +91,17 @@ export interface AudioChannelSettings {
  */
 export interface AudioPorts {
   /** 出网(生产 fetch / 快带假上游)。形状与图像的 `HttpRequest` 同构,但**各走各的渠道**。 */
-  http: { send: (request: { url: string; method: string; headers: Record<string, string>; body: string }) => Promise<{ status: number; text: string }> }
+  http: {
+    send: (request: { url: string; method: string; headers: Record<string, string>; body: string }) => Promise<{ status: number; text: string }>
+    /**
+     * **下载产物字节**(T29 / #37)。
+     *
+     * 为什么单开一条:好几家音乐上游是"先给一个**音频 URL**,过一阵子还不知道什么时候过期"
+     * (Suno 类就是),而"把 URL 变成字节"这件事**文本口做不到**。
+     * 不提供它就等于"这类上游永远拿不到产物" —— 那是能力缺口,不是风格问题。
+     */
+    download?: (url: string) => Promise<{ status: number; bytes: Uint8Array; contentType: string }>
+  }
   /** 当前渠道设置;`null` = 还没配。每次现读(设置可能刚被改)。 */
   channel: () => AudioChannelSettings | null
 }

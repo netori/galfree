@@ -116,16 +116,28 @@ describe('真钉版 SDK 慢带(T5)', () => {
     const launcher = await findLauncher(sdkDir)
     expect(launcher).not.toBeNull()
 
-    const projectRoot = await makeTempDir('galfree-slow-proj3-')
-    // 特意用中文标题 + 长短 slug,顺带验证模板的转义与 save_directory 取值。
-    const template = [
-      ...renderTemplateFiles({ name: 'slow-boot', title: '慢带启动冒烟', id: 'slow-boot' }),
-      ...templateKeepFiles(),
-    ]
-    for (const file of template) {
-      const abs = join(projectRoot, file.path)
-      await mkdir(join(abs, '..'), { recursive: true })
-      await writeFile(abs, file.content, 'utf8')
+    /**
+     * **走真的建项目装配**,不再手工铺模板文件。
+     *
+     * 为什么(T30 那次红的教训):手工铺只写 `renderTemplateFiles` 那几个文本文件,
+     * 而真实建项目还会从 SDK 拷**界面文件、中文字体、窗口图标**。于是模板里一旦有
+     * "指向某个必须存在的文件"的一行(比如 `config.window_icon = "gui/window_icon.png"`),
+     * 手工铺出来的项目**启动即崩**,而真装配出来的项目好好的 ——
+     * 那样测到的就不是产品行为,是测试夹具自己的缺件。
+     *
+     * 用真装配还有额外好处:它顺带覆盖了"装配出来的项目能不能跑"这条更贴近用户的链路。
+     */
+    const base = await makeTempDir('galfree-slow-boot-')
+    const projectsRoot = join(base, 'projects')
+    await mkdir(projectsRoot, { recursive: true })
+    const service = createProjectService({ dataDir: join(base, 'data') })
+    let projectRoot: string
+    try {
+      // 特意用中文标题 + 长短 slug,顺带验证模板的转义与 save_directory 取值。
+      const created = await service.createProject({ projectsRoot, name: 'slow-boot', title: '慢带启动冒烟', sdkDir })
+      projectRoot = created.root
+    } finally {
+      await service.dispose()
     }
 
     const { spawn } = await import('node:child_process')

@@ -13,6 +13,17 @@ import type { SpawnResult } from './playtest.ts'
 import { realSpawn, waitForExit } from './playtest.ts'
 
 describe('试玩控制(T7,假 spawn)', () => {
+  /**
+   * 有界地等一个条件成立。
+   *
+   * 为什么不用固定 sleep:那在忙机器上会假红(本套里就有一条因此偶发)。
+   * 等不到就**照常断言失败** —— 不是"跳过",是"明确没等到"。
+   */
+  async function waitUntil(condition: () => boolean, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (!condition() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+
   let dataDir: string
   let sdkDir: string
   let projectsRoot: string
@@ -275,38 +286,58 @@ describe('试玩控制(T7,假 spawn)', () => {
       expect((await service.progress('serial')).playtest?.at).toBe(second.at)
     })
 
-    it('排队中的第二个调用:不算"在跑",而且取消它当场生效(不白等前一个)', async () => {
-      // 两个真缺陷的守卫:① 排队中的调用不该让 `playtestRunning()` 说"在跑"
+    it('排队中的第二个调用:不算"在跑",而且取消它当场生效(不白等前一个)', async () => {      // 两个真缺陷的守卫:① 排队中的调用不该让 `playtestRunning()` 说"在跑"
       // (面板会对着一个还没开始的调用显示"取消",还声称杀掉了一个进程);
       // ② 它在排队期间被取消要**立刻**退出,而不是"等前一个跑完再照跑一遍"。
       let spawned = 0
+      // **第一个跑多久由测试说了算**(`releaseFirst`),不靠"它 120ms 才结束"这种时序赌 ——
+      // 机器一忙那个窗口就关了,而这条守卫要验的是排队语义,不是调度运气。
+      let releaseFirst!: () => void
+      const firstDone = new Promise<void>((resolve) => { releaseFirst = resolve })
+      let firstAborted = false
       service = createProjectService({
         dataDir: dataDir + '-queued',
         uiTemplate: fakeUiTemplate(sdkDir),
         playtest: {
           resolveLauncher: async () => '/fake/renpy.exe',
-          // 超时 0 → 第一个调用一进来就"等满上限",于是它占着位子待一会儿。
-          spawn: async (_launcher, _root, options) => await new Promise<SpawnResult>((resolve) => {
+          spawn: async (_launcher, _root, options) => {
             spawned += 1
-            setTimeout(() => resolve({ code: -1, log: 'timeout', timedOut: true, aborted: false, elapsedMs: options?.timeoutMs ?? 0 }), 120)
-          }),
+            return await new Promise<SpawnResult>((resolve) => {
+              // 第一个:挂到测试放行为止(模拟"窗口一直没关")。它若被取消,如实回 aborted。
+              options?.signal?.addEventListener('abort', () => { firstAborted = true; resolve({ code: -1, log: 'killed', timedOut: false, aborted: true, elapsedMs: 1 }) })
+              void firstDone.then(() => resolve({ code: 0, log: 'ok', timedOut: false, aborted: false, elapsedMs: 1 }))
+            })
+          },
         },
       })
       await service.createProject({ projectsRoot, name: 'queued', title: undefined })
       const first = service.playtestStart('queued', null, { timeoutMs: 0 })
-      const deadline = Date.now() + 3_000
-      while (!service.playtestRunning() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5))
+      // 等到**第一个真的起来了**(它占着位子)再往下走。
+      //
+      // 这里刻意用 `spawned` 而不是只看 `playtestRunning()`:后者在 `playtestStart` 的
+      // 第一个 await 之后就已经为真,而"真的 spawn 了"还要再等一段 —— 只等前者的话,
+      // 在忙机器上第一条断言还能过,第二条(`spawned === 1`)就会红(实测踩到过)。
+      await waitUntil(() => spawned === 1, 5_000)
+      expect(spawned).toBe(1)
       expect(service.playtestRunning()).toBe(true)
 
       const controller = new AbortController()
       const queued = service.playtestStart('queued', null, { signal: controller.signal })
       expect(service.playtestRunning()).toBe(true) // 是**第一个**在跑,不是排队的这个
+
+      // 排队那个的取消:立刻落定,不等到前一个跑完。
       controller.abort()
       const started = Date.now()
       await expect(queued).rejects.toMatchObject({ code: 'aborted' })
       expect(Date.now() - started).toBeLessThan(1_000) // 等了前一个才回来 = 红
       expect(spawned).toBe(1) // 排队那个**一个进程都没起**
-      await first
+      expect(firstAborted).toBe(false) // 而且它**没有**被误伤(取消只打中排队那一个)
+
+      // 放行第一个 → 它照常跑完、照常记账(恢复语义)。
+      releaseFirst()
+      const finished = await first
+      expect(finished).toMatchObject({ exitCode: 0, technicalPass: true })
+      expect(service.playtestRunning()).toBe(false)
     })
 
     it('中止了但进程没停 → 如实说 `killed: false`(不替它宣布"已杀掉")', async () => {

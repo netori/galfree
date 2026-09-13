@@ -84,7 +84,13 @@ describe('IndexTTS 适配器(T29)', () => {
         // 真出网(打到假上游上)。
         http: {
           send: async (request: AudioHttpRequest) => {
-            const response = await fetch(request.url, { method: request.method, headers: request.headers, body: request.body })
+            // 与生产实现同一条纪律:GET/HEAD 不能带 body。
+            const method = request.method.toUpperCase()
+            const response = await fetch(request.url, {
+              method,
+              headers: request.headers,
+              ...(method === 'GET' || method === 'HEAD' ? {} : { body: request.body }),
+            })
             return { status: response.status, text: await response.text() }
           },
         },
