@@ -14,6 +14,28 @@
  * 密钥:明文存在本机**插件设置**里(与 dsh-imagegen 同风险面,知情选择),
  * 但它**不进项目**、不进任务账本 —— 账本里只留渠道名与模型 id。
  */
+import {
+  emptyTasksDocument as emptyTaskDocument,
+  findTask as findTaskIn,
+  MAX_REJECTION_NOTE_CHARS as TASK_MAX_REJECTION_NOTE_CHARS,
+  parseTasksDocument as parseTaskDocument,
+  tasksDocument as serializeTaskDocument,
+  TASK_SCHEMA,
+  upsertTask as upsertTaskIn,
+  type GenerationAttempt,
+  type GenerationDegradation,
+  type GenerationRejection,
+  type GenerationTaskBase,
+  type GenerationTaskState,
+  type TaskDocument,
+  type TaskKind,
+} from './tasks.ts'
+
+// 账本那套的**通用部分在 `tasks.ts`**(T27 / ADR-0012:音乐与语音复用同一套纪律);
+// 这里**再导出**它们,老引用(`from './images.ts'`)一行都不用改。
+export type { GenerationAttempt, GenerationDegradation, GenerationRejection, GenerationTaskState }
+/** 拒收注记长度上限的唯一出处是 `tasks.ts`;此处再导出以兼容既有引用。 */
+export const MAX_REJECTION_NOTE_CHARS = TASK_MAX_REJECTION_NOTE_CHARS
 
 // ─── 渠道与模型目录 ────────────────────────────────────────────────────
 
@@ -117,78 +139,17 @@ export function imageModels(channel: ImageChannelSettings): ImageModelDescriptor
 }
 
 // ─── 任务模型(一级对象:全结构化)────────────────────────────────────
-
-export type GenerationTaskState = 'queued' | 'running' | 'awaiting-review' | 'failed'
+//
+// 状态机 / 尝试历史 / 拒收注记 / 降级的**通用形状**在 `tasks.ts`(T27 起音乐与语音共用);
+// 这里只留图像自己的输入输出字段。
 
 export type ImageSize = string
 
-/** 一次尝试的历史条目(重试历史就是这一串,只追加)。 */
-export interface GenerationAttempt {
-  n: number
-  startedAt: string
-  finishedAt: string
-  outcome: 'ok' | 'failed'
-  /** 失败的**原因原文**(状态码 + 上游说的那句话),不吞。 */
-  error?: string
-  /** 成功时的产物指纹(内容哈希),与板上槽位的指纹同口径。 */
-  fingerprint?: string
-  /** 成功时的字节数。 */
-  bytes?: number
-  /**
-   * **被这一次覆盖掉的那一版的指纹**(T15:重 roll 保留上一产物为历史)。
-   *
-   * 文件必然被覆盖(槽位的约定路径只有一个),但覆盖前的快照里有它的内容 ——
-   * 有了这个指纹,人就能从快照历史里精确找回"上一张是哪个版本",对比才有依据。
-   * 首次生成时缺省(没有上一版)。
-   */
-  replacedFingerprint?: string
-}
-
-/**
- * **拒收注记**(T16):人对某一版的否决理由。
- *
- * 它是**制作信息**(为什么这张不行:脸太圆 / 眼神太凶),不是叙述内容 ——
- * 长度有上限,超了会被挡在写入之前。注记只追加、永不改写,并指向**被拒的那一版**
- * (尝试号 + 产物指纹),所以"这张为什么被打回"在历史里对得上号,而不是一句无主的话。
- */
-export interface GenerationRejection {
-  /** 被拒的那一次尝试(第几次)。 */
-  attempt: number
-  /** 被拒那一版的产物指纹(可从快照历史精确找回那一版)。 */
-  fingerprint?: string
-  /** 人的原话(拒收理由)。 */
-  note: string
-  /** 谁记的:工作台上的人,还是替人转述的 agent。 */
-  via: 'human' | 'agent'
-  at: string
-}
-
-/**
- * 降级说明:**给出去的参数为什么与要求的不一样**。
- * 有它 = 请求被改了;没有 = 请求原样发出。不存在"改了但不说"的第三种。
- */
-export interface GenerationDegradation {
-  code: 'reference-chain-unsupported' | 'image-to-image-unsupported' | 'size-unsupported' | 'b64-unsupported' | 'reference-missing' | 'reference-truncated'
-  /** 面向人的一句话(中文;面板与 agent 直接显示)。 */
-  message: string
-  /** 被丢掉的参考图(给人确认"到底丢了什么")。 */
-  droppedReferenceImages: Array<{ path: string; note?: string }>
-  /** 其余被改动的参数说明。 */
-  notes: string[]
-}
-
-export interface GenerationTask {
-  schemaVersion: 1
-  id: string
+export interface GenerationTask extends GenerationTaskBase {
+  /** 产物类型(账本里显式写出来;老账本没有这一字段 → 读成 'image')。 */
+  kind: ImageTaskKind
   /** 目标槽(槽名,与 `.rpy` 图像引用派生的槽 id 同一口径)。 */
   slot: string
-  /** 产物目标路径(相对项目根;**一律**是槽位的约定路径)。 */
-  outputPath: string
-  state: GenerationTaskState
-  /** 渠道名 + 模型 id(账本里**不记密钥**)。 */
-  channel?: string
-  model: string
-  prompt: string
   /** 登记簿上下文:这个槽要求哪些角色出场(引用登记簿 id,不复制设定)。 */
   requiresCharacters: string[]
   /** 画风锚(来自槽账本或角色登记簿)。 */
@@ -197,34 +158,13 @@ export interface GenerationTask {
   quality?: string
   /** 参考图链(登记簿的引用)。 */
   referenceImages: Array<{ path: string; note?: string }>
-  /** 被降级掉的事实(缺省 = 没降级)。 */
-  degradation?: GenerationDegradation
-  attempts: GenerationAttempt[]
-  /**
-   * **拒收注记**(T16,只追加):人对某一版的否决理由。
-   * 老账本里没有这个字段 —— 读的时候按空数组归一(`task.rejections ?? []`)。
-   */
-  rejections: GenerationRejection[]
-  createdAt: string
-  updatedAt: string
-  /** 失败时的最后原因(与 attempts 末条一致,方便一眼看)。 */
-  lastError?: string
 }
 
-/** 任务账本(落 `.studio/image-tasks.json`;只放制作信息,不复制叙述内容)。 */
-export interface GenerationTaskDocument {
-  schemaVersion: 1
-  tasks: GenerationTask[]
-}
+/** 图像任务账本(落 `.studio/image-tasks.json`;只放制作信息,不复制叙述内容)。 */
+export type GenerationTaskDocument = TaskDocument<GenerationTask>
 
 export const IMAGE_TASKS_FILE = '.studio/image-tasks.json'
-export const IMAGE_TASKS_SCHEMA = 1
-
-/**
- * 拒收注记的长度上限(与设定卡字段同一把尺子,但**单独取名**:
- * "账本字段上限"与"设定卡字段上限"是两件事,改一个不该动另一个)。
- */
-export const MAX_REJECTION_NOTE_CHARS = 600
+export const IMAGE_TASKS_SCHEMA = TASK_SCHEMA
 
 /** 新建任务的输入。 */
 export interface CreateGenerationTaskInput {
@@ -712,35 +652,46 @@ function capabilitySummary(model: ImageModelDescriptor): string {
 }
 
 // ─── 任务账本(纯函数;落盘由接缝做)────────────────────────────────
+//
+// 通用那半在 `tasks.ts`(状态机 / 尝试历史 / 拒收注记 / 读写纯函数)——
+// 音乐与语音共用它(T27 / ADR-0012 的"任务队列复用图像那套")。
+// 这里只剩**图像自己的差异**:盘上路径、人话标签、以及字段形状的归一。
+
+/** 图像任务的产物类型 discriminator(T27 起,老账本没有这一字段 → 读成 'image')。 */
+export type ImageTaskKind = 'image'
+
+const IMAGE_TASK_KIND: TaskKind<GenerationTask> = {
+  file: IMAGE_TASKS_FILE,
+  label: '图像任务',
+  normalize: (raw) => ({
+    schemaVersion: TASK_SCHEMA,
+    // 老账本没有 `rejections`(T16 才加):读的时候归一成空数组,不逼人去改历史文件。
+    // `kind` 同理(T27 才加):缺省就是图像任务 —— 那时账本里只有这一种。
+    tasks: (raw.tasks ?? []).map((task) => ({ ...task, kind: 'image', rejections: task.rejections ?? [] })),
+  }),
+}
+
+/** 账本工厂要的那点差异(接缝装配时用)。 */
+export const IMAGE_TASK_KIND_DESCRIPTOR: TaskKind<GenerationTask> = IMAGE_TASK_KIND
 
 export function emptyTasksDocument(): GenerationTaskDocument {
-  return { schemaVersion: IMAGE_TASKS_SCHEMA, tasks: [] }
+  return emptyTaskDocument<GenerationTask>()
 }
 
 /** 解析账本;坏文档不静默当成空(宁可抛,让人看到 .studio 被改坏了)。 */
 export function parseTasksDocument(text: string): GenerationTaskDocument {
-  if (text.trim() === '') return emptyTasksDocument()
-  const parsed = JSON.parse(text) as Partial<GenerationTaskDocument>
-  if (parsed.schemaVersion !== IMAGE_TASKS_SCHEMA || !Array.isArray(parsed.tasks)) {
-    throw new Error(`${IMAGE_TASKS_FILE} 不是有效的任务账本(schemaVersion 应为 ${IMAGE_TASKS_SCHEMA})`)
-  }
-  // 老账本没有 `rejections`(T16 才加):读的时候归一成空数组,不逼人去改历史文件。
-  return { schemaVersion: IMAGE_TASKS_SCHEMA, tasks: parsed.tasks.map((task) => ({ ...task, rejections: task.rejections ?? [] })) }
+  return parseTaskDocument(IMAGE_TASK_KIND, text)
 }
 
 export function tasksDocument(document: GenerationTaskDocument): string {
-  return `${JSON.stringify(document, null, 2)}\n`
+  return serializeTaskDocument(document)
 }
 
 export function findTask(document: GenerationTaskDocument, id: string): GenerationTask | undefined {
-  return document.tasks.find((task) => task.id === id)
+  return findTaskIn(document, id)
 }
 
 /** 追加/替换一个任务(只动这一个;别处逐字保留)。 */
 export function upsertTask(document: GenerationTaskDocument, task: GenerationTask): GenerationTaskDocument {
-  const index = document.tasks.findIndex((entry) => entry.id === task.id)
-  const tasks = index < 0
-    ? [...document.tasks, task]
-    : document.tasks.map((entry, i) => (i === index ? task : entry))
-  return { schemaVersion: IMAGE_TASKS_SCHEMA, tasks }
+  return upsertTaskIn(document, task)
 }

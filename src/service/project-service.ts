@@ -51,12 +51,18 @@ import {
   type PublishReport, type PublishRun, type PublishView,
 } from './publish.ts'
 import {
-  IMAGE_TASKS_FILE, MAX_REJECTION_NOTE_CHARS, adapterFor, dataUrlOf, degradeInput, downloadResultImage,
+  IMAGE_TASKS_FILE, IMAGE_TASK_KIND_DESCRIPTOR, MAX_REJECTION_NOTE_CHARS, adapterFor, dataUrlOf, degradeInput, downloadResultImage,
   emptyTasksDocument, findTask, imageModels,
   parseTasksDocument, tasksDocument, upsertTask,
-  type CreateGenerationTaskInput, type GenerationTask, type GenerationAttempt, type GenerationRejection,
+  type CreateGenerationTaskInput, type GenerationTask, type GenerationTaskDocument, type GenerationAttempt, type GenerationRejection,
   type ImageChannelSettings, type ImageHttpClient,
 } from './images.ts'
+// 任务账本的**通用层**(T27):图像与音频共用"读-改-写 + 串行"那一套纪律。
+import { makeTaskLedger } from './tasks.ts'
+import {
+  AUDIO_TASK_KIND_DESCRIPTOR, AUDIO_TASKS_FILE, assertAudioOutputPath, audioModels, purposeOfPath,
+  type AudioChannelSettings, type AudioModelDescriptor, type AudioPorts, type AudioTask, type CreateAudioTaskInput,
+} from './audio-generation.ts'
 import { ABSENT, fileFingerprint, fingerprint, pathExists } from './hash.ts'
 import { WriteGateway, type ChangeEvent, type FileSnapshot, type GatewayError, type WriteLogEntry, type WriteOp, type WriteResult } from './write-gateway.ts'
 import type { WriteBatchReason } from './write-gateway.ts'
@@ -168,6 +174,12 @@ export interface ProjectServiceOptions {
    */
   images?: ImagePorts
   /**
+   * 音频生成端口(T27 / ADR-0012):音乐与语音共用的一条渠道。
+   *
+   * **缺省 = 没装配** → 音频生成如实报 `no-audio-channel`(与图像同一种态度)。
+   */
+  audio?: AudioPorts
+  /**
    * 界面模板来源(新建项目时从哪儿取 `screens.rpy` / `gui.rpy` 等)。
    *
    * 生产 = 钉版 SDK 的 `gui/game/`(随设置实时解析);快带 = 假 SDK 夹具。
@@ -201,6 +213,11 @@ export class ProjectService {
   #validator: ValidatorPort
   #playtestPorts: PlaytestPorts
   #imagePorts: ImagePorts | null
+  #audioPorts: AudioPorts | null = null
+  /** 图像任务账本(与音频账本走**同一个**工厂,只是文件不同)。 */
+  #imageLedger: ReturnType<typeof makeTaskLedger<GenerationTask>>
+  /** 音频任务账本(T27)。 */
+  #audioLedger: ReturnType<typeof makeTaskLedger<AudioTask>>
   #publishPorts: NonNullable<ProjectServiceOptions['publish']> | null
   #uiTemplate: (sdkDir: string | undefined) => Promise<{ files: Array<{ path: string; content: string }>; binaryFiles: Array<{ path: string; content: Uint8Array }> }>
   #gateways = new Map<string, Promise<WriteGateway>>()
@@ -218,8 +235,26 @@ export class ProjectService {
     this.#validator = options.validator ?? (async (project) => new FakeValidator().validate(join(project.root, 'game')))
     this.#playtestPorts = options.playtest ?? { resolveLauncher: async () => null, spawn: async () => ({ code: 0, log: '' }) }
     this.#imagePorts = options.images ?? null
+    this.#audioPorts = options.audio ?? null
     this.#publishPorts = options.publish ?? null
     this.#uiTemplate = options.uiTemplate ?? ((sdkDir) => this.#uiFilesFrom(sdkDir))
+    // 两份账本走**同一个**工厂(不同的只是文件与"形状对不对"那一条)。
+    // 读-改-写经网关(ADR-0004)→ 自动进快照(ADR-0011)。
+    const ledgerHost = {
+      read: async (projectRef: string, path: string) => await this.#readLedgerFile(projectRef, path),
+      write: async (projectRef: string, path: string, content: string, expectVersion: string) => {
+        const gateway = await this.#gatewayFor(projectRef)
+        await gateway.writeBatch([{ path, content, expectVersion }], { origin: 'agent', reason: 'queue' })
+      },
+    }
+    this.#imageLedger = makeTaskLedger<GenerationTask>(IMAGE_TASK_KIND_DESCRIPTOR, ledgerHost)
+    this.#audioLedger = makeTaskLedger<AudioTask>(AUDIO_TASK_KIND_DESCRIPTOR, ledgerHost)
+  }
+
+  /** 账本文件的原始读(网关口径:内容 + 版本戳 + 在不在)。 */
+  async #readLedgerFile(projectRef: string, path: string): Promise<{ content: string; missing: boolean; version: string }> {
+    const gateway = await this.#gatewayFor(projectRef)
+    return await gateway.read(path)
   }
 
   // ─── 注册表与模板新建(T1)────────────────────────────────────────────
@@ -1297,6 +1332,8 @@ export class ProjectService {
       const at = new Date().toISOString()
       const task: GenerationTask = {
         schemaVersion: 1,
+        // 产物类型(T27 起账本里显式写出来;老账本没有这一字段 → 读成 'image')。
+        kind: 'image',
         id: randomUUID(),
         slot,
         outputPath,
@@ -1716,35 +1753,145 @@ export class ProjectService {
   /**
    * 读-改-写任务账本。`#taskQueue` 串起来保证并发调用不会互相覆盖
    * (网关只保证单次写批的原子性,跨批的"读→算→写"要自己串)。
+   *
+   * T27 起这是**薄包装**:真正的机制在 `makeTaskLedger` 里,音乐/语音那一侧
+   * (`#audioLedger`)走**同一个**工厂 —— ADR-0012 要的是"复用",不是"再写一份像它的"。
    */
   async #mutateTasks<T>(
     projectRef: string,
-    mutate: (document: ReturnType<typeof parseTasksDocument>, writers: GenerationTask[]) => Promise<T> | T,
+    mutate: (document: GenerationTaskDocument, writers: GenerationTask[]) => Promise<T> | T,
   ): Promise<T> {
-    // 先把队尾摘下来再挂自己:这样 mutate 内部若再调 `#mutateTasks`(例如"建完立刻跑")
-    // 不会等自己 —— 嵌套调用排队等的是**前一个**调用,不是当前这个。
-    const previous = this.#taskQueue
-    let release!: () => void
-    this.#taskQueue = new Promise<void>((resolve) => { release = resolve })
-    await previous.catch(() => {})
-    try {
-      const gateway = await this.#gatewayFor(projectRef)
-      const current = await gateway.read(IMAGE_TASKS_FILE)
-      const document = current.missing ? emptyTasksDocument() : parseTasksDocument(current.content)
-      const writers: GenerationTask[] = []
-      const result = await mutate(document, writers)
-      if (writers.length > 0) {
-        let next = document
-        for (const task of writers) next = upsertTask(next, task)
-        await gateway.writeBatch(
-          [{ path: IMAGE_TASKS_FILE, content: tasksDocument(next), expectVersion: current.version }],
-          { origin: 'agent', reason: 'queue' },
-        )
-      }
-      return result
-    } finally {
-      release()
+    return await this.#imageLedger.mutate(projectRef, mutate)
+  }
+
+  /**
+   * 音频渠道的**读法**(T27):配没配、有哪些模型、每个模型声明了什么。
+   *
+   * 与 `imageChannel()` 同一个态度:**不含密钥** —— `apiKeyConfigured` 只说配没配,
+   * 不回传密钥本身(ADR-0010/0012 的硬边界)。
+   */
+  async audioChannel(): Promise<{
+    configured: boolean
+    name?: string
+    baseUrl?: string
+    apiKeyConfigured: boolean
+    models: AudioModelDescriptor[]
+  }> {
+    const channel = this.#audioPorts?.channel() ?? null
+    if (channel === null) return { configured: false, apiKeyConfigured: false, models: [] }
+    return {
+      configured: true,
+      ...(channel.name === undefined ? {} : { name: channel.name }),
+      baseUrl: channel.baseUrl,
+      apiKeyConfigured: channel.apiKey !== undefined && channel.apiKey !== '',
+      models: audioModels(channel),
     }
+  }
+
+  /** 音频任务账本(读):全部任务,最新的在前。 */
+  async audioTasks(projectRef: string): Promise<AudioTask[]> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const document = await this.#audioLedger.read(projectRef)
+    return [...document.tasks].reverse()
+  }
+
+  /**
+   * 建一个音频生成任务(T27)。
+   *
+   * **三道门如实拦**(与图像的 `createGenerationTask` 同一态度):
+   *  1. 没配渠道 → `no-audio-channel`(绝不假装能生成);
+   *  2. 模型不在目录里 → `unknown-audio-model`,并列出目录里有什么;
+   *  3. 目标路径形状不对 → `invalid-audio-path`(引擎的 searchpath 只有 `game/`,
+   *     而绝对路径会被**静默回退** —— 那是"看着生成了其实没人找得到")。
+   */
+  async createAudioTask(projectRef: string, input: CreateAudioTaskInput): Promise<AudioTask> {
+    return await this.#audioLedger.mutate(projectRef, async (document, writers) => {
+      const entry = await this.#resolve(projectRef)
+      await this.#assertPresent(entry)
+      const { channel, model } = this.#requireAudioModel(input.model)
+      const outputPath = input.outputPath.replace(/\\/g, '/')
+      try {
+        assertAudioOutputPath(outputPath)
+      } catch (error) {
+        throw new GalfreeError('invalid-audio-path', error instanceof Error ? error.message : String(error))
+      }
+      const prompt = input.prompt.trim()
+      if (prompt === '') throw new GalfreeError('empty-prompt', '提示词是空的:给一句能用的制作指令(风格/情绪/场景)')
+      const purpose = input.purpose ?? purposeOfPath(outputPath)
+      const at = new Date().toISOString()
+      const task: AudioTask = {
+        schemaVersion: 1,
+        kind: purpose,
+        id: randomUUID(),
+        purpose,
+        outputPath,
+        state: 'queued',
+        ...(channel.name === undefined ? {} : { channel: channel.name }),
+        model: model.id,
+        prompt,
+        dialogueId: input.dialogueId ?? null,
+        ...(input.format === undefined ? {} : { format: input.format }),
+        ...(input.sampleRate === undefined ? {} : { sampleRate: input.sampleRate }),
+        ...(input.loop === undefined ? {} : { loop: input.loop }),
+        ...(input.voiceId === undefined ? {} : { voiceId: input.voiceId }),
+        referenceAudio: input.referenceAudio ?? [],
+        attempts: [],
+        rejections: [],
+        createdAt: at,
+        updatedAt: at,
+      }
+      writers.push(task)
+      return task
+    })
+  }
+
+  /** 音频渠道与模型的两道门(没配 / 不在目录里都如实拒绝)。 */
+  #requireAudioModel(modelId: string): { channel: AudioChannelSettings; model: AudioModelDescriptor } {
+    const channel = this.#audioPorts?.channel() ?? null
+    if (channel === null) {
+      throw new GalfreeError('no-audio-channel', '还没有配置音频生成渠道(设置 → 插件 → GALFree):先填端点、密钥与模型目录')
+    }
+    const model = channel.models.find((candidate) => candidate.id === modelId)
+    if (model === undefined) {
+      throw new GalfreeError('unknown-audio-model', `模型「${modelId}」不在这个音频渠道的模型目录里(目录里有:${channel.models.map((candidate) => candidate.id).join(', ') || '(空)'})`, {
+        known: channel.models.map((candidate) => candidate.id),
+      })
+    }
+    return { channel, model }
+  }
+
+  /**
+   * 推进音频队列里**排队中**的任务(T27 的下一片:执行)。
+   *
+   * 与图像那条同一态度:串行、失败留在 `failed`(重试是人的动作,不是自动重试循环)。
+   */
+  async runAudioQueue(projectRef: string): Promise<AudioTask[]> {
+    const queued = (await this.audioTasks(projectRef)).filter((task) => task.state === 'queued')
+    for (const task of queued) await this.runAudioTask(projectRef, task.id)
+    const after = await this.audioTasks(projectRef)
+    return queued.map((task) => after.find((candidate) => candidate.id === task.id) ?? task)
+  }
+
+  /**
+   * 跑一个音频任务(执行那一片)。
+   *
+   * **还没接适配器**(T28/T29 的活):此刻如实报"这个协议还没实现",
+   * 而不是把任务标成成功、也不是静默什么都不做。
+   */
+  async runAudioTask(projectRef: string, id: string): Promise<AudioTask | null> {
+    return await this.#audioLedger.mutate(projectRef, (document, writers) => {
+      const task = document.tasks.find((candidate) => candidate.id === id)
+      if (task === undefined) throw new GalfreeError('unknown-task', `没有这个音频任务:${id}`)
+      const failed: AudioTask = {
+        ...task,
+        state: 'failed',
+        lastError: `还没接上「${task.model}」的协议适配器(${task.purpose})—— 见 #36(音乐)/ #37(TTS)`,
+        updatedAt: new Date().toISOString(),
+      }
+      writers.push(failed)
+      return Promise.resolve(failed)
+    })
   }
 
   #requireHuman(actor: { via: 'human' | 'agent' }): void {
