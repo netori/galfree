@@ -14,6 +14,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { GalfreeError } from './error.ts'
 import { PLAYTEST_DEFAULT_WAIT_MINUTES, PLAYTEST_MAX_WAIT_MS, PLAYTEST_TIMEOUT_MS } from './playtest.ts'
+import { COVER_TARGETS, expectedCoverSize } from './covers.ts'
 import type { ProjectService } from './project-service.ts'
 import type { BibleChapter } from './bible.ts'
 import type { SceneEdit } from './scene-form.ts'
@@ -1096,6 +1097,80 @@ export function registerGalfreeTools(
             + '如果那个游戏窗口还开着,说明它没响应中止信号 —— 请人手动关掉它。'
         }
         return `试玩未执行:${describe(error)}`
+      }
+    },
+  })))
+
+  // ─── 封面(T30 / #38):主菜单 / 游戏内菜单 / 窗口图标 ────────────────
+  //
+  // 这三张是 Ren'Py 的界面生成器**不覆盖**的那三张(`gui7/images.py` 的 `overwrite=False`);
+  // 走**同一个图像渠道与同一条任务队列** —— 所以本工具是搬运工,不另造一条管线。
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_cover_art',
+    description: [
+      "出**封面类**的图:主菜单背景 / 游戏内菜单背景 / 窗口图标(这三张正是 Ren'Py 的界面生成器**不会覆盖**的那三张)。",
+      '走**同一个图像渠道、同一条任务队列**(与素材槽出图一样):产物经写网关落盘、进快照。',
+      '`action: "targets"` 先看有哪些目标与各自的尺寸规格 —— **尺寸别猜**:菜单背景要项目分辨率的宽高比,'
+        + '图标要正方形;尺寸错了引擎不报错、只是画面歪。',
+      '`action: "create"` 建任务(要 `target` + `model` + `prompt`);`run: true` 则建完立刻跑(会真花一次上游额度)。',
+      '**出得来不等于好看**:"这封面行不行"只有人能说 —— 重 roll 与拒收注记走 `galfree_reroll_image` 那一套。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      action: { type: 'string', description: 'targets = 看有哪些目标与规格;create = 建任务(缺省)' },
+      target: { type: 'string', description: 'main_menu / game_menu / window_icon(先 action:"targets" 看规格)' },
+      model: { type: 'string', description: '图像渠道里的模型 id(先 galfree_image_channel 看目录)' },
+      prompt: { type: 'string', description: '制作指令(风格/情绪/画面;不是叙述内容)' },
+      size: { type: 'string', description: '尺寸/宽高比(模型不支持会被降级并说明)' },
+      run: { type: 'boolean', description: '建完立刻跑(缺省 false:入队,等跑队列)' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目:先建一个(galfree_create_project)。'
+      const action = String(args.action ?? 'create')
+      if (action === 'targets') {
+        return JSON.stringify({
+          targets: COVER_TARGETS.map((target) => ({
+            id: target.id,
+            path: target.path,
+            readBy: target.readBy,
+            expected: expectedCoverSize(target),
+            note: target.spec.note,
+          })),
+          note: "这三张是 Ren'Py 的界面生成器**不覆盖**的(其余界面图由引擎首次运行时生成)。"
+            + '尺寸规格从钉版 SDK 的 gui7 参数读出;挑模型用 galfree_image_channel。',
+        }, null, 2)
+      }
+      if (action !== 'create') return `不认识的 action:${action} —— 只有 targets / create。`
+      try {
+        const task = await service.createCoverTask(active, {
+          target: String(args.target ?? ''),
+          model: String(args.model ?? ''),
+          prompt: String(args.prompt ?? ''),
+          ...(typeof args.size === 'string' && args.size !== '' ? { size: args.size } : {}),
+          ...(args.run === true ? { run: true } : {}),
+        })
+        return JSON.stringify({
+          ok: task.state !== 'failed',
+          target: task.target ?? null,
+          outputPath: task.outputPath,
+          state: task.state,
+          model: task.model,
+          ...(task.degradation === undefined ? {} : { degradation: task.degradation }),
+          ...(task.lastError === undefined ? {} : { lastError: task.lastError }),
+          next: task.state === 'failed'
+            ? `没出成:${task.lastError ?? '(看账本)'}`
+            : task.state === 'awaiting-review'
+              ? '出好了 → 请人看一眼("这封面行不行"只有人能说);不满意用 galfree_reroll_image 重 roll,并把"为什么不行"记成注记。'
+              : '已入队。跑它:在工作台的「素材板」点跑队列,或用 galfree_art_queue 看队列。',
+        }, null, 2)
+      } catch (error) {
+        return `封面任务没建起来:${describe(error)}`
       }
     },
   })))

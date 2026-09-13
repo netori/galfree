@@ -772,6 +772,26 @@ export class GalfreeApi {
     return readJson(await fetch('/api/galfree/audio'))
   }
 
+  // ─── 封面类(T30 / #38)──────────────────────────────────────────────
+
+  /** 三个封面目标的**规格**(路径 + 尺寸;唯一出处是接缝的规格表,面板不写死)。 */
+  async coverTargets(): Promise<Array<{ id: string; path: string; expected: string; note: string }>> {
+    const body = await readJson<{ targets: Array<{ id: string; path: string; expected: string; note: string }> }>(
+      await fetch('/api/galfree/covers'),
+    )
+    return body.targets
+  }
+
+  /** 建一个封面任务;`run: true` 则建完立刻跑(会真花一次上游额度)。 */
+  async createCoverTask(input: { target: string; model: string; prompt: string; size?: string; run?: boolean }): Promise<unknown> {
+    const body = await readJson<{ task: unknown }>(await fetch('/api/galfree/covers/create', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    }))
+    return body.task
+  }
+
   // ─── 音频生成通道与任务队列(T27 / ADR-0012)──────────────────────────
   //
   // **注意与上面的池分开**:池是"项目里现在有哪些音频文件"(T17,派生的);

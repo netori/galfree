@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { GalfreeError } from './service/error.ts'
 import { GATE } from './service/gates.ts'
 import { createSubdirectory, describePath, listDirectories } from './service/directory-listing.ts'
+import { COVER_TARGETS, expectedCoverSize } from './service/covers.ts'
 import type { SceneEdit } from './service/scene-form.ts'
 import type { ProjectService } from './service/project-service.ts'
 import type { ImageModelCapabilities } from './service/images.ts'
@@ -148,6 +149,9 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   // 音频生成(T27):渠道处境 / 任务账本 / 建任务 / 跑队列 / 重 roll。
   // **注意 `/audio` 不在这里** —— 那是音频池(T17)的 `/audio`,两者是两件事。
   ['/audio/channel', ['GET']],
+  // 封面类目标与规格(T30)。
+  ['/covers', ['GET']],
+  ['/covers/create', ['POST']],
   ['/audio/tasks', ['GET']],
   ['/audio/tasks/create', ['POST']],
   ['/audio/tasks/run', ['POST']],
@@ -791,6 +795,37 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
       ...(typeof body.note === 'string' && body.note !== '' ? { note: body.note, via: 'human' as const } : {}),
     })
     writeJson(res, 200, { task })
+    return
+  }
+
+  // 封面类目标与规格(T30 / #38):三张"生成器不覆盖"的图,路径与尺寸都在**接缝的规格表**里
+  // (面板不写死尺寸 —— 那张表是唯一出处)。
+  if (method === 'GET' && path === '/covers') {
+    writeJson(res, 200, {
+      targets: COVER_TARGETS.map((target) => ({
+        id: target.id,
+        path: target.path,
+        readBy: target.readBy,
+        expected: expectedCoverSize(target),
+        note: target.spec.note,
+      })),
+    })
+    return
+  }
+
+  // 建一个封面任务(与素材槽那条同一个队列;`run:true` 则建完即跑)。
+  if (method === 'POST' && path === '/covers/create') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const task = await service.createCoverTask(active.id, {
+      target: String(body.target ?? ''),
+      model: String(body.model ?? ''),
+      prompt: String(body.prompt ?? ''),
+      ...(typeof body.size === 'string' && body.size !== '' ? { size: body.size } : {}),
+      ...(body.run === true ? { run: true } : {}),
+    })
+    writeJson(res, body.run === true ? 200 : 201, { task })
     return
   }
 

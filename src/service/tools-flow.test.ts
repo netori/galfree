@@ -724,6 +724,43 @@ describe('全流程工具面(T20)', () => {
     })
   })
 
+  // ── 切片 E:封面(T30 / #38)───────────────────────────────────────
+
+  describe('封面(galfree_cover_art)', () => {
+    it('targets:先给规格(路径 + 尺寸 + 谁在读),免得模型猜尺寸', async () => {
+      const out = JSON.parse(await find('galfree_cover_art').execute({ project: 'flow', action: 'targets' })) as {
+        targets: Array<{ id: string; path: string; expected: string; note: string }>
+      }
+      expect(out.targets.map((target) => target.id).sort()).toEqual(['game_menu', 'main_menu', 'window_icon'])
+      const mainMenu = out.targets.find((target) => target.id === 'main_menu')!
+      expect(mainMenu.path).toBe('game/gui/main_menu.png')
+      // 尺寸说清楚(菜单背景 = 项目分辨率;图标 = 正方形)—— 这是这一票最容易出错的点:
+      // 尺寸错了引擎不报错,只是画面歪。
+      expect(mainMenu.expected).toContain('1280×720')
+      expect(out.targets.find((target) => target.id === 'window_icon')!.expected).toMatch(/正方形/)
+    })
+
+    it('create:路径**由规格表定**(不是调用方给的),而且进的是同一个任务账本', async () => {
+      await seedScene()
+      const out = JSON.parse(await find('galfree_cover_art').execute({
+        project: 'flow', target: 'main_menu', model: 'fake-image', prompt: '雨天的天台,主视觉',
+      })) as { ok: boolean; outputPath: string; state: string; target: string }
+      expect(out.ok).toBe(true)
+      expect(out.target).toBe('main_menu')
+      expect(out.outputPath).toBe('game/gui/main_menu.png')
+      expect(out.state).toBe('queued')
+      // 与图像那条**同一份账本**(工具不另立真相源)。
+      const tasks = await service.generationTasks('flow')
+      expect(tasks.some((task) => task.outputPath === 'game/gui/main_menu.png')).toBe(true)
+    })
+
+    it('认不出的目标 → 如实拒绝并列出有哪些(不猜一个路径往上写)', async () => {
+      const out = await find('galfree_cover_art').execute({ project: 'flow', target: 'poster', model: 'fake-image', prompt: 'x' })
+      expect(out).toContain('unknown-cover-target')
+      expect(out).toMatch(/main_menu/)
+    })
+  })
+
   // ── 切片 D:试玩"卡住"这件事(#32 / T24)─────────────────────────────
   //
   // 用户报的现象:点了试玩(或 agent 调了)**长时间没回音** —— 因为工具体在

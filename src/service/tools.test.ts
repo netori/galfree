@@ -68,15 +68,17 @@ describe('agent 工具(T10)', () => {
     return registry.tools
   }
 
-  it('注册出模型看到的契约:十六个工具,参数与输出声明齐备', () => {
+  it('注册出模型看到的契约:十七个工具,参数与输出声明齐备', () => {
     const tools = register()
     // 剧本环节两个 + 美术环节(T15)五个 + 参考链回路(T16)两个 + 发布(T18)一个
-    // + 项目工作周期 / 设定集 / 场景编辑 / 音频接线 / 试玩 / 快照(T20)六个。
+    // + 项目工作周期 / 设定集 / 场景编辑 / 音频接线 / 试玩 / 快照(T20)六个
+    // + 封面(T30)一个。
     // **这份清单是显式的**:新增一个工具必须在这里露面,漏一个就红 ——
     // 于是"某个动作悄悄多了个 agent 入口"不可能没人看见(审读戳那条红线靠的就是它)。
     expect(tools.map((tool) => tool.name).sort()).toEqual([
       'galfree_art_queue',
       'galfree_character_art',
+      'galfree_cover_art',
       'galfree_create_project',
       'galfree_edit_scene',
       'galfree_fill_missing_art',

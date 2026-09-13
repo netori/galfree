@@ -74,6 +74,38 @@ export function AssetBoard({ characters, slots, api, hasProject, onChanged, onNo
   const [error, setError] = useState<string | null>(null)
   /** 出图任务账本(T15):进度与重试历史都读它 —— 与 agent 工具面同源。 */
   const [tasks, setTasks] = useState<GenerationTaskView[]>([])
+  /** 封面/主菜单/图标(T30)的草案:目标 + 模型 + 提示词。 */
+  const [coverDraft, setCoverDraft] = useState({ target: 'main_menu', model: '', prompt: '' })
+  /** 封面规格表(从接缝读;尺寸不在面板里写死 —— 那张表是唯一出处)。 */
+  const [coverTargets, setCoverTargets] = useState<Array<{ id: string; path: string; expected: string; note: string }>>([])
+
+  /** 封面:读**规格表**(路径与尺寸的唯一出处是接缝;面板不写死)。 */
+  useEffect(() => {
+    if (!hasProject) { setCoverTargets([]); return }
+    let alive = true
+    void (async () => {
+      try {
+        const specs = await api.coverTargets()
+        if (alive) setCoverTargets(specs)
+      } catch { /* 读不到规格就不显示那一段(面板主体照常) */ }
+    })()
+    return () => { alive = false }
+  }, [api, hasProject])
+
+  /** 建一个封面任务并立刻跑 —— 会真花一次上游额度,所以按钮上写明是"出图"而不是"排队"。 */
+  const createCover = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      await api.createCoverTask({ ...coverDraft, prompt: coverDraft.prompt.trim(), run: true })
+      onNotice('warn', '封面任务跑了 —— 请人看一眼("这封面行不行"只有人能说);不满意可重 roll 并记下理由。')
+      await loadTasks()
+      await onChanged()
+    } catch (cause) {
+      onNotice('bad', `封面没出成:${cause instanceof Error ? cause.message : String(cause)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const missing = slots.filter((slot) => !slot.filled)
   const awaiting = slots.filter((slot) => slot.stamp === 'stale')
@@ -133,6 +165,37 @@ export function AssetBoard({ characters, slots, api, hasProject, onChanged, onNo
               <span className={s.emptyHint}>出图由 Host 直连执行,不消耗对话回合</span>
             </div>
             <ChannelStatus api={api} hasProject={hasProject} />
+            {coverTargets.length > 0 ? (
+              // 封面 / 主菜单 / 图标(T30):这三张是 Ren'Py 的界面生成器**不覆盖**的那三张。
+              // 规格(路径与尺寸)全从接缝读 —— 面板不写死,免得两处各说一个尺寸。
+              <div className={s.form} style={{ marginBottom: 10 }}>
+                <label className={s.field}>
+                  <span className={s.fieldLabel}>封面 / 主菜单 / 图标</span>
+                  <select className={s.input} value={coverDraft.target}
+                    onChange={(event) => setCoverDraft({ ...coverDraft, target: event.target.value })}>
+                    {coverTargets.map((target) => (
+                      <option key={target.id} value={target.id}>{target.id} · {target.expected}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className={s.field}>
+                  <span className={s.fieldLabel}>模型 id</span>
+                  <input className={s.input} placeholder="见上面的渠道模型清单" value={coverDraft.model}
+                    onChange={(event) => setCoverDraft({ ...coverDraft, model: event.target.value })} />
+                </label>
+                <label className={s.field}>
+                  <span className={s.fieldLabel}>提示词(风格 / 情绪 / 画面)</span>
+                  <input className={s.input} placeholder="雨天的天台,主视觉,冷色调" value={coverDraft.prompt}
+                    onChange={(event) => setCoverDraft({ ...coverDraft, prompt: event.target.value })} />
+                </label>
+                <button type="button" className={`${s.button} ${s.primary}`}
+                  disabled={busy || coverDraft.model.trim() === '' || coverDraft.prompt.trim() === ''}
+                  onClick={() => void createCover()}
+                  title="建任务并**立刻跑** —— 会真花一次上游额度">
+                  {busy ? <Spinner /> : '出封面(立刻跑)'}
+                </button>
+              </div>
+            ) : null}
             <ArtToolbar
               api={api}
               hasProject={hasProject}
