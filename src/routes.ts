@@ -163,6 +163,8 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   // 音频生成(T27):渠道处境 / 任务账本 / 建任务 / 跑队列 / 重 roll。
   // **注意 `/audio` 不在这里** —— 那是音频池(T17)的 `/audio`,两者是两件事。
   ['/audio/channel', ['GET']],
+  // 拉音频渠道的模型清单(与图像那条 `/channel/models` 同一个出网端口,按 purpose 分流)。
+  ['/audio/channel/models', ['POST']],
   // 封面类目标与规格(T30)。
   ['/covers', ['GET']],
   ['/covers/create', ['POST']],

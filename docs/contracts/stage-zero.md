@@ -880,6 +880,11 @@ Suno 类上游给的是**音频 URL** 而不是字节,而"文本口"读不了二
 - **路由**:
   - `GET /audio/channel` → **两条**渠道的处境(`{music, voice}`,**不含密钥**;
     各自 `configured` / `models[]` 与能力声明);
+  - `POST /audio/channel/models` `{baseUrl, apiKey, purpose}` → 拉上游的**模型清单**
+    (与图像那条 `/channel/models` **共用同一个出网端口**,按 `purpose` 分流到对应的能力推断)。
+    这是"获取模型 → 勾选 → 写目录"那条路的服务端一半;密钥只用于这一次出网,不落任何地方。
+    **本机 TTS 服务没有 `/models`**(IndexTTS 那类只注册了 `/health` `/speakers` `/voices`)时
+    如实说清并**指路「手动添加模型」** —— 那不是故障,是这条路在这类服务上不存在。
   - `GET /audio/tasks` → 任务账本(最新的在前);`POST /audio/tasks/create`(201;`run:true` 则建完即跑)
     / `POST /audio/tasks/run` / `POST /audio/tasks/retry`(重 roll 与拒收注记,后者 `via:'human'`);
   - 状态码:那条渠道没配 = **503**(`no-music-channel` / `no-voice-channel`,与 `no-image-channel`
@@ -896,6 +901,24 @@ Suno 类上游给的是**音频 URL** 而不是字节,而"文本口"读不了二
 (`summarizeAudioBoard(purpose, …)`,有守卫):渠道没配好 → 先**说清是哪一条**没配,再决定给不给按钮。
 「语音批量清单」(不花额度那条路)挂在**语音那张卡**上。
 **agent 读入口**:`galfree_audio_channel`(两条渠道的配没配与目录 —— 建任务前先看它)。
+
+### 音频渠道的自动发现与能力推断(T27 续,2026-09-13)
+
+与图像那条(`discovery.ts` + `ModelPicker`)**同一套路数与同一态度**:人只填端点与密钥,
+其余能自动的都自动;自动不出来的**如实标"待确认"**,绝不凭空许诺能力
+(上游不认的请求只会失败,而那种失败本该可避免)。
+
+- **音乐那条**从聚合站的 `/models` 拉清单(`V6` / `chirp-v3-5` / 别名都有),勾选后写进 `musicModels`;
+- **语音那条**多半是**本机服务**,`/models` 往往不存在 —— 那条路主要靠面板的
+  **「手动添加模型」**(把服务名当模型 id 填进来,再勾准它能不能克隆音色、收不收参考音频);
+- **推断规则**(`audio-discovery.ts`,全是实测常识而不是猜):音乐默认**异步**
+  (聚合站多为"提交 → 轮询"),语音默认**同步**(本机服务一次 POST 拿回);
+  认不出来的模型只许它最基础的那一件事(音乐=文生音乐 / 语音=合成语音)并标 `needsConfirmation`;
+  **认错用途比认不出更坏** —— 一条音乐家族的 id 落在语音渠道上时退回保守默认并说明为什么
+  (把 Suno 的能力表按在语音上会给人一份骗人的能力表);
+- **已知家族**:Suno 类 / MusicGen 类 / MiniMax 音乐 / IndexTTS / GPT-SoVITS / fish-speech /
+  按 voice-id 的 TTS(edge-tts 一类);注意最后这一类是"**能选音色、不能克隆**"——
+  这两件事在能力表上是分开的(`voiceId` vs `voiceCloning`),混起来会让人以为换个 id 就能换嗓子;
 
 **密钥的三条不许**(AC 第五条,两个守卫各守一半):不进项目目录与账本(直接读盘断言)、
 **不进快照**(走 git 自己来证:写批留下的提交,消息与 diff 里都不含密钥明文)。
