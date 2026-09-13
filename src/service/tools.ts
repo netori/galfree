@@ -15,6 +15,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { GalfreeError } from './error.ts'
 import { PLAYTEST_DEFAULT_WAIT_MINUTES, PLAYTEST_MAX_WAIT_MS, PLAYTEST_TIMEOUT_MS } from './playtest.ts'
 import { COVER_TARGETS, expectedCoverSize } from './covers.ts'
+import { renderVoiceBatchCsv, renderVoiceBatchJson } from './voice-batch.ts'
 import type { ProjectService } from './project-service.ts'
 import type { BibleChapter } from './bible.ts'
 import type { SceneEdit } from './scene-form.ts'
@@ -1171,6 +1172,70 @@ export function registerGalfreeTools(
         }, null, 2)
       } catch (error) {
         return `封面任务没建起来:${describe(error)}`
+      }
+    },
+  })))
+
+  // ─── 语音批量清单(T29 / #37):不花上游额度的那条路 ──────────────────
+  //
+  // 为什么给它一个 agent 入口:这是"没有 TTS 渠道也能把语音做出来"的那条路 ——
+  // agent 能导出清单、能在人跑完本地工具之后导回,而**不需要**先有一家 API。
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_voice_batch',
+    description: [
+      '**语音批量清单**(不花上游额度):把每一句对白摊成"谁、哪一句、id、目标文件名",导出给本地 TTS 批量跑,再把音频按文件名收回来。',
+      '`action: "list"` 给清单(CSV 与 JSON 都在返回里;id **就是文件名** `game/voice/<id>.ogg`,与 `config.auto_voice` 同口径 —— ADR-0013)。',
+      '`action: "import"` 把 `drop_dir` 里那些按 id 命名的音频**经写网关**收进 `game/voice/`。',
+      '导回会逐条报四类:**收进来的 / 缺的 / 重复的 / 对不上 id 的** —— 静默跳过等于"以为配齐了、玩的时候没声音"。',
+      '**没有本地 TTS 也能用**:清单里就有台词原文,你把它交给任何能"文本 → 音频文件"的工具即可。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      action: { type: 'string', description: 'list = 导出清单(缺省);import = 把本地产物收回来' },
+      drop_dir: { type: 'string', description: 'import 用:本地 TTS 产出所在的**绝对目录**(文件名 = id)' },
+      format: { type: 'string', description: 'list 用:csv(缺省)或 json' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目:先建一个(galfree_create_project)。'
+      const action = String(args.action ?? 'list')
+      try {
+        if (action === 'list') {
+          const batch = await service.voiceBatch(active)
+          const format = String(args.format ?? 'csv')
+          const payload = format === 'json' ? renderVoiceBatchJson(batch) : renderVoiceBatchCsv(batch)
+          return JSON.stringify({
+            rows: batch.rows.length,
+            missingVoiceFiles: batch.missingVoiceFiles,
+            extension: batch.extension,
+            note: 'id **就是文件名**:导回时按 `<id>.<ext>` 命名即可(后缀 ogg/mp3/wav 都认)。'
+              + '已经生成过的那些在清单里标着 missing:false,不用重跑。',
+            [format === 'json' ? 'json' : 'csv']: payload,
+          }, null, 2)
+        }
+        if (action === 'import') {
+          const dropDir = String(args.drop_dir ?? '')
+          if (dropDir === '') return 'import 需要 `drop_dir`(本地 TTS 产出所在的绝对目录)。'
+          const report = await service.importVoiceFiles(active, { dropDir })
+          return JSON.stringify({
+            ok: true,
+            imported: report.imported,
+            missing: report.missing.map((row) => ({ dialogueId: row.dialogueId, scene: row.scene, text: row.text })),
+            duplicates: report.duplicates,
+            unknownFiles: report.unknownFiles,
+            next: report.missing.length === 0
+              ? '齐了 —— 语音文件都在 game/voice/ 下。**听还是靠试玩**;认可由人盖场景戳。'
+              : `还欠 ${report.missing.length} 条(见 missing)。缺的那些在试玩里就是"这一句没声音"。`,
+          }, null, 2)
+        }
+        return `不认识的 action:${action} —— 只有 list / import。`
+      } catch (error) {
+        return `语音批量清单没跑成:${describe(error)}`
       }
     },
   })))

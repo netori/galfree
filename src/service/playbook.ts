@@ -134,8 +134,8 @@ export const GALFREE_WORKFLOW: readonly WorkflowStage[] = [
   },
   {
     name: '音频',
-    what: 'BGM/SE 是**接进来的**,不是生成的:把音频文件放进 `game/`,再在场景里接线(引用是**相对 `game/` 的路径**)',
-    tools: ['galfree_wire_audio'],
+    what: 'BGM/SE 是**接进来的**,不是生成的:把音频文件放进 `game/`,再在场景里接线(引用是**相对 `game/` 的路径**);**语音**走"批量清单"那条路(导出 → 本地 TTS → 按 id 导回),不需要先有 API 渠道',
+    tools: ['galfree_wire_audio', 'galfree_voice_batch'],
     gate: { what: '池是派生的(文件丢进 `game/` 就有,不用登记),但**引用必须落地**:悬空的音频引用在板上是一条 error(定位到哪一场哪一行),发布前置也会被它拦下' },
     done: [{ path: 'audio.missing', op: 'empty' }],
     human: '试听靠试玩,认可靠人盖场景戳',

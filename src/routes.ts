@@ -9,6 +9,7 @@ import { GalfreeError } from './service/error.ts'
 import { GATE } from './service/gates.ts'
 import { createSubdirectory, describePath, listDirectories } from './service/directory-listing.ts'
 import { COVER_TARGETS, expectedCoverSize } from './service/covers.ts'
+import { renderVoiceBatchCsv, renderVoiceBatchJson } from './service/voice-batch.ts'
 import type { SceneEdit } from './service/scene-form.ts'
 import type { ProjectService } from './service/project-service.ts'
 import type { ImageModelCapabilities } from './service/images.ts'
@@ -152,6 +153,9 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   // 封面类目标与规格(T30)。
   ['/covers', ['GET']],
   ['/covers/create', ['POST']],
+  // 语音批量清单(T29):导出 / 导回。
+  ['/voice/batch', ['GET']],
+  ['/voice/import', ['POST']],
   ['/audio/tasks', ['GET']],
   ['/audio/tasks/create', ['POST']],
   ['/audio/tasks/run', ['POST']],
@@ -795,6 +799,32 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
       ...(typeof body.note === 'string' && body.note !== '' ? { note: body.note, via: 'human' as const } : {}),
     })
     writeJson(res, 200, { task })
+    return
+  }
+
+  // 语音批量清单(T29):导出(谁/哪一句/id/目标文件名)/ 导回(按 id 收回本地产物)。
+  // 这条路**不花上游额度** —— 没有 TTS 渠道也能把语音做出来。
+  if (method === 'GET' && path === '/voice/batch') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const batch = await service.voiceBatch(active.id)
+    const format = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('format')
+    writeJson(res, 200, {
+      rows: batch.rows.length,
+      missingVoiceFiles: batch.missingVoiceFiles,
+      extension: batch.extension,
+      ...(format === 'json' ? { json: renderVoiceBatchJson(batch) } : { csv: renderVoiceBatchCsv(batch) }),
+    })
+    return
+  }
+
+  if (method === 'POST' && path === '/voice/import') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const dropDir = String(body.dropDir ?? '')
+    if (dropDir === '') throw new GalfreeError('invalid-request', '需要 `dropDir`(本地 TTS 产出所在的绝对目录)')
+    writeJson(res, 200, await service.importVoiceFiles(active.id, { dropDir }))
     return
   }
 

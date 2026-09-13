@@ -947,6 +947,29 @@ describe('路由适配层(/api/galfree)', () => {
     expect((await req('/api/galfree/audio/channel', { method: 'POST' })).status).toBe(405)
   })
 
+  it('语音批量清单路由(T29):导出有四列口径、导回要 dropDir、空目录如实报"一条都没收"', async () => {
+    await freshProject()
+    // 导出:清单是**逐行**的,而且 id 就是文件名(ADR-0013 的口径)。
+    const batch = await req('/api/galfree/voice/batch')
+    expect(batch.status).toBe(200)
+    expect(batch.body.rows).toBeGreaterThan(0)
+    expect(batch.body.csv).toContain('dialogue_id')
+    expect(batch.body.csv).toContain('target_path')
+    expect(batch.body.csv).toContain('game/voice/')
+    // JSON 形态也是同一个清单(本地工具链口味不一)。
+    const asJson = await req('/api/galfree/voice/batch?format=json')
+    expect(JSON.parse(asJson.body.json).rows.length).toBe(batch.body.rows)
+
+    // 导回:缺目录 400;给一个空目录 → 一条都没收,而且**逐条报缺**(不假装成功)。
+    expect((await postJson('/api/galfree/voice/import', {})).status).toBe(400)
+    const empty = await mkdtemp(join(tmpdir(), 'galfree-t29-empty-'))
+    const report = await postJson('/api/galfree/voice/import', { dropDir: empty })
+    expect(report.status).toBe(200)
+    expect(report.body.imported).toEqual([])
+    expect(report.body.missing.length).toBe(batch.body.rows)
+    await rm(empty, { recursive: true, force: true })
+  })
+
   it('停用开关:仅 /state 可读,其余 503', async () => {
     const offline = createProjectService({ dataDir: join(dataDir, 'disabled'), uiTemplate: fakeUiTemplate(sdkDir) })
     const routes = makeRoutes({ service: offline, config: () => ({ enabled: false, defaultProjectsRoot: '' }) })

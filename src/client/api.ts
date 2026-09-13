@@ -792,6 +792,32 @@ export class GalfreeApi {
     return body.task
   }
 
+  // ─── 语音批量清单(T29 / #37):不花上游额度的那条路 ─────────────────
+
+  /** 导出清单(逐行:场景/行号/说话人/台词/id/目标文件名)。 */
+  async voiceBatch(format: 'csv' | 'json' = 'csv'): Promise<{
+    rows: number
+    missingVoiceFiles: number
+    csv?: string
+    json?: string
+  }> {
+    return readJson(await fetch(`/api/galfree/voice/batch?format=${format}`))
+  }
+
+  /** 把本地 TTS 的产物按 id 收回来(经写网关落进 `game/voice/`)。 */
+  async importVoiceFiles(dropDir: string): Promise<{
+    imported: Array<{ dialogueId: string; path: string; bytes: number }>
+    duplicates: string[]
+    unknownFiles: Array<{ name: string; path: string }>
+    missing: Array<{ dialogueId: string; scene: string; text: string }>
+  }> {
+    return readJson(await fetch('/api/galfree/voice/import', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ dropDir }),
+    }))
+  }
+
   // ─── 音频生成通道与任务队列(T27 / ADR-0012)──────────────────────────
   //
   // **注意与上面的池分开**:池是"项目里现在有哪些音频文件"(T17,派生的);

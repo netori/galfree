@@ -87,6 +87,61 @@ export function AudioCard({ api, hasProject, onNotice }: {
     }
   }
 
+  // ─── 语音批量清单(T29):不花上游额度的那条路 ─────────────────────
+  //
+  // 没有 TTS 渠道也能用:导出清单 → 交给任何"文本 → 音频文件"的工具 → 按 id 导回。
+  // 「还欠 N 条」是这里唯一要看的数 —— 缺的那些在试玩里就是"这一句没声音"。
+  const [voice, setVoice] = useState<{ rows: number; missingVoiceFiles: number } | null>(null)
+  const [dropDir, setDropDir] = useState('')
+
+  const loadVoice = useCallback(async (): Promise<void> => {
+    if (!hasProject) { setVoice(null); return }
+    try {
+      const batch = await api.voiceBatch()
+      setVoice({ rows: batch.rows, missingVoiceFiles: batch.missingVoiceFiles })
+    } catch { setVoice(null) }
+  }, [api, hasProject])
+
+  useEffect(() => { void loadVoice() }, [loadVoice])
+
+  /** 导出清单:直接塞进下载(浏览器存成文件),不经过剪贴板 —— 清单可能上百行。 */
+  const exportBatch = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      const batch = await api.voiceBatch('csv')
+      const blob = new Blob([batch.csv ?? ''], { type: 'text/csv;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = 'voice-batch.csv'
+      anchor.click()
+      URL.revokeObjectURL(url)
+      onNotice('warn', `清单导出好了(${batch.rows} 行,还欠 ${batch.missingVoiceFiles} 条)。文件名就是 id,导回时照它命名。`)
+    } catch (error) {
+      onNotice('bad', `清单导出没成:${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const importBatch = async (): Promise<void> => {
+    if (dropDir.trim() === '') return
+    setBusy(true)
+    try {
+      const report = await api.importVoiceFiles(dropDir.trim())
+      const parts = [`收进 ${report.imported.length} 条`]
+      if (report.missing.length > 0) parts.push(`还欠 ${report.missing.length} 条`)
+      if (report.duplicates.length > 0) parts.push(`重复 ${report.duplicates.length} 个`)
+      if (report.unknownFiles.length > 0) parts.push(`对不上 id 的 ${report.unknownFiles.length} 个`)
+      onNotice(report.unknownFiles.length > 0 || report.missing.length > 0 ? 'warn' : 'warn', `导入完成:${parts.join('、')}。`)
+      await loadVoice()
+    } catch (error) {
+      onNotice('bad', `导入没成:${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <section className={s.card} aria-label="音频生成" id="gf-audio-card" tabIndex={-1}>
       <div className={s.cardHead}>
@@ -121,8 +176,7 @@ export function AudioCard({ api, hasProject, onNotice }: {
               </button>
             </div>
 
-            {tasks.length === 0 ? (
-              <div className={s.empty}>
+            {tasks.length === 0 ? (              <div className={s.empty}>
                 <div className={s.emptyTitle}>还没有音频生成任务</div>
                 <div className={s.emptyHint}>
                   音乐与语音都从**任务**走:由 agent 建(galfree_* 工具)或在这里看队列。
@@ -154,6 +208,35 @@ export function AudioCard({ api, hasProject, onNotice }: {
                 {tasks.length > 20 ? <div style={{ opacity: 0.6, paddingTop: 6 }}>还有 {tasks.length - 20} 条,见账本 `.studio/audio-tasks.json`</div> : null}
               </div>
             )}
+
+            {/*
+              语音批量清单(T29):**没有 TTS 渠道也能把语音做出来**的那条路。
+              导出清单 → 交给任何"文本 → 音频文件"的工具 → 按 id 导回。
+              「还欠 N 条」是这里唯一要看的数:缺的那些在试玩里就是"这一句没声音"。
+            */}
+            {voice !== null && voice.rows > 0 ? (
+              <div className={s.form} style={{ marginTop: 12, borderTop: '1px solid var(--gf-line, #333)', paddingTop: 10 }}>
+                <div className={s.chips} style={{ marginBottom: 8 }}>
+                  <Chip tone={voice.missingVoiceFiles === 0 ? 'ok' : 'warn'} num={voice.missingVoiceFiles} dot
+                    title="还没生成语音的对白条数(清单里的 missing)">语音待生成</Chip>
+                  <span className={s.emptyHint}>共 {voice.rows} 句对白 · 文件名就是 id(`&lt;id&gt;.ogg`)</span>
+                </div>
+                <label className={s.field}>
+                  <span className={s.fieldLabel}>本地 TTS 产出目录(绝对路径;文件名 = id)</span>
+                  <input className={s.input} placeholder="D:\\tts-out" value={dropDir}
+                    onChange={(event) => setDropDir(event.target.value)} />
+                </label>
+                <button type="button" className={s.button} disabled={busy} onClick={() => void exportBatch()}
+                  title="下载 CSV 清单(场景/行号/说话人/台词/id/目标文件名)—— 台词原文就在里面,交给任何文本转语音的工具即可">
+                  {busy ? <Spinner /> : '导出清单'}
+                </button>
+                <button type="button" className={`${s.button} ${s.primary}`}
+                  disabled={busy || dropDir.trim() === ''} onClick={() => void importBatch()}
+                  title="按文件名认 id,经写网关收进 game/voice/;缺哪个、多哪个、对不上 id 的都会逐条报">
+                  导回语音
+                </button>
+              </div>
+            ) : null}
           </>
         )}
       </div>
