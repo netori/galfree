@@ -68,12 +68,12 @@ describe('agent 工具(T10)', () => {
     return registry.tools
   }
 
-  it('注册出模型看到的契约:二十一个工具,参数与输出声明齐备', () => {
+  it('注册出模型看到的契约:二十二个工具,参数与输出声明齐备', () => {
     const tools = register()
     // 剧本环节两个 + 美术环节(T15)五个 + 参考链回路(T16)两个 + 发布(T18)一个
     // + 项目工作周期 / 设定集 / 场景编辑 / 音频接线 / 试玩 / 快照(T20)六个
     // + 封面(T30)一个 + 语音批量清单(T29)一个 + 界面换皮(T31)一个 + 音频渠道(T27)一个
-    // + 声音锚(T32)一个。
+    // + 声音锚(T32)一个 + 建音频任务的入口(T33)一个。
     // **这份清单是显式的**:新增一个工具必须在这里露面,漏一个就红 ——
     // 于是"某个动作悄悄多了个 agent 入口"不可能没人看见(审读戳那条红线靠的就是它)。
     expect(tools.map((tool) => tool.name).sort()).toEqual([
@@ -84,6 +84,7 @@ describe('agent 工具(T10)', () => {
       'galfree_create_project',
       'galfree_edit_scene',
       'galfree_fill_missing_art',
+      'galfree_generate_audio',
       'galfree_generate_image',
       'galfree_generate_scene',
       'galfree_image_channel',
@@ -129,6 +130,15 @@ describe('agent 工具(T10)', () => {
     expect(anchor.description).toContain('音色库')
     // 那句"speaker 不是音色"必须出现在描述里 —— 它是这一票修掉的那个错位。
     expect(anchor.description).toContain('不是音色')
+
+    // 建音频任务的入口(T33):必填三项,而且**用途按路径判**(音乐与语音共用一条入口)。
+    const audio = tools.find((tool) => tool.name === 'galfree_generate_audio')!
+    expect(audio.parameters.required?.sort()).toEqual(['model', 'output_path', 'prompt'])
+    expect(audio.parameters.properties.loop?.type).toBe('boolean')
+    expect(audio.parameters.properties.dialogue_id?.type).toBe('string')
+    expect(audio.parameters.properties.run?.type).toBe('boolean')
+    expect(audio.description).toContain('game/voice/')
+    expect(audio.description).toContain('计费')
 
     const generate = tools.find((tool) => tool.name === 'galfree_generate_scene')!
     // 模型看到的参数契约:两个必填,其余可选。

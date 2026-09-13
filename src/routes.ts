@@ -1021,12 +1021,16 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
   }
 
   // 建一个音频生成任务(不跑:`run` 给了才跑,与图像那条同一口径)。
+  //
+  // `run` 的判定**只在接缝那一处**(T33 起的口径):路由把标志原样递下去,
+  // 不再自己补跑一次 —— 两处各判一次的话,"面板建的会跑、工具建的只入队"这种分叉迟早出现。
   if (method === 'POST' && path === '/audio/tasks/create') {
     const body = await readJsonBody(req)
     const active = await service.getActiveProject()
     if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
     const outputPath = String(body.outputPath ?? '')
     if (outputPath === '') throw new GalfreeError('invalid-audio-path', '需要 `outputPath`(项目内相对路径,如 game/audio/bgm/rain.ogg)')
+    const run = body.run === true
     const task = await service.createAudioTask(active.id, {
       outputPath,
       model: String(body.model ?? ''),
@@ -1037,13 +1041,10 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
       ...(typeof body.sampleRate === 'number' ? { sampleRate: body.sampleRate } : {}),
       ...(typeof body.loop === 'boolean' ? { loop: body.loop } : {}),
       ...(typeof body.voiceId === 'string' && body.voiceId !== '' ? { voiceId: body.voiceId } : {}),
+      run,
     })
-    if (body.run === true) {
-      // 建完立刻跑:同一个动作,不另开一条路(与图像那条 `run` 同口径)。
-      writeJson(res, 200, { task: await service.runAudioTask(active.id, task.id) })
-      return
-    }
-    writeJson(res, 201, { task })
+    // 201 = 只建了(排队中);200 = 那位已经跑过一次(live 的结果在 task 里)。
+    writeJson(res, run ? 200 : 201, { task })
     return
   }
 

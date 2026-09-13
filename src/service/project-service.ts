@@ -2170,9 +2170,14 @@ export class ProjectService {
    *  2. 模型不在**那条**渠道的目录里 → `unknown-audio-model`,并列出目录里有什么;
    *  3. 目标路径形状不对 → `invalid-audio-path`(引擎的 searchpath 只有 `game/`,
    *     而绝对路径会被**静默回退** —— 那是"看着生成了其实没人找得到")。
+   *
+   * `run: true` = 建完立刻跑(与图像的 `createGenerationTask` 同一条路数)。
+   * **T33 才补上它**:此前 `CreateAudioTaskInput.run` 只是文档里写着,接缝根本没读 ——
+   * 面板那条路由自己补跑了一次,于是"从工具面建的"永远是 queued(好在这不是静默的,
+   * 它会一直排在队里等人跑;但那是两处各判一次,迟早分叉)。
    */
   async createAudioTask(projectRef: string, input: CreateAudioTaskInput): Promise<AudioTask> {
-    return await this.#audioLedger.mutate(projectRef, async (document, writers) => {
+    const created = await this.#audioLedger.mutate(projectRef, async (document, writers) => {
       const entry = await this.#resolve(projectRef)
       await this.#assertPresent(entry)
       const outputPath = input.outputPath.replace(/\\/g, '/')
@@ -2221,6 +2226,11 @@ export class ProjectService {
       writers.push(task)
       return task
     })
+    // 建完立刻跑:在**账本那一笔落定之后**再跑(与图像那条同形;嵌套 mutate 由账本的
+    // "先把队尾摘下来再挂自己"支持,但没必要在写批里跑一次真出网)。
+    if (input.run !== true) return created
+    const ran = await this.runAudioTask(projectRef, created.id)
+    return ran ?? created
   }
 
   /**

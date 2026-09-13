@@ -1420,6 +1420,91 @@ export function registerGalfreeTools(
     },
   })))
 
+  // ─── 建音频任务的入口(T33 / #41):音乐与语音**共用一条** ────────────
+  //
+  // 为什么要有它:T28/T29 把适配器、队列、落盘、面板卡都做通了,却**没有人能"建"一条任务**
+  // (21 个工具里没有它;面板只有"跑队列/重 roll")—— 于是"自动加音乐"卡在最后一步:
+  // agent 能读渠道、能接线,但没有手去按下"生成这首曲子"。
+  //
+  // **用途由目标路径判**(`game/voice/` 下 = 语音,其余 = 音乐),与接缝的 `purposeOfPath`
+  // 同一条口径 —— 同一条入口两种产物,不靠调用方声明(声明就会漏,漏了就走错渠道)。
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_generate_audio',
+    description: [
+      '**建一条音频生成任务**(音乐或语音,**用途按目标路径判**:`game/voice/` 下 = 语音,其余 = 音乐)。',
+      '音乐:`prompt` 是给上游的**制作指令**(风格/情绪/场景,如"雨夜的天台,钢琴与弦乐,慢速"),产物落 `game/audio/…`;',
+      '语音:`prompt` 是**要念的台词原文**,`dialogue_id` 给了就按台词派生的说话人**自动携音色档案**(T32 的声音锚);',
+      '模型 id 必须属于**那条**渠道的目录(先看 `galfree_audio_channel` —— 两条目录不通用)。',
+      '`run` 缺省 **true**(立刻真跑一次);想先攒一批再跑就给 `run: false`,然后在工作台按「跑队列」一次看清条数。',
+      '**成本**:音乐单次最贵、TTS **按台词行**计费 —— 返回里的 `cost` 就是"这一跑会真发几条上游请求"。',
+      '接线是另一件事:产物落进 `game/` 之后用 `galfree_wire_audio` 接进场景;试听靠试玩,认可靠人盖场景戳。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      output_path: { type: 'string', required: true, description: '项目内相对路径(如 game/audio/bgm/rain.ogg 或 game/voice/<对话id>.ogg)' },
+      model: { type: 'string', required: true, description: '那条渠道目录里的模型 id(音乐/语音两条目录不通用)' },
+      prompt: { type: 'string', required: true, description: '音乐 = 制作指令;语音 = 要念的台词原文(不要抄叙述正文)' },
+      loop: { type: 'boolean', description: 'BGM 建议循环(只是建议,真循环由 .rpy 的 loop 决定)' },
+      dialogue_id: { type: 'string', description: '语音:对话 id(给了就自动携音色档案;见 galfree_voice_batch 的清单)' },
+      voice_id: { type: 'string', description: '语音:登记簿里的角色 id(与 dialogue_id 二选一;它是"哪把嗓子",不是服务端的 speaker)' },
+      run: { type: 'boolean', description: '是否立刻执行(缺省 true;run:false = 只入队)' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目。'
+      try {
+        const task = await service.createAudioTask(active, {
+          outputPath: String(args.output_path ?? ''),
+          model: String(args.model ?? ''),
+          prompt: String(args.prompt ?? ''),
+          ...(typeof args.loop === 'boolean' ? { loop: args.loop } : {}),
+          ...(typeof args.dialogue_id === 'string' && args.dialogue_id !== '' ? { dialogueId: args.dialogue_id } : {}),
+          ...(typeof args.voice_id === 'string' && args.voice_id !== '' ? { voiceId: args.voice_id } : {}),
+          run: args.run ?? true,
+        })
+        // **成本预览**:这一跑(跑队列)会真发几条 —— 按用途分开数,因为两张卡各跑各的。
+        const all = await service.audioTasks(active)
+        const queuedOf = (purpose: 'music' | 'voice'): number =>
+          all.filter((candidate) => candidate.purpose === purpose && candidate.state === 'queued').length
+        const queued = queuedOf(task.purpose)
+        return JSON.stringify({
+          ok: task.state === 'awaiting-review',
+          id: task.id,
+          purpose: task.purpose,
+          model: task.model,
+          state: task.state,
+          outputPath: task.outputPath,
+          degradation: task.degradation ?? null,
+          lastError: task.lastError ?? null,
+          attempts: task.attempts.length,
+          // 语音才有意义:这条用的是谁的嗓子(T32)。
+          voice: task.purpose === 'voice'
+            ? { character: task.voiceId ?? null, sample: task.voiceSample ?? null, speaker: task.voiceSpeaker ?? null }
+            : null,
+          cost: {
+            queued,
+            music: queuedOf('music'),
+            voice: queuedOf('voice'),
+            note: '跑队列会真发这么多条上游请求(音乐单次最贵;TTS 按台词行计费)—— 工作台两张卡各跑各的。',
+          },
+          next: task.state === 'awaiting-review'
+            ? `产物已落盘,用 galfree_wire_audio 接进场景(引用是**相对 game/ 的路径**);试听后由人盖场景戳。`
+            : task.state === 'failed'
+              ? `没跑成,看 lastError(上游原话)。`
+              : `已入队;跑它用工作台的「跑队列」或再调一次同一个工具(给 run: true)。`,
+        }, null, 2)
+      } catch (error) {
+        // 接缝的拒绝是**可执行的指令**(先配哪条渠道 / 模型不在目录 / 路径形状),原样交回。
+        return `音频任务未建:${describe(error)}`
+      }
+    },
+  })))
+
   // ─── 界面换皮(T31 / #39):给 Ren'Py 自带的界面生成器一组参数 ──────────
   //
   // 这一票**不是 AI 出图**:`game/gui/*.png` 那一整套是引擎自己按九宫格模板画的
