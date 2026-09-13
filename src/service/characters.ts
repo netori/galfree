@@ -39,6 +39,57 @@ export interface ReferenceImage {
   note?: string
 }
 
+/**
+ * **情感输入的中立四档**(T32)—— 与 IndexTTS 的 `emo_control_method` 是同构的,
+ * 但名字按**语义**起,不按那家服务的整数值起(别的 TTS 也能落进来):
+ *
+ *  - `follow`:情绪**跟着音色参考音频走**(IndexTTS 的缺省 = 0);
+ *  - `reference`:另给一段**情感参考音频**(= 1);
+ *  - `vector`:给一个 8 维情感向量(= 2);
+ *  - `text`:给一句情感描述文本(= 3;那家服务没开 `qwen_emo` 时会拒,见调研 §2.4)。
+ */
+export type VoiceEmotionMode = 'follow' | 'reference' | 'vector' | 'text'
+
+/** 情感输入(缺省 = 不给,用服务端自己的缺省)。 */
+export interface VoiceEmotion {
+  mode: VoiceEmotionMode
+  /** `mode: "reference"`:情感参考音频 —— **同样在服务端音色库里**按文件名找。 */
+  refSample?: string
+  /** 情感强度 0–1(IndexTTS 的 `emo_weight`/官方的 `emo_alpha`)。 */
+  weight?: number
+  /** `mode: "vector"`:8 维 `[喜, 怒, 哀, 惧, 厌恶, 低落, 惊喜, 平静]`(**必须恰好 8 个**)。 */
+  vector?: number[]
+  /** `mode: "text"`:情感描述文本。 */
+  text?: string
+}
+
+/**
+ * **音色档案**(ADR-0012 原话:"语音用同一张簿的音色档案(音色 id + 参考样本)")—— T32。
+ *
+ * 两条来自实测的硬事实(见 `docs/research-indextts-voice.md`):
+ *  1. **音色只由参考样本决定**:同路径 ⇒ 同 speaker embedding 缓存命中 ⇒ 同一把嗓子。
+ *     所以"跨场同角色同一把嗓子"的全部机制就是**这个文件名永不变**;
+ *  2. **`speaker` 不是音色**:它只选 LoRA 适配器目录(本机 `runs/` 是空的 ⇒ 只有 `default`)。
+ *     多角色只能靠**多份参考样本**,不能靠 speaker 区分。
+ */
+export interface VoiceProfile {
+  /**
+   * **参考样本**:服务端音色库(`voices/`)里的**文件名**,如 `xiao_tang.wav`。
+   *
+   * 它是文件名而不是项目内路径 —— 服务端只在**它自己的音色库**里按名解析,
+   * 送一个项目路径过去**必然**被拒。两个命名空间不许混(校验会拦)。
+   */
+  sample: string
+  /** LoRA 适配器名(IndexTTS 的 `speaker`)。缺省 = `default`(底模)。**它不是音色**。 */
+  speaker?: string
+  /** 语言(缺省由适配器给,如 ZH)。 */
+  lang?: string
+  /** 情绪怎么来(缺省 = 不给,服务端缺省通常是"跟着参考样本走")。 */
+  emotion?: VoiceEmotion
+  /** 制作备注(这段样本哪儿来的、什么情绪)。 */
+  note?: string
+}
+
 export interface CharacterRecord {
   /** 稳定 id(slug);引用与引用检查都用它。 */
   id: string
@@ -51,6 +102,11 @@ export interface CharacterRecord {
   styleAnchor?: string
   /** 参考图链(新→旧或旧→新皆可,顺序即人挑的顺序)。 */
   references: ReferenceImage[]
+  /**
+   * **音色档案**(T32):这个角色的嗓子 —— 参考样本 + 可选情感输入。
+   * 与参考图链是**同一张簿上的两条锚**:图那条锚"同一张脸",这条锚"同一把嗓子"。
+   */
+  voiceProfile?: VoiceProfile
   /** 制作备注(人写给自己的,不是叙述内容)。 */
   note?: string
 }
@@ -68,6 +124,56 @@ export const MAX_FIELD_CHARS = 600
 /** 冒号前必须是合法标识符:它是 `.rpy` 变量名的引用。 */
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 const ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
+
+/**
+ * **音色库文件名**(T32):服务端 `voices/` 里的一层文件名 —— **不是路径**。
+ *
+ * 为什么单独一条判据:参考样本与"项目内相对路径"是两个命名空间(服务端只 `os.listdir`
+ * 它自己的 `voices/`,不进子目录)。允许写路径 = 允许写一个**必然被上游拒**的值,
+ * 而那种错只会在一次真合成之后才显形(还要花一次额度)。所以拦在写入之前。
+ */
+function assertSampleName(value: string, field: string): void {
+  const bad = value.trim() === ''
+    || /[\\/]/.test(value)
+    || value.includes(':')
+    || value === '.'
+    || value === '..'
+  if (bad) {
+    throw new GalfreeError(
+      'character-invalid',
+      `${field} 要的是**服务端音色库里的文件名**(如 xiao_tang.wav),不是路径:${value || '(空)'}`
+      + ' —— 参考样本是另一个命名空间,服务端只在它自己的 voices/ 目录里按名找',
+    )
+  }
+}
+
+function assertVoiceProfile(profile: VoiceProfile): void {
+  assertSampleName(profile.sample, '音色档案的 sample')
+  if (profile.speaker !== undefined && profile.speaker !== '') assertSampleName(profile.speaker, '音色档案的 speaker(LoRA 适配器名)')
+  const emotion = profile.emotion
+  if (emotion === undefined) return
+  if (!['follow', 'reference', 'vector', 'text'].includes(emotion.mode)) {
+    throw new GalfreeError('character-invalid', `情感模式只有 follow / reference / vector / text:${String(emotion.mode)}`)
+  }
+  if (emotion.mode === 'reference') {
+    if (emotion.refSample === undefined || emotion.refSample.trim() === '') {
+      throw new GalfreeError('character-invalid', '情感模式 reference 需要 `refSample`(情感参考音频):没有它这条就落回"跟着音色样本走"了,与配置不符')
+    }
+    assertSampleName(emotion.refSample, '音色档案的情感参考音频')
+  }
+  if (emotion.mode === 'vector') {
+    const vector = emotion.vector ?? []
+    if (vector.length !== 8 || vector.some((value) => !Number.isFinite(value))) {
+      throw new GalfreeError('character-invalid', `情感向量要**恰好 8 个数**(喜/怒/哀/惧/厌恶/低落/惊喜/平静),给的是 ${vector.length} 个`)
+    }
+  }
+  if (emotion.mode === 'text' && (emotion.text === undefined || emotion.text.trim() === '')) {
+    throw new GalfreeError('character-invalid', '情感模式 text 需要 `text`(情感描述):没有它这条就是空配置')
+  }
+  if (emotion.weight !== undefined && (!Number.isFinite(emotion.weight) || emotion.weight < 0 || emotion.weight > 1)) {
+    throw new GalfreeError('character-invalid', `情感强度只在 0–1 之间(给的是 ${emotion.weight})`)
+  }
+}
 
 export async function readCharacters(root: string): Promise<CharacterRecord[]> {
   try {
@@ -108,6 +214,9 @@ export function assertCharacterValid(record: CharacterRecord): void {
     ['appearance.outfit', record.appearance.outfit],
     ['appearance.build', record.appearance.build],
     ['appearance.notes', record.appearance.notes],
+    // 音色档案也是制作信息:同样用这把尺子挡住"把台词/散文抄进登记簿"那条路。
+    ['voiceProfile.note', record.voiceProfile?.note],
+    ['voiceProfile.emotion.text', record.voiceProfile?.emotion?.text],
   ]
   for (const [field, value] of texts) {
     if (value !== undefined && value.length > MAX_FIELD_CHARS) {
@@ -122,6 +231,7 @@ export function assertCharacterValid(record: CharacterRecord): void {
       throw new GalfreeError('character-invalid', `参考图必须是项目内相对路径(不许跳出项目):${reference.path}`)
     }
   }
+  if (record.voiceProfile !== undefined) assertVoiceProfile(record.voiceProfile)
 }
 
 /** 新增或覆盖一个角色(同 id 即再认可当前设定)。纯函数,落盘交给调用方走网关。 */
