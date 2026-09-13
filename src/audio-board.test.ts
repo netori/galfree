@@ -6,7 +6,10 @@
  *     不该把语音的任务算进来 —— 点它的「跑队列」也不会去跑语音。
  */
 import { describe, expect, it } from 'vitest'
-import { audioPurposeLabel, summarizeAudioBoard, type AudioChannelFacts, type AudioTaskFacts, type AudioPurpose } from './client/audio-board.ts'
+import {
+  audioPurposeLabel, summarizeAudioBoard, summarizeVoiceAnchors,
+  type AudioChannelFacts, type AudioTaskFacts, type AudioPurpose, type VoiceAnchorFacts,
+} from './client/audio-board.ts'
 
 const channel = (over: Partial<AudioChannelFacts> = {}): AudioChannelFacts => ({
   configured: true,
@@ -74,5 +77,57 @@ describe('音频生成卡:队列处境(T27)', () => {
     const summary = summarizeAudioBoard('music', channel({ apiKeyConfigured: false }), tasks('queued', 'queued'))
     expect(summary.blockedBy).not.toBeNull()
     expect(summary.canRun).toBe(false)
+  })
+})
+
+describe('嗓子清单(T32):面板要分开报的三件事', () => {
+  const board = (over: Partial<VoiceAnchorFacts> = {}): VoiceAnchorFacts => ({
+    rows: [
+      { character: 'xiao_tang', name: '小棠', sample: 'xiao_tang.wav', inLibrary: true },
+      { character: 'ghost', name: '幽灵', sample: null, inLibrary: null },
+    ],
+    withoutProfile: ['ghost'],
+    unregisteredSpeakers: [],
+    library: { files: ['xiao_tang.wav'] },
+    ...over,
+  })
+
+  it('缺档案说的是**谁**缺(显示名,不是 id)', () => {
+    const summary = summarizeVoiceAnchors(board())
+    expect(summary.complete).toBe(false)
+    expect(summary.missing).toEqual(['幽灵'])
+    expect(summary.warning).toContain('幽灵')
+    expect(summary.warning).toContain('角色视图')
+  })
+
+  it('**没核对过库 ≠ 库里没有**:files 为 null 时不报"样本不在库里"', () => {
+    const unknown = summarizeVoiceAnchors(board({
+      rows: [{ character: 'xiao_tang', name: '小棠', sample: 'xiao_tang.wav', inLibrary: null }],
+      withoutProfile: [],
+      library: { files: null },
+    }))
+    expect(unknown.libraryKnown).toBe(false)
+    expect(unknown.notInLibrary).toEqual([])
+    expect(unknown.complete).toBe(true)
+
+    // 核对过、且库里真的没有 → 如实报(这是"跑起来才会撞 400"的那一类)。
+    const known = summarizeVoiceAnchors(board({
+      rows: [{ character: 'xiao_tang', name: '小棠', sample: 'gone.wav', inLibrary: false }],
+      withoutProfile: [],
+    }))
+    expect(known.notInLibrary).toEqual([{ name: '小棠', sample: 'gone.wav' }])
+    expect(known.warning).toContain('gone.wav')
+  })
+
+  it('剧本里的说话人没登记 → **单独报**(那是"连角色都不是",与"缺档案"不是同一件事)', () => {
+    const summary = summarizeVoiceAnchors(board({ unregisteredSpeakers: ['narrator'] }))
+    expect(summary.unregistered).toEqual(['narrator'])
+    expect(summary.warning).toContain('narrator')
+  })
+
+  it('读不到清单(没项目 / 读失败)→ 一律空着,不编一句"都齐了"', () => {
+    const summary = summarizeVoiceAnchors(null)
+    expect(summary.complete).toBe(false)
+    expect(summary.warning).toBeNull()
   })
 })

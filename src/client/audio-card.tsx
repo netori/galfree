@@ -10,9 +10,9 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import { GalfreeApi } from './api.ts'
-import type { AudioChannelView, AudioTaskView } from './api.ts'
+import type { AudioChannelView, AudioTaskView, VoiceAnchorBoardView } from './api.ts'
 import { Chip, Notice, Spinner, relativeTime } from './ui.tsx'
-import { audioPurposeLabel, summarizeAudioBoard, type AudioPurpose } from './audio-board.ts'
+import { audioPurposeLabel, summarizeAudioBoard, summarizeVoiceAnchors, type AudioPurpose } from './audio-board.ts'
 import s from './panel.module.css'
 
 /** 任务状态 → 人话 + 颜色。 */
@@ -113,6 +113,26 @@ export function AudioCard({ purpose, api, hasProject, onNotice, onChanged }: {
     }
   }
 
+  // ─── 声音锚(T32):**只有语音那张卡**带这一段 ─────────────────────────
+  //
+  // 这一票回答的是"每个角色怎么保持同一把嗓子":音色只由参考样本决定,而参考样本是
+  // **服务端音色库里的文件名**(名字见「读音色库」,改在「角色视图」)。
+  // 这里只显示处境:还有谁没有档案(那几句会听起来跟别人一样)、谁要的样本不在库里。
+  const [anchors, setAnchors] = useState<VoiceAnchorBoardView | null>(null)
+
+  const loadAnchors = useCallback(async (): Promise<void> => {
+    if (!hasProject || purpose !== 'voice') { setAnchors(null); return }
+    try {
+      setAnchors(await api.voiceAnchors())
+    } catch {
+      setAnchors(null)
+    }
+  }, [api, hasProject, purpose])
+
+  useEffect(() => { void loadAnchors() }, [loadAnchors])
+
+  const anchorSummary = purpose === 'voice' ? summarizeVoiceAnchors(anchors) : null
+
   // ─── 语音批量清单(T29):**只有语音那张卡**带这一段 ─────────────────
   //
   // 没有 TTS 渠道也能用:导出清单 → 交给任何"文本 → 音频文件"的工具 → 按 id 导回。
@@ -202,6 +222,26 @@ export function AudioCard({ purpose, api, hasProject, onNotice, onChanged }: {
               </button>
             </div>
 
+            {/* 声音锚处境(T32,只有语音这张卡):还差谁没有嗓子 —— 那几句会听起来跟别人一样。 */}
+            {anchorSummary !== null && anchors !== null ? (
+              <div className={s.chips} style={{ marginBottom: 10 }}>
+                <Chip tone={anchorSummary.missing.length === 0 ? 'ok' : 'warn'} num={anchors.rows.length}
+                  title="登记在册的角色数">
+                  角色
+                </Chip>
+                <Chip tone={anchorSummary.complete ? 'ok' : 'warn'} num={anchors.withProfile} dot
+                  title="有音色档案 = 建语音任务时会自动带上参考样本(同一把嗓子)">
+                  有嗓子
+                </Chip>
+                <span className={s.emptyHint} style={{ flex: 1 }}>
+                  {anchorSummary.warning ?? '每个角色都有自己的音色档案 —— 跨场跨批次都是同一把嗓子'}
+                </span>
+                <button type="button" className={`${s.button} ${s.ghost} ${s.tiny}`} onClick={() => void loadAnchors()}>
+                  刷新
+                </button>
+              </div>
+            ) : null}
+
             {tasks.length === 0 ? (
               <div className={s.empty}>
                 <div className={s.emptyTitle}>还没有{label.title}任务</div>
@@ -221,6 +261,14 @@ export function AudioCard({ purpose, api, hasProject, onNotice, onChanged }: {
                     <code>{task.outputPath}</code>
                     <span style={{ opacity: 0.6 }}>{task.model}</span>
                     {task.dialogueId !== null ? <span style={{ opacity: 0.6 }}>id {task.dialogueId}</span> : null}
+                    {/* **这条用的是哪段参考**(T32):同一把嗓子唯一可核对的那一栏。 */}
+                    {task.voiceSample !== undefined ? (
+                      <span title={`参考样本(服务端音色库里的文件名);角色 ${task.voiceId ?? '(未登记)'}`} style={{ opacity: 0.75 }}>
+                        音色 <code>{task.voiceSample}</code>
+                      </span>
+                    ) : task.purpose === 'voice' ? (
+                      <span style={{ color: 'var(--gf-warn, #a80)' }} title={task.degradation?.message ?? '这条没有音色档案'}>没有音色</span>
+                    ) : null}
                     <span style={{ opacity: 0.5 }}>{task.attempts.length} 次 · {relativeTime(task.updatedAt)}</span>
                     {task.state === 'failed' && task.lastError !== undefined ? (
                       <span style={{ color: 'var(--gf-bad, #c33)' }} title={task.lastError}>{task.lastError.slice(0, 60)}</span>

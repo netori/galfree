@@ -77,6 +77,31 @@ export interface CharacterDraft {
   outfit: string
 }
 
+/** 情感输入的中立四档(与 service 那一份同义;面板只渲染)。 */
+export type VoiceEmotionModeView = 'follow' | 'reference' | 'vector' | 'text'
+
+export interface VoiceEmotionView {
+  mode: VoiceEmotionModeView
+  refSample?: string
+  weight?: number
+  vector?: number[]
+  text?: string
+}
+
+/**
+ * **音色档案**(T32):一个角色的嗓子 —— 参考样本 + 可选情感输入。
+ *
+ * `sample` / `refSample` 是**服务端音色库里的文件名**(不是项目内路径):两个命名空间
+ * 不许混,服务端只在它自己的 `voices/` 里按名找。
+ */
+export interface VoiceProfileView {
+  sample: string
+  speaker?: string
+  lang?: string
+  emotion?: VoiceEmotionView
+  note?: string
+}
+
 export interface CharacterUpsertPayload {
   id: string
   name: string
@@ -84,6 +109,49 @@ export interface CharacterUpsertPayload {
   appearance: Record<string, string>
   styleAnchor?: string
   references?: Array<{ path: string; slot?: string; note?: string }>
+  /**
+   * 音色档案(T32)。**三种语义**:不给这个键 = 别动它(面板改参考链时不会冲掉嗓子);
+   * `null` = 明确清掉;给一条 = 写上去。
+   */
+  voiceProfile?: VoiceProfileView | null
+}
+
+/** 音色库里的一条处境(读音色库的返回;不含密钥)。 */
+export interface VoiceLibraryView {
+  reachable: boolean
+  health?: { status?: string; modelLoaded?: boolean; qwenEmo?: boolean }
+  /** **LoRA 适配器名**(不是音色);本机没训过 ⇒ 恒只有 `default`。 */
+  speakers?: string[]
+  /** **音色库里的文件名** —— 音色档案的 `sample` 就填这里面的一个。 */
+  voices?: string[]
+  /** 服务端的音色库目录(绝对路径):参考音频要**丢进这里**。 */
+  voiceDir?: string
+  problems: string[]
+  endpoints: string[]
+}
+
+/** 嗓子清单的一行(面板读的那一份)。 */
+export interface VoiceAnchorRowView {
+  character: string
+  name: string
+  speakerVar?: string
+  sample: string | null
+  speaker: string
+  emotion?: VoiceEmotionView
+  note?: string
+  /** 库里有没有它;`null` = **没核对过**(别渲染成"没有")。 */
+  inLibrary: boolean | null
+}
+
+export interface VoiceAnchorBoardView {
+  rows: VoiceAnchorRowView[]
+  unregisteredSpeakers: string[]
+  withProfile: number
+  withoutProfile: string[]
+  library: { files: string[] | null; dir?: string }
+  unusedSamples: string[]
+  /** 最近一次读音色库的时刻(`null` = 还没读过)。 */
+  libraryReadAt: string | null
 }
 
 /** 音频渠道处境(T27 / ADR-0012):**音乐与语音各一条**,各**不含密钥** —— 只说配没配。 */
@@ -125,6 +193,11 @@ export interface AudioTaskView {
   format?: string
   loop?: boolean
   voiceId?: string
+  /** 这条用的**参考样本**(服务端音色库里的文件名;T32)。 */
+  voiceSample?: string
+  voiceSpeaker?: string
+  voiceLang?: string
+  voiceEmotion?: VoiceEmotionView
   referenceAudio: Array<{ path: string; note?: string }>
   degradation?: { code: string; message: string; notes: string[] }
   attempts: Array<{ n: number; startedAt: string; finishedAt: string; outcome: 'ok' | 'failed'; error?: string; bytes?: number; replacedFingerprint?: string }>
@@ -506,6 +579,8 @@ export interface CharacterBoardEntryView {
   appearance: Record<string, string>
   styleAnchor?: string
   references: Array<{ path: string; slot?: string; note?: string }>
+  /** **音色档案**(T32):这个角色的嗓子(参考样本 = 服务端音色库里的文件名)。 */
+  voiceProfile?: VoiceProfileView
   note?: string
   defined: boolean
   scriptDisplayName?: string
@@ -976,6 +1051,26 @@ export class GalfreeApi {
       body: JSON.stringify(input),
     }))
     return body.task
+  }
+
+  // ─── 声音锚(T32 / #40):每个角色的嗓子 ──────────────────────────────
+  //
+  // 音色**只由参考样本决定**(实测,见 `docs/research-indextts-voice.md`),所以"同一把嗓子"
+  // = 每个角色固定一段**服务端音色库里的文件名**。这一组是面板读/写那条锚的两个入口。
+
+  /** 整部戏的嗓子清单:每个角色用的是哪段参考 + 还差谁没有 + 音色库读到过没有。 */
+  async voiceAnchors(): Promise<VoiceAnchorBoardView> {
+    return readJson<VoiceAnchorBoardView>(await fetch('/api/galfree/audio/voice/anchors'))
+  }
+
+  /**
+   * 读音色库(`GET /health` `/speakers` `/voices`)—— 不花额度,只读清单。
+   *
+   * **`voices` 才是音色**(参考样本文件名),`speakers` 是 **LoRA 适配器名**(不是音色)。
+   * 没有语音渠道 → 抛 `no-voice-channel`(面板照它说人话,不画成一个空库)。
+   */
+  async readVoiceLibrary(): Promise<VoiceLibraryView> {
+    return readJson<VoiceLibraryView>(await fetch('/api/galfree/audio/voice/library', { method: 'POST' }))
   }
 
   /** 发布前置检查(T18,纯读):能不能发、缺什么、会用到哪个输出目录。 */

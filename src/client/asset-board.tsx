@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { CharacterBoardEntry, ImageChannelView, SlotBoardEntry } from './types.ts'
-import type { CharacterDraft, GalfreeApi, GenerationTaskView } from './api.ts'
+import type { CharacterDraft, GalfreeApi, GenerationTaskView, VoiceEmotionModeView, VoiceLibraryView } from './api.ts'
 import { ArtToolbar, SlotArtActions, StateChip } from './art-actions.tsx'
 import { DifferentialBoard } from './differential-board.tsx'
 import { Chip, Notice, Spinner } from './ui.tsx'
@@ -18,6 +18,41 @@ import s from './panel.module.css'
 
 const STAMP_LABEL: Record<string, string> = {
   none: '未认可', pending: '待认可', approved: '已过审', stale: '待复审', missing: '未填',
+}
+
+/**
+ * 音色档案的表单草稿(T32)—— 全字段都是字符串(输入框的形状),
+ * 落盘前才组装成 `VoiceProfile`(数字与数组在那里解)。
+ */
+interface VoiceDraft {
+  sample: string
+  speaker: string
+  lang: string
+  mode: VoiceEmotionModeView
+  refSample: string
+  weight: string
+  vector: string
+  text: string
+  note: string
+}
+
+const EMPTY_VOICE: VoiceDraft = { sample: '', speaker: '', lang: '', mode: 'follow', refSample: '', weight: '', vector: '', text: '', note: '' }
+
+function emptyVoiceDraft(): VoiceDraft {
+  return { ...EMPTY_VOICE }
+}
+
+/** 8 维情感向量:`0,0,0,0,0,0,0,1` 这种写法(逗号/空格都认)。 */
+function parseVector(text: string): number[] {
+  return text.split(/[\s,]+/).filter((piece) => piece !== '').map((piece) => Number(piece))
+}
+
+/** 情感模式的中立说法(与 service 的 `VoiceEmotionMode` 一一对应)。 */
+const EMOTION_LABEL: Record<VoiceEmotionModeView, string> = {
+  follow: '跟着参考样本走(缺省)',
+  reference: '另给一段情感参考音频',
+  vector: '8 维情感向量',
+  text: '情感描述文本',
 }
 
 /**
@@ -384,6 +419,12 @@ function CharacterView({ characters, api, busy, onBusy, onError, onChanged }: {
   /** 正在编辑参考链的角色 id(一次只开一个:链是短列表,不需要同时开一堆)。 */
   const [chainFor, setChainFor] = useState<string | null>(null)
   const [chainText, setChainText] = useState('')
+  /** 正在改**音色档案**的角色 id(T32)—— 与参考链同一种"一次只开一个"。 */
+  const [voiceFor, setVoiceFor] = useState<string | null>(null)
+  const [voiceDraft, setVoiceDraft] = useState<VoiceDraft>(emptyVoiceDraft())
+  /** 音色库(点「读音色库」才有;没读过就是 null —— **不谎报"库里没有"**)。 */
+  const [library, setLibrary] = useState<VoiceLibraryView | null>(null)
+  const [libraryNote, setLibraryNote] = useState<string | null>(null)
 
   const save = async (): Promise<void> => {
     onBusy(true)
@@ -440,6 +481,74 @@ function CharacterView({ characters, api, busy, onBusy, onError, onChanged }: {
     }
   }
 
+  /**
+   * 读音色库(不花额度):问那台语音服务"你有哪些嗓子"。
+   *
+   * 两个可能白跑一趟的前提在这里如实说清:没配语音渠道(503)、服务没在跑(连接被拒)。
+   */
+  const loadLibrary = async (): Promise<void> => {
+    onBusy(true)
+    setLibraryNote(null)
+    try {
+      const reading = await api.readVoiceLibrary()
+      setLibrary(reading)
+      if (reading.voices === undefined) {
+        setLibraryNote('这台服务没给出 /voices 清单 —— 参考样本的文件名要自己知道(服务端的音色库目录见上)')
+      }
+    } catch (error) {
+      setLibraryNote(error instanceof Error ? error.message : String(error))
+    } finally {
+      onBusy(false)
+    }
+  }
+
+  /** 保存音色档案(或清掉:样本留空 = 清)。 */
+  const saveVoice = async (character: CharacterBoardEntry, clear: boolean): Promise<void> => {
+    onBusy(true)
+    onError(null)
+    try {
+      const sample = voiceDraft.sample.trim()
+      if (!clear && sample === '') {
+        onError('参考样本不能空:它是**服务端音色库里的文件名**(面板上「读音色库」能列出有哪些)。')
+        return
+      }
+      const vector = parseVector(voiceDraft.vector)
+      const weight = voiceDraft.weight.trim() === '' ? undefined : Number(voiceDraft.weight)
+      const emotion = clear || voiceDraft.mode === 'follow'
+        ? undefined
+        : {
+            mode: voiceDraft.mode,
+            ...(voiceDraft.mode === 'reference' ? { refSample: voiceDraft.refSample.trim() } : {}),
+            ...(voiceDraft.mode === 'vector' ? { vector } : {}),
+            ...(voiceDraft.mode === 'text' ? { text: voiceDraft.text.trim() } : {}),
+            ...(weight === undefined ? {} : { weight }),
+          }
+      await api.upsertCharacter({
+        id: character.id,
+        name: character.name,
+        ...(character.voice === undefined ? {} : { voice: character.voice }),
+        appearance: character.appearance,
+        ...(character.styleAnchor === undefined ? {} : { styleAnchor: character.styleAnchor }),
+        references: character.references,
+        voiceProfile: clear
+          ? null
+          : {
+              sample,
+              ...(voiceDraft.speaker.trim() === '' ? {} : { speaker: voiceDraft.speaker.trim() }),
+              ...(voiceDraft.lang.trim() === '' ? {} : { lang: voiceDraft.lang.trim() }),
+              ...(emotion === undefined ? {} : { emotion }),
+              ...(voiceDraft.note.trim() === '' ? {} : { note: voiceDraft.note.trim() }),
+            },
+      })
+      setVoiceFor(null)
+      await onChanged()
+    } catch (error) {
+      onError(`「${character.name}」的音色档案存不了:${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      onBusy(false)
+    }
+  }
+
   return (
     <>
       <div className={s.chips} style={{ marginBottom: 10 }}>
@@ -479,6 +588,10 @@ function CharacterView({ characters, api, busy, onBusy, onError, onChanged }: {
               {character.references.length === 0
                 ? <Chip tone="warn" title="参考链是空的:这个角色的差分只能靠 prompt 描述保持一致">参考链空</Chip>
                 : <Chip tone="ok" num={character.references.length} title={character.references.map((reference) => reference.path).join('\n')}>参考链</Chip>}
+              {/* 音色档案处境(T32):有档案 = 这个角色有**自己的一把嗓子**(建语音任务时自动带上)。 */}
+              {character.voiceProfile === undefined
+                ? <Chip tone="warn" title="没有音色档案:它的台词会用服务端缺省,听起来跟别的角色一样">缺音色档案</Chip>
+                : <Chip tone="ok" title={`参考样本:${character.voiceProfile.sample}(服务端音色库里的文件名)`}>音色</Chip>}
             </span>
             <span className={s.sceneStamp}>
               <button type="button" className={`${s.button} ${s.ghost} ${s.tiny}`} disabled={busy}
@@ -490,6 +603,27 @@ function CharacterView({ characters, api, busy, onBusy, onError, onChanged }: {
                   setChainText(character.references.map((reference) => (reference.note === undefined ? reference.path : `${reference.path} | ${reference.note}`)).join('\n'))
                 }}>
                 {chainFor === character.id ? '收起参考链' : '参考链'}
+              </button>
+              <button type="button" className={`${s.button} ${s.ghost} ${s.tiny}`} disabled={busy}
+                aria-expanded={voiceFor === character.id}
+                onClick={() => {
+                  if (voiceFor === character.id) { setVoiceFor(null); return }
+                  setVoiceFor(character.id)
+                  // 打开时把现有档案填进草稿(没有就全空)—— 与参考链同一种"所见即所存"。
+                  const profile = character.voiceProfile
+                  setVoiceDraft(profile === undefined ? emptyVoiceDraft() : {
+                    sample: profile.sample,
+                    speaker: profile.speaker ?? '',
+                    lang: profile.lang ?? '',
+                    mode: profile.emotion?.mode ?? 'follow',
+                    refSample: profile.emotion?.refSample ?? '',
+                    weight: profile.emotion?.weight === undefined ? '' : String(profile.emotion.weight),
+                    vector: profile.emotion?.vector === undefined ? '' : profile.emotion.vector.join(','),
+                    text: profile.emotion?.text ?? '',
+                    note: profile.note ?? '',
+                  })
+                }}>
+                {voiceFor === character.id ? '收起音色' : '音色档案'}
               </button>
               <button type="button" className={`${s.button} ${s.ghost} ${s.tiny}`} disabled={busy} onClick={() => {
                 onBusy(true)
@@ -518,6 +652,126 @@ function CharacterView({ characters, api, busy, onBusy, onError, onChanged }: {
                 <span className={s.formHint}>
                   链上的图是「差分的锚」:出这个角色的表情/姿势差分时会自动带上它(远端收到的是图片本体,不是项目内路径)。
                   只登记「已经出好」的那张;引用了不存在的文件会在板上如实标「缺图」。
+                </span>
+              </div>
+            </div>
+          ) : null}
+
+          {/* 音色档案(T32):这个角色用哪段参考音频 —— 与参考链并排的**第二条锚**。 */}
+          {voiceFor === character.id ? (
+            <div className={s.sceneDetail}>
+              <Notice tone="warn">
+                音色**只由参考样本决定**(实测):同一个文件名 ⇒ 同一把嗓子。样本必须是
+                **那台服务自己的音色库(`voices/`)里的文件名** —— 项目里的 `game/voice/…` 与它不是一个命名空间,
+                而那个服务**没有上传接口**,所以要人把音频文件丢进它的目录。
+              </Notice>
+              <div className={s.chips} style={{ margin: '8px 0' }}>
+                <button type="button" className={s.button} disabled={busy} onClick={() => void loadLibrary()}>
+                  {busy ? <Spinner /> : '读音色库'}
+                </button>
+                <span className={s.emptyHint} style={{ flex: 1 }}>
+                  {library === null
+                    ? '还没核对过:点左边的按钮问那台服务有哪些嗓子(不花额度)'
+                    : `读到 ${library.voices?.length ?? 0} 个参考样本、${library.speakers?.length ?? 0} 个 LoRA 名${library.voiceDir === undefined ? '' : `;库目录:${library.voiceDir}`}`}
+                </span>
+              </div>
+              {libraryNote !== null ? <div className={s.formHint} style={{ color: 'var(--gf-bad, #c33)' }}>{libraryNote}</div> : null}
+              {library !== null && library.problems.length > 0 ? (
+                <div className={s.formHint}>{library.problems.join(' / ')}</div>
+              ) : null}
+              {library !== null && library.speakers !== undefined ? (
+                <div className={s.formHint}>
+                  `speaker` 那些({library.speakers.join('、')})是 **LoRA 适配器名、不是音色** ——
+                  只有 `default` 就说明没训过说话人模型,多角色**只能靠多份参考样本**区分。
+                </div>
+              ) : null}
+              {library !== null && library.voices !== undefined && library.voices.length > 0 ? (
+                <div className={s.chips} style={{ marginBottom: 8 }}>
+                  {library.voices.slice(0, 12).map((name) => (
+                    <button key={name} type="button" className={`${s.button} ${s.ghost} ${s.tiny}`}
+                      title="用这一个当这个角色的参考样本"
+                      onClick={() => setVoiceDraft((current) => ({ ...current, sample: name }))}>
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              <div className={s.form}>
+                <label className={`${s.field} ${s.fieldTitle}`}>
+                  <span className={s.fieldLabel}>参考样本 · 音色库里的文件名</span>
+                  <input className={s.input} value={voiceDraft.sample} placeholder="xiao_tang.wav"
+                    list={library?.voices === undefined ? undefined : 'gf-voice-samples'}
+                    onChange={(e) => setVoiceDraft({ ...voiceDraft, sample: e.target.value })} />
+                </label>
+                <datalist id="gf-voice-samples">
+                  {(library?.voices ?? []).map((name) => <option key={name} value={name} />)}
+                </datalist>
+                <label className={`${s.field} ${s.fieldName}`}>
+                  <span className={s.fieldLabel}>speaker · LoRA 名(可选)</span>
+                  <input className={s.input} value={voiceDraft.speaker} placeholder="default(留空就是它)"
+                    onChange={(e) => setVoiceDraft({ ...voiceDraft, speaker: e.target.value })} />
+                </label>
+                <label className={`${s.field} ${s.fieldName}`}>
+                  <span className={s.fieldLabel}>语言 · 可选</span>
+                  <input className={s.input} value={voiceDraft.lang} placeholder="ZH"
+                    onChange={(e) => setVoiceDraft({ ...voiceDraft, lang: e.target.value })} />
+                </label>
+              </div>
+              <div className={s.form} style={{ marginTop: 6 }}>
+                <label className={`${s.field} ${s.fieldTitle}`}>
+                  <span className={s.fieldLabel}>情绪怎么来</span>
+                  <select className={s.input} value={voiceDraft.mode}
+                    onChange={(e) => setVoiceDraft({ ...voiceDraft, mode: e.target.value as VoiceEmotionModeView })}>
+                    {(Object.keys(EMOTION_LABEL) as VoiceEmotionModeView[]).map((mode) => (
+                      <option key={mode} value={mode}>{EMOTION_LABEL[mode]}</option>
+                    ))}
+                  </select>
+                </label>
+                {voiceDraft.mode === 'reference' ? (
+                  <label className={`${s.field} ${s.fieldTitle}`}>
+                    <span className={s.fieldLabel}>情感参考音频 · 同样在音色库里</span>
+                    <input className={s.input} value={voiceDraft.refSample} placeholder="xiao_tang_calm.wav"
+                      onChange={(e) => setVoiceDraft({ ...voiceDraft, refSample: e.target.value })} />
+                  </label>
+                ) : null}
+                {voiceDraft.mode === 'vector' ? (
+                  <label className={`${s.field} ${s.fieldRoot}`}>
+                    <span className={s.fieldLabel}>情感向量 · **恰好 8 个数**:喜,怒,哀,惧,厌恶,低落,惊喜,平静</span>
+                    <input className={s.input} value={voiceDraft.vector} placeholder="0,0,0,0,0,0,0,1"
+                      onChange={(e) => setVoiceDraft({ ...voiceDraft, vector: e.target.value })} />
+                  </label>
+                ) : null}
+                {voiceDraft.mode === 'text' ? (
+                  <label className={`${s.field} ${s.fieldRoot}`}>
+                    <span className={s.fieldLabel}>情感描述文本</span>
+                    <input className={s.input} value={voiceDraft.text} placeholder="平静地说"
+                      onChange={(e) => setVoiceDraft({ ...voiceDraft, text: e.target.value })} />
+                  </label>
+                ) : null}
+                {voiceDraft.mode === 'follow' ? null : (
+                  <label className={`${s.field} ${s.fieldName}`}>
+                    <span className={s.fieldLabel}>情感强度 · 0–1</span>
+                    <input className={s.input} value={voiceDraft.weight} placeholder="0.65"
+                      onChange={(e) => setVoiceDraft({ ...voiceDraft, weight: e.target.value })} />
+                  </label>
+                )}
+              </div>
+              <div className={s.form} style={{ marginTop: 6 }}>
+                <label className={`${s.field} ${s.fieldRoot}`}>
+                  <span className={s.fieldLabel}>制作备注 · 可选</span>
+                  <input className={s.input} value={voiceDraft.note} placeholder="5 秒单人干声,情绪中性"
+                    onChange={(e) => setVoiceDraft({ ...voiceDraft, note: e.target.value })} />
+                </label>
+                <button type="button" className={`${s.button} ${s.primary}`} disabled={busy} onClick={() => void saveVoice(character, false)}>
+                  {busy ? <Spinner /> : '保存音色档案'}
+                </button>
+                {character.voiceProfile === undefined ? null : (
+                  <button type="button" className={s.button} disabled={busy} onClick={() => void saveVoice(character, true)}>
+                    清掉
+                  </button>
+                )}
+                <span className={s.formHint}>
+                  换音色 = **设定改动**(不是主观认可):建语音任务时会按台词派生的说话人**自动带上**这条档案。
                 </span>
               </div>
             </div>

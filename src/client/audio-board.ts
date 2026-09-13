@@ -105,3 +105,60 @@ export function summarizeAudioBoard(purpose: AudioPurpose, channel: AudioChannel
     blockedBy,
   }
 }
+
+// ─── 声音锚(T32):这一部戏的嗓子处境 ────────────────────────────────
+
+/** 嗓子清单里面板要用的那几个字段(与 `VoiceAnchorBoard` 同源,只取渲染要的)。 */
+export interface VoiceAnchorFacts {
+  rows: Array<{ character: string; name: string; sample: string | null; inLibrary: boolean | null }>
+  /** 还没有音色档案的角色 id。 */
+  withoutProfile: string[]
+  /** 剧本里出现、登记簿里没有的说话人(悬空:它们拿不到锚)。 */
+  unregisteredSpeakers: string[]
+  library: { files: string[] | null }
+}
+
+export interface VoiceAnchorSummary {
+  /** 每个角色都有档案? */
+  complete: boolean
+  /** 还差谁(显示名;拿不到名字就用 id)。 */
+  missing: string[]
+  /** 有档案、但**核对过**库里没有它的那些(名字 + 样本名)。 */
+  notInLibrary: Array<{ name: string; sample: string }>
+  /** 剧本里的说话人没登记在册。 */
+  unregistered: string[]
+  /** 读过音色库吗(`false` = 还没核对,别把"不知道"说成"没有")。 */
+  libraryKnown: boolean
+  /** 有缺口时的一句人话(都没有 = null)。 */
+  warning: string | null
+}
+
+/**
+ * 嗓子处境 → 面板要显示的那几句。
+ *
+ * 三条分开报(不合成一个数字):**缺档案**(还差谁)、**档案要的样本不在库里**(得上游才会发现)、
+ * **说话人还没登记**(连角色都不是)。合成一个数字会让人分不清该去补哪一样。
+ */
+export function summarizeVoiceAnchors(board: VoiceAnchorFacts | null): VoiceAnchorSummary {
+  if (board === null) {
+    return { complete: false, missing: [], notInLibrary: [], unregistered: [], libraryKnown: false, warning: null }
+  }
+  const nameOf = (id: string): string => board.rows.find((row) => row.character === id)?.name ?? id
+  const missing = board.withoutProfile.map(nameOf)
+  const notInLibrary = board.rows
+    .filter((row) => row.sample !== null && row.inLibrary === false)
+    .map((row) => ({ name: row.name, sample: row.sample! }))
+  const libraryKnown = board.library.files !== null
+  const parts: string[] = []
+  if (missing.length > 0) parts.push(`${missing.length} 个角色还没有音色档案(${missing.slice(0, 3).join('、')}${missing.length > 3 ? '…' : ''})—— 那几句会用服务端缺省,听起来跟别人一样`)
+  if (notInLibrary.length > 0) parts.push(`${notInLibrary.length} 个档案要的样本不在音色库里(${notInLibrary.map((entry) => entry.sample).slice(0, 3).join('、')})`)
+  if (board.unregisteredSpeakers.length > 0) parts.push(`剧本里的说话人还没登记:${board.unregisteredSpeakers.slice(0, 3).join('、')}`)
+  return {
+    complete: missing.length === 0 && notInLibrary.length === 0 && board.unregisteredSpeakers.length === 0,
+    missing,
+    notInLibrary,
+    unregistered: board.unregisteredSpeakers,
+    libraryKnown,
+    warning: parts.length === 0 ? null : `${parts.join(';')}。到「角色视图」里每个角色记一条音色档案就能补上。`,
+  }
+}

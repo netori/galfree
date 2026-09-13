@@ -512,17 +512,28 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     const active = await service.getActiveProject()
     if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
     const id = String(body.id ?? '')
-    // **没提到的字段就保留**(T32):面板改参考链时并不重发音色档案,而 `upsertCharacter`
-    // 是**整条替换** —— 不在这里兜一下,"改一次参考链就把嗓子冲掉了"。规矩是:
-    // body 里**没有这个键** = 别动它;`voiceProfile: null` = 明确清掉。
+    // **没提到的字段就保留**(T32):这条 UPSERT 是**整条替换**,而面板/工具每一样都是
+    // 分开改的(改参考链、改嗓子、改外观…)。不在这里兜一下,"改一次嗓子就把参考链冲掉"
+    // 这类错会**静默发生**(而且要到出图没锚时才显形)。
+    // 规矩统一成一句:**body 里没有这个键 = 别动它**;给了键(哪怕是空数组/空串)才动它。
     const existing = (await service.characters(active.id)).find((character) => character.id === id)
     const voiceProfile = 'voiceProfile' in body ? voiceProfileFromInput(body.voiceProfile) : existing?.voiceProfile
+    const voice = 'voice' in body
+      ? (typeof body.voice === 'string' && body.voice !== '' ? { voice: body.voice } : {})
+      : (existing?.voice === undefined ? {} : { voice: existing.voice })
+    const name = typeof body.name === 'string' && body.name !== '' ? body.name : (existing?.name ?? '')
+    const appearance = typeof body.appearance === 'object' && body.appearance !== null
+      ? body.appearance as Record<string, string>
+      : (existing?.appearance ?? {})
+    const styleAnchor = 'styleAnchor' in body
+      ? (typeof body.styleAnchor === 'string' && body.styleAnchor !== '' ? { styleAnchor: body.styleAnchor } : {})
+      : (existing?.styleAnchor === undefined ? {} : { styleAnchor: existing.styleAnchor })
     await service.upsertCharacter(active.id, {
       id,
-      name: String(body.name ?? ''),
-      ...(typeof body.voice === 'string' && body.voice !== '' ? { voice: body.voice } : {}),
-      appearance: (typeof body.appearance === 'object' && body.appearance !== null ? body.appearance : {}) as Record<string, string>,
-      ...(typeof body.styleAnchor === 'string' && body.styleAnchor !== '' ? { styleAnchor: body.styleAnchor } : {}),
+      name,
+      ...voice,
+      appearance,
+      ...styleAnchor,
       // 参考链(T16):每条参考都带 path + 可选 slot/note —— 链上"这张从哪个槽来的、
       // 为什么挑它"是制作信息,不该在面板存一次就被抹掉。
       references: Array.isArray(body.references)
@@ -534,9 +545,8 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
               ...(typeof reference.note === 'string' && reference.note !== '' ? { note: reference.note } : {}),
             }
           })
-        : [],
+        : (existing?.references ?? []),
       ...(voiceProfile === undefined ? {} : { voiceProfile }),
-      // 备注同一条规矩:没提就保留(此前是"没提就清空")。
       ...(typeof body.note === 'string' && body.note !== ''
         ? { note: body.note }
         : (existing?.note === undefined ? {} : { note: existing.note })),
