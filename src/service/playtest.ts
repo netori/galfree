@@ -8,7 +8,7 @@
  * `start` 跳向目标场 —— 不在用户项目里塞文件(`.rpy` 是唯一真相,试玩副本不是真相源)。
  * 目标场不存在就会在启动时崩出 traceback,所以"落对了"这件事有可红的信号。
  */
-import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { GalfreeError } from './error.ts'
@@ -16,6 +16,9 @@ import { GATE } from './gates.ts'
 import { fingerprint } from './hash.ts'
 import { spawnWithLog } from './spawn-log.ts'
 import type { BranchGraph } from './rpy/dialect.ts'
+
+/** Ren'Py 的错误页写在**运行目录**里的文件名(不是 stdout —— 见 `readRunTraceback`)。 */
+export const TRACEBACK_FILE = 'traceback.txt'
 
 export interface SpawnResult {
   code: number
@@ -235,6 +238,32 @@ export const PLAYTEST_MAX_WAIT_MS = 15 * 60 * 1000
 export { KILL_GRACE_MS, waitForExit } from './spawn-log.ts'
 
 /**
+ * **本次运行写下的那份 `traceback.txt`**(Ren'Py 的错误页写的是文件,不是 stdout)。
+ *
+ * 为什么要有它(2026-09-13 真机踩到,并且当时把证据弄丢了):游戏里弹了错误页、
+ * 退出码是 1,而插件报的是 `traceback: null` —— 因为 Ren'Py 把 traceback **写进运行目录**,
+ * 而进程日志里一个字都没有。`from:` 试玩又跑在**临时副本**里,副本跑完按设计被删
+ * ⇒ 证据被销毁,只剩一句"没有 traceback,看退出码"。
+ *
+ * 判据是**时间**:只有比这次启动**新**的那份才算数(不然上一次的旧 traceback 会被当成本次的结果 ——
+ * 那种假事实比没有更坏)。读不到就是 null(如实:这一次没有留下错误页)。
+ */
+export async function readRunTraceback(root: string, sinceMs: number, limit = 8000): Promise<string | null> {
+  if (root.trim() === '') return null
+  const file = join(root, TRACEBACK_FILE)
+  try {
+    const info = await stat(file)
+    // 宽限 1 秒:文件系统时间戳精度、以及"启动瞬间就崩"的那种情形。
+    if (info.mtimeMs < sinceMs - 1000) return null
+    const text = await readFile(file, 'utf8')
+    if (text.trim() === '') return null
+    return text.length <= limit ? text : `${text.slice(0, limit)}…(截断)`
+  } catch {
+    return null
+  }
+}
+
+/**
  * 真 spawn 实现(Host 装配用):启动游戏进程,退出后回传合并日志。
  *
  * 三条实测教训(都在这行代码上踩过):
@@ -245,6 +274,10 @@ export { KILL_GRACE_MS, waitForExit } from './spawn-log.ts'
  *     等它退出 —— 面板卡在"试玩中",还会留下僵进程。到点杀掉并如实报"等超时"。
  *  3. **必须观察取消信号**(T24 / #32):同上,但触发者是"取消这一轮对话/点面板的取消"
  *     —— 那时要**立刻**杀掉进程并回传 `aborted`,不能等超时上限(用户报的"卡住"就是这个)。
+ *
+ * 第 4 条(2026-09-13 补):**退出后要去看运行目录里那份 `traceback.txt`** ——
+ * Ren'Py 的错误页写文件不写 stdout,而 `from:` 试玩跑在临时副本里(马上要被删)。
+ * 不读它,等于"游戏里报了错、我们只会说没有 traceback"。
  */
 export async function realSpawn(
   launcher: string,
@@ -260,13 +293,21 @@ export async function realSpawn(
   const args = options.omitProjectArg === true
     ? (process.env.GALFREE_TEST_SRC === undefined ? [] : ['-e', process.env.GALFREE_TEST_SRC])
     : [projectRoot]
-  return await spawnWithLog(launcher, args, {
+  const startedAt = Date.now()
+  const result = await spawnWithLog(launcher, args, {
     timeoutMs,
     // windowsHide 必须 false:游戏窗口要出现在用户屏幕上(见 spawn-log.ts 的说明)。
     windowsHide: false,
     timeoutNote: `[GALFree] 试玩等待超时(${Math.round(timeoutMs / 1000)} 秒),已中止游戏进程。`,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   })
+  // 进程已经退出、副本**还没被删**:这一刻把错误页那份文件读到日志里(第 4 条教训)。
+  const traceback = await readRunTraceback(projectRoot, startedAt)
+  if (traceback === null) return result
+  return {
+    ...result,
+    log: `${result.log}\n--- GALFree:运行目录里的 ${TRACEBACK_FILE}(Ren'Py 错误页写的那一份) ---\n${traceback}\n`,
+  }
 }
 
 /**

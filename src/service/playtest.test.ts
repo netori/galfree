@@ -4,13 +4,13 @@
  * 技术通过 = 推导(日志干净/退出码),不是人盖;"玩过了、行"才是审读戳。
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { writeFile } from 'node:fs/promises'
+import { utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
 import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 import type { SpawnResult } from './playtest.ts'
-import { realSpawn, waitForExit } from './playtest.ts'
+import { readRunTraceback, realSpawn, waitForExit } from './playtest.ts'
 
 describe('试玩控制(T7,假 spawn)', () => {
   /**
@@ -187,6 +187,45 @@ describe('试玩控制(T7,假 spawn)', () => {
     expect(result.timedOut).toBe(false)
     expect(result.aborted).toBe(false)
     expect(result.elapsedMs).toBeGreaterThanOrEqual(0)
+  })
+
+  // ─── 错误页那份文件(2026-09-13 真机踩到:游戏报了错,插件说没有 traceback)──
+
+  describe('运行目录里的 traceback.txt(Ren' + "'" + 'Py 的错误页写文件,不写 stdout)', () => {
+    it('**本次**写的那份读得到(进程退出、副本被删之前的那一瞬间)', async () => {
+      const root = await makeTempDir('galfree-tb-')
+      await writeFile(join(root, 'traceback.txt'), 'I\'m sorry, but an uncaught exception occurred.\n\n-- Full Traceback ---\nException: 例子\n', 'utf8')
+      const text = await readRunTraceback(root, Date.now() - 5_000)
+      expect(text).toContain('Full Traceback')
+      expect(text).toContain('例子')
+    })
+
+    it('**上一次**留下的旧文件不算数(那种假事实比"没有"更坏)', async () => {
+      const root = await makeTempDir('galfree-tb-old-')
+      const file = join(root, 'traceback.txt')
+      await writeFile(file, '上一次的 traceback', 'utf8')
+      // 把 mtime 挪到 10 分钟前,再假装"这次是刚刚启动的"。
+      const past = new Date(Date.now() - 10 * 60 * 1000)
+      await utimes(file, past, past)
+      expect(await readRunTraceback(root, Date.now())).toBeNull()
+    })
+
+    it('没有文件 / 空文件 / 空目录路径 → null(如实:这一次没留下错误页)', async () => {
+      const root = await makeTempDir('galfree-tb-none-')
+      expect(await readRunTraceback(root, 0)).toBeNull()
+      await writeFile(join(root, 'traceback.txt'), '   \n', 'utf8')
+      expect(await readRunTraceback(root, 0)).toBeNull()
+      expect(await readRunTraceback('', 0)).toBeNull()
+    })
+
+    it('太长就截断(它在日志里,不能把一条失败撑成几 MB)', async () => {
+      const root = await makeTempDir('galfree-tb-long-')
+      await writeFile(join(root, 'traceback.txt'), 'x'.repeat(20_000), 'utf8')
+      const text = await readRunTraceback(root, Date.now() - 1_000, 500)
+      expect(text).not.toBeNull()
+      expect(text!.length).toBeLessThan(600)
+      expect(text).toContain('截断')
+    })
   })
 
   // ─── 接缝:取消是**协作式**的,试玩这条必须自己观察信号(T24 / #32)───
