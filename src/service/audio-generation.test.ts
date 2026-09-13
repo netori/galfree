@@ -289,5 +289,41 @@ describe('音频生成通道骨架(T27)', () => {
       expect(noted!.rejections).toHaveLength(1)
       expect(noted!.rejections[0]).toMatchObject({ note: '太吵了,钢琴轻一点', via: 'human' })
     })
+
+    it('密钥**不进快照**:写批留下的 git 提交里,消息与 diff 都不含它', async () => {
+      // AC 第五条的另一半。账本那一半已经验过(直接读盘);这一半要真去看**快照历史** ——
+      // 快照就是项目目录的 git 提交,所以"密钥没混进写批"这件事可以用 git 自己来证。
+      const bytes = new Uint8Array([1, 1, 2, 2, 3])
+      registerAudioAdapter({
+        id: 'sync-http',
+        buildRequest: (input) => ({
+          request: {
+            url: `${input.channel.baseUrl}/music_generation`,
+            method: 'POST',
+            // 密钥当然**要**出现在请求头里(否则上游不认);它只是不能落在项目里。
+            headers: { authorization: `Bearer ${input.channel.apiKey ?? ''}` },
+            body: '{}',
+          },
+          adapter: 'sync-http',
+        }),
+        onSubmit: () => ({ kind: 'bytes', bytes, contentType: 'audio/ogg' }),
+      })
+      const task = await service.createAudioTask('audio', {
+        outputPath: 'game/audio/bgm/s.ogg', model: 'music-3.0', prompt: '探针',
+      })
+      await service.runAudioTask('audio', task.id)
+
+      for (const path of ['.studio/audio-tasks.json', 'game/audio/bgm/s.ogg']) {
+        const history = await service.snapshotHistory('audio', path)
+        expect(history.length).toBeGreaterThan(0)
+        for (const entry of history) {
+          // 提交消息里不能有(消息里塞了 `channel:<名>` 这类上下文,正是容易漏的地方)。
+          expect(entry.subject).not.toContain('sk-audio-secret')
+          // 内容 diff 里也不能有(账本是文本,产物是二进制 —— 两条都扫)。
+          const diff = await service.snapshotDiff('audio', path, `${entry.commit}^`, entry.commit)
+          expect(diff).not.toContain('sk-audio-secret')
+        }
+      }
+    })
   })
 })
