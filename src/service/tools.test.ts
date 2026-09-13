@@ -141,6 +141,16 @@ describe('agent 工具(T10)', () => {
     expect(audio.description).toContain('game/voice/')
     expect(audio.description).toContain('计费')
 
+    // **渠道那个工具必须指路**(2026-09-13 真机教训:另一个会话的 agent 读完渠道就下了
+    // "渠道配好 ≠ 我能调用"的结论 —— 它手上其实有这个工具,只是没有任何一处告诉它该调哪个)。
+    const channels = tools.find((tool) => tool.name === 'galfree_audio_channel')!
+    expect(channels.description).toContain('galfree_generate_audio')
+    expect(channels.description).toContain('galfree_audio_queue')
+    expect(channels.description).toContain('/api/galfree/*')
+    // 接线那条也点名"生成那一半"用哪个工具(同一个教训的另一处)。
+    const wire = tools.find((tool) => tool.name === 'galfree_wire_audio')!
+    expect(wire.description).toContain('galfree_generate_audio')
+
     const generate = tools.find((tool) => tool.name === 'galfree_generate_scene')!
     // 模型看到的参数契约:两个必填,其余可选。
     expect(generate.parameters.type).toBe('object')

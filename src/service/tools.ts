@@ -898,7 +898,7 @@ export function registerGalfreeTools(
   disposers.push(ctx.tools.register(defineTool({
     name: 'galfree_wire_audio',
     description: [
-      '音频:看池 / 接线 / 停声道。**接线**这一半是把文件接进来(池是派生的:文件在 `game/` 下就有它);**生成**那一半走 galfree_audio_channel 看渠道。',
+      '音频:看池 / 接线 / 停声道。**接线**这一半是把文件接进来(池是派生的:文件在 `game/` 下就有它);**生成**那一半:先 `galfree_audio_channel` 看渠道,再 `galfree_generate_audio` 建任务(`galfree_audio_queue` 读/跑/重 roll)。',
       '**pool** 列 `game/` 下的音频文件(池是派生的:人把文件丢进去就有它,删掉就没了)与引用处境。',
       '**wire / stop** 就是往场景里写一行 `play music "audio/rain.ogg" loop` / `stop music` —— 引用是',
       '**相对 `game/` 的路径**。写完当场把池与引用处境报回来:文件不在池里会**立刻**显示成悬空',
@@ -1257,6 +1257,9 @@ export function registerGalfreeTools(
       '读**两条**音频生成渠道的处境:音乐一条、语音(TTS)一条(配没配、有哪些模型、每个模型声明了什么能力)。',
       '**建音频任务之前先看这个**:模型的 id 必须属于**那条**渠道的目录 —— 两条目录不通用',
       '(把音乐模型 id 递到语音那条会被如实拒绝)。',
+      '**渠道配好就能生成**:建任务用 `galfree_generate_audio`(音乐与语音共用一条入口),',
+      '读 / 跑 / 重 roll 用 `galfree_audio_queue` —— 不用、也**别去**调 `/api/galfree/*` 那族 HTTP 路由',
+      '(它们只服务工作台面板,宿主会把非面板的请求挡在门外)。',
       '**不含密钥**:只说配没配。没配时照着返回里的 `where` 去设置那一段填(音乐与语音是两段)。',
       '语音还有一条**不花额度**的路:没有 TTS 渠道也能做 —— 用 `galfree_voice_batch` 导出清单,本地工具跑完再按 id 导回。',
     ].join(' '),
@@ -1268,6 +1271,11 @@ export function registerGalfreeTools(
     async execute() {
       try {
         const channels = await service.audioChannels()
+        // **下一步用哪个工具**要写在返回里(2026-09-13 真机教训):另一个会话的 agent 读完这份渠道,
+        // 得出"渠道配好 ≠ 我能调用"的结论 —— 它手上其实**有**生成工具,只是没有任何一处告诉它。
+        const howTo = '建任务:galfree_generate_audio(output_path / model / prompt;run 缺省 true)\n'
+          + '读·跑·重 roll:galfree_audio_queue(action: list / run / retry)\n'
+          + '接线:galfree_wire_audio —— 产物落进 game/ 之后用相对 game/ 的路径接进场景'
         const view = (purpose: 'music' | 'voice') => {
           const channel = channels[purpose]
           const label = purpose === 'music' ? '音乐生成' : '语音(TTS)生成'
@@ -1285,9 +1293,15 @@ export function registerGalfreeTools(
             note: channel.configured
               ? `${label}渠道配好了:${channel.models.length} 个模型`
               : `还没配${label}渠道 —— 建那一类任务会被如实拒绝(不假装能生成)`,
+            ...(channel.configured && channel.models.length > 0 ? { howTo } : {}),
           }
         }
-        return JSON.stringify({ music: view('music'), voice: view('voice') }, null, 2)
+        return JSON.stringify({
+          music: view('music'),
+          voice: view('voice'),
+          // 就算两条都没配也把话说完:配好之后该用哪个工具,不让人(和 agent)去猜。
+          next: '渠道配好之后:`galfree_generate_audio` 建任务 → `galfree_audio_queue` 读/跑/重 roll → 产物落 game/ → `galfree_wire_audio` 接进场景。**不要**去调 /api/galfree/* 那族 HTTP 路由。',
+        }, null, 2)
       } catch (error) {
         return `读不到音频渠道:${describe(error)}`
       }
