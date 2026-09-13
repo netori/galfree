@@ -40,8 +40,10 @@ describe('声音锚:自动携链(T32)', () => {
   let projectsRoot: string
   let service: ProjectService
   let wavPath: string
-  /** 假上游收到的每一个请求(空数组 = 一个都没发出去)。 */
+  /** 假上游收到的**合成请求**(空数组 = 一个都没发出去)。 */
   let sent: Array<{ url: string; method: string; body: string }>
+  /** 读音色库那三条 GET(与合成请求分开记:它们不花额度,也不该混进"发了几条"里)。 */
+  let libraryCalls: string[]
 
   beforeEach(async () => {
     sdkDir = await makeFakeSdk()
@@ -52,6 +54,7 @@ describe('声音锚:自动携链(T32)', () => {
     await mkdir(wavDir, { recursive: true })
     await writeFile(wavPath, Buffer.from('RIFF-fake'))
     sent = []
+    libraryCalls = []
     registerAudioAdapter(createIndexttsAdapter())
     service = createProjectService({
       dataDir,
@@ -60,6 +63,13 @@ describe('声音锚:自动携链(T32)', () => {
         // 出网口是**注入**的:请求被记下来,一个字节都没真出去。
         http: {
           send: async (request: AudioHttpRequest) => {
+            if (request.url.endsWith('/health') || request.url.endsWith('/speakers') || request.url.endsWith('/voices')) {
+              libraryCalls.push(request.url)
+              if (request.method !== 'GET') throw new Error(`读音色库只发 GET,收到 ${request.method}`)
+              if (request.url.endsWith('/health')) return { status: 200, text: JSON.stringify({ status: 'ok', qwen_emo: false }) }
+              if (request.url.endsWith('/speakers')) return { status: 200, text: JSON.stringify({ speakers: ['default'] }) }
+              return { status: 200, text: JSON.stringify({ voices: ['xiao_tang.wav'], dir: 'X:/tts/voices' }) }
+            }
             sent.push({ url: request.url, method: request.method, body: request.body })
             return { status: 200, text: JSON.stringify({ ok: true, path: wavPath, filename: 'out.wav' }) }
           },
@@ -237,5 +247,98 @@ describe('声音锚:自动携链(T32)', () => {
     expect(task.voiceSample).toBe('xiao_tang_whisper.wav')
     await service.runAudioTask('anchor', task.id)
     expect(bodyOf(0).audio).toBe('xiao_tang_whisper.wav')
+  })
+})
+
+describe('嗓子清单与音色库(T32)', () => {
+  let sdkDir: string
+  let dataDir: string
+  let projectsRoot: string
+  let service: ProjectService
+  let sent: Array<{ url: string; method: string; body: string }>
+  let libraryCalls: string[]
+
+  beforeEach(async () => {
+    sdkDir = await makeFakeSdk()
+    dataDir = await makeTempDir('galfree-t32b-data-')
+    projectsRoot = await makeTempDir('galfree-t32b-projects-')
+    sent = []
+    libraryCalls = []
+    service = createProjectService({
+      dataDir,
+      uiTemplate: fakeUiTemplate(sdkDir),
+      audio: {
+        http: {
+          send: async (request: AudioHttpRequest) => {
+            libraryCalls.push(request.url)
+            if (request.url.endsWith('/health')) return { status: 200, text: JSON.stringify({ status: 'ok', model_loaded: false, qwen_emo: false }) }
+            if (request.url.endsWith('/speakers')) return { status: 200, text: JSON.stringify({ speakers: ['default'] }) }
+            return { status: 200, text: JSON.stringify({ voices: ['xiao_tang.wav', 'nobody_uses_me.mp3'], dir: 'X:/tts/voices' }) }
+          },
+        },
+        channel: () => ({
+          name: 'indextts-local',
+          baseUrl: 'http://tts.local',
+          models: [{
+            id: 'indextts-2.5', purpose: 'voice', adapter: 'sync-http',
+            capabilities: {
+              textToMusic: false, instrumental: false, lyrics: false, audioReference: true,
+              textToSpeech: true, voiceCloning: true, voiceId: true,
+            },
+          }],
+        }),
+      },
+    })
+    await service.createProject({ projectsRoot, name: 'board', title: undefined })
+    const script = await service.readProjectFile('board', 'game/script.rpy')
+    await service.writeProjectFiles('board', [{ path: 'game/script.rpy', content: SCRIPT, expectVersion: script.version }], { origin: 'agent', reason: 'scenario' })
+    await service.upsertCharacter('board', {
+      id: 'xiao_tang', name: '小棠', voice: 'xiao_tang', appearance: {}, references: [],
+      voiceProfile: { sample: 'xiao_tang.wav' },
+    })
+    await service.upsertCharacter('board', { id: 'ghost', name: '幽灵', voice: 'ghost', appearance: {}, references: [] })
+    void sent
+  })
+
+  afterEach(async () => {
+    await service.dispose()
+    clearAudioAdapters()
+    await cleanupTempDirs()
+  })
+
+  it('**没核对过 ≠ 库里没有**:没点过「读音色库」时清单上的 `files` 是 null', async () => {
+    const board = await service.voiceAnchors('board')
+    expect(board.library.files).toBeNull()
+    expect(board.rows.find((row) => row.character === 'xiao_tang')!.inLibrary).toBeNull()
+    expect(board.withoutProfile).toEqual(['ghost'])
+    // 剧本里的说话人 `ghost` 在登记簿里(有它的条目),所以"未登记"是空的。
+    expect(board.unregisteredSpeakers).toEqual([])
+  })
+
+  it('读音色库 → 三条 GET 各一次;清单立刻能核对"库里有它吗"', async () => {
+    const reading = await service.readVoiceLibrary('board')
+    expect(reading.voices).toEqual(['xiao_tang.wav', 'nobody_uses_me.mp3'])
+    expect(reading.voiceDir).toBe('X:/tts/voices')
+    expect(libraryCalls.map((url) => url.replace('http://tts.local', ''))).toEqual(['/health', '/speakers', '/voices'])
+
+    const board = await service.voiceAnchors('board')
+    expect(board.library.files).toEqual(['xiao_tang.wav', 'nobody_uses_me.mp3'])
+    expect(board.library.dir).toBe('X:/tts/voices')
+    expect(board.rows.find((row) => row.character === 'xiao_tang')!.inLibrary).toBe(true)
+    // 库里有、没人用的那个也报出来(信息,不是错误)。
+    expect(board.unusedSamples).toEqual(['nobody_uses_me.mp3'])
+    expect(service.voiceLibrary()?.at).toBeTruthy()
+  })
+
+  it('没配语音渠道 → 读音色库如实拒绝(`no-voice-channel`),不是"空库"', async () => {
+    const bare = createProjectService({
+      dataDir: `${dataDir}-bare`,
+      uiTemplate: fakeUiTemplate(sdkDir),
+      audio: { http: { send: async () => ({ status: 200, text: '{}' }) }, channel: () => null },
+    })
+    await bare.createProject({ projectsRoot, name: 'bare', title: undefined })
+    await expect(bare.readVoiceLibrary('bare')).rejects.toThrow(/语音\(TTS\)渠道/)
+    expect(await bare.voiceLibrary()).toBeNull()
+    await bare.dispose()
   })
 })

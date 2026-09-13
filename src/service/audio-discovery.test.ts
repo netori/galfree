@@ -10,7 +10,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
-  audioModelsToCatalogJson, discoverAudioModels, inferAudioCapabilities, NO_AUDIO_CAPS,
+  audioModelsToCatalogJson, discoverAudioModels, inferAudioCapabilities, NO_AUDIO_CAPS, readVoiceLibrary,
 } from './audio-discovery.ts'
 
 /** 假上游:回一份 OpenAI 形状的 `/models`。 */
@@ -138,5 +138,65 @@ describe('音频渠道的自动发现(T27 续)', () => {
       { id: 'indextts-2.5', capabilities: { ...NO_AUDIO_CAPS, textToSpeech: true } },
     ])) as Array<Record<string, unknown>>
     expect(entry).toMatchObject({ purpose: 'voice', adapter: 'sync-http' })
+  })
+})
+
+describe('读音色库(T32):/health + /speakers + /voices', () => {
+  /** 照 IndexTTS 那份 `app_api.py` 的三个读法回话的假服务。 */
+  const indextts = (over: { voicesStatus?: number } = {}) => {
+    const calls: string[] = []
+    return {
+      calls,
+      send: async (request: { url: string; method: string; body: string }) => {
+        calls.push(request.url)
+        // GET **不能带 body**(生产那份出网口按方法决定;这里守一句:无脑带 body 会让 GET 整个失败)。
+        if (request.method !== 'GET') throw new Error(`读音色库只发 GET,收到 ${request.method}`)
+        if (request.url.endsWith('/health')) return { status: 200, text: JSON.stringify({ status: 'ok', model_loaded: true, qwen_emo: false }) }
+        if (request.url.endsWith('/speakers')) return { status: 200, text: JSON.stringify({ speakers: ['default'] }) }
+        if (request.url.endsWith('/voices')) {
+          if (over.voicesStatus !== undefined) return { status: over.voicesStatus, text: JSON.stringify({ detail: 'Not Found' }) }
+          return { status: 200, text: JSON.stringify({ voices: ['xiao_tang.wav', '测试参考音频.mp3'], dir: 'F:\\creative_app\\yzy-index-tts-2.5-260824\\voices' }) }
+        }
+        return { status: 404, text: JSON.stringify({ detail: 'Not Found' }) }
+      },
+    }
+  }
+
+  it('三个端点各答各的:音色(voices)+ 目录 + LoRA 名(speakers)+ 服务状态', async () => {
+    const http = indextts()
+    const reading = await readVoiceLibrary(http, { baseUrl: 'http://127.0.0.1:9005/' })
+    expect(reading.reachable).toBe(true)
+    expect(reading.voices).toEqual(['xiao_tang.wav', '测试参考音频.mp3'])
+    expect(reading.voiceDir).toContain('voices')
+    // `/speakers` 是 **LoRA 名清单**(恒含 default)—— 它不是"可选音色"。
+    expect(reading.speakers).toEqual(['default'])
+    expect(reading.health).toMatchObject({ status: 'ok', qwenEmo: false })
+    expect(reading.problems).toEqual([])
+  })
+
+  it('**逐端点如实报**:`/voices` 没答上来 ≠ 这条路走不通(`/speakers` 与 `/health` 照旧报)', async () => {
+    const reading = await readVoiceLibrary(indextts({ voicesStatus: 500 }), { baseUrl: 'http://127.0.0.1:9005' })
+    expect(reading.reachable).toBe(true)
+    expect(reading.speakers).toEqual(['default'])
+    expect(reading.voices).toBeUndefined()
+    expect(reading.problems.join('\n')).toMatch(/\/voices 返回 500/)
+  })
+
+  it('服务没在跑(连接被拒)→ `reachable: false` + 每个端点各一条原因(不整体抛)', async () => {
+    const http = {
+      send: async () => { throw new Error('connect ECONNREFUSED 127.0.0.1:9005') },
+    }
+    const reading = await readVoiceLibrary(http, { baseUrl: 'http://127.0.0.1:9005' })
+    expect(reading.reachable).toBe(false)
+    expect(reading.voices).toBeUndefined()
+    expect(reading.problems).toHaveLength(3)
+    expect(reading.problems[0]).toMatch(/ECONNREFUSED/)
+  })
+
+  it('不是这台服务的形状(响应里没有 voices 数组)→ 如实说,不猜一个空库', async () => {
+    const http = { send: async (request: { url: string }) => ({ status: 200, text: request.url.endsWith('/voices') ? JSON.stringify({ models: [] }) : '{}' }) }
+    const reading = await readVoiceLibrary(http, { baseUrl: 'http://127.0.0.1:9005' })
+    expect(reading.voices).toBeUndefined()
+    expect(reading.problems.join('\n')).toMatch(/没有 voices 数组/)
   })
 })

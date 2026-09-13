@@ -10,6 +10,7 @@ import { GATE } from './service/gates.ts'
 import { createSubdirectory, describePath, listDirectories } from './service/directory-listing.ts'
 import { COVER_TARGETS, expectedCoverSize } from './service/covers.ts'
 import { renderVoiceBatchCsv, renderVoiceBatchJson } from './service/voice-batch.ts'
+import { voiceProfileFromInput } from './service/voice-anchor.ts'
 import type { SceneEdit } from './service/scene-form.ts'
 import type { ProjectService, ThemeSpecInput } from './service/project-service.ts'
 import type { ImageModelCapabilities } from './service/images.ts'
@@ -175,6 +176,9 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   // 语音批量清单(T29):导出 / 导回。
   ['/voice/batch', ['GET']],
   ['/voice/import', ['POST']],
+  // 声音锚(T32):整部戏的嗓子清单 / 读音色库(`/health` `/speakers` `/voices`)。
+  ['/audio/voice/anchors', ['GET']],
+  ['/audio/voice/library', ['POST']],
   ['/audio/tasks', ['GET']],
   ['/audio/tasks/create', ['POST']],
   ['/audio/tasks/run', ['POST']],
@@ -507,8 +511,14 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     const body = await readJsonBody(req)
     const active = await service.getActiveProject()
     if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const id = String(body.id ?? '')
+    // **没提到的字段就保留**(T32):面板改参考链时并不重发音色档案,而 `upsertCharacter`
+    // 是**整条替换** —— 不在这里兜一下,"改一次参考链就把嗓子冲掉了"。规矩是:
+    // body 里**没有这个键** = 别动它;`voiceProfile: null` = 明确清掉。
+    const existing = (await service.characters(active.id)).find((character) => character.id === id)
+    const voiceProfile = 'voiceProfile' in body ? voiceProfileFromInput(body.voiceProfile) : existing?.voiceProfile
     await service.upsertCharacter(active.id, {
-      id: String(body.id ?? ''),
+      id,
       name: String(body.name ?? ''),
       ...(typeof body.voice === 'string' && body.voice !== '' ? { voice: body.voice } : {}),
       appearance: (typeof body.appearance === 'object' && body.appearance !== null ? body.appearance : {}) as Record<string, string>,
@@ -525,7 +535,11 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
             }
           })
         : [],
-      ...(typeof body.note === 'string' && body.note !== '' ? { note: body.note } : {}),
+      ...(voiceProfile === undefined ? {} : { voiceProfile }),
+      // 备注同一条规矩:没提就保留(此前是"没提就清空")。
+      ...(typeof body.note === 'string' && body.note !== ''
+        ? { note: body.note }
+        : (existing?.note === undefined ? {} : { note: existing.note })),
     })
     writeJson(res, 200, { ok: true })
     return
@@ -858,6 +872,30 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     const dropDir = String(body.dropDir ?? '')
     if (dropDir === '') throw new GalfreeError('invalid-request', '需要 `dropDir`(本地 TTS 产出所在的绝对目录)')
     writeJson(res, 200, await service.importVoiceFiles(active.id, { dropDir }))
+    return
+  }
+
+  // **声音锚**(T32):整部戏的嗓子清单(每个角色用的是哪段参考 + 还差谁没有)。
+  //
+  // 音色库那一栏来自**最近一次**「读音色库」(`null` = 还没核对过):它是那台服务**此刻**的
+  // 处境,不是项目的制作信息 —— 所以它不进 `.studio/`,只在内存里(`libraryReadAt` 让人知道多新)。
+  if (method === 'GET' && path === '/audio/voice/anchors') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const board = await service.voiceAnchors(active.id)
+    writeJson(res, 200, { ...board, libraryReadAt: service.voiceLibrary()?.at ?? null })
+    return
+  }
+
+  // **读音色库**(T32):问那台语音服务"你有哪些嗓子"(`GET /health` `/speakers` `/voices`)。
+  //
+  // 这是**唯一**一处为了"人挑参考样本"去访问上游的读法(不花额度:这三个端点只读清单)。
+  // 没有语音渠道 → 503 `no-voice-channel`(与建任务那条门同一个错误码);
+  // 每个端点各报各的(本机 TTS 服务各不相同),没答上来的进 `problems`。
+  if (method === 'POST' && path === '/audio/voice/library') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    writeJson(res, 200, await service.readVoiceLibrary(active.id))
     return
   }
 

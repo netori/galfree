@@ -25,7 +25,8 @@
  * 压根没有 `/voices`)。这时 `inLibrary` 是 `null` 而不是 `false` —— 把"不知道"渲染成
  * "没有"会让人去修一个不存在的问题。
  */
-import type { CharacterRecord, VoiceEmotion, VoiceProfile } from './characters.ts'
+import { GalfreeError } from './error.ts'
+import type { CharacterRecord, VoiceEmotion, VoiceEmotionMode, VoiceProfile } from './characters.ts'
 
 /** 为什么这把嗓子拿不到(拿到了 = `null`)。 */
 export type VoiceAnchorGap = 'no-character' | 'no-profile'
@@ -132,8 +133,58 @@ export function resolveVoiceAnchor(input: ResolveVoiceAnchorInput): VoiceAnchorV
   }
 }
 
-// ─── 整部戏的嗓子清单(面板与 agent 工具读的那一份)────────────────────
+/**
+ * 外部输入(路由 body / agent 工具参数)→ 一份音色档案。
+ *
+ * **形状不对就抛**,不静默凑一个:面板与 agent 都从这条路进来,而"写进去一个发不出去的值"
+ * 要到一次真合成才显形(还要花一次额度)。细校验在 `assertCharacterValid` 里
+ * (它才是登记簿的守门人),这里只负责**把 JSON 解成那个形状**:
+ *  - 键**不在** body 里 → `undefined`(调用方据此"别动它");
+ *  - `null` → `undefined`(**明确清掉**这条档案);
+ *  - 有 `sample` 的对象 → 一条档案(其余字段按出现与否带上)。
+ */
+export function voiceProfileFromInput(raw: unknown): VoiceProfile | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'object') {
+    throw new GalfreeError('character-invalid', `音色档案要是一个对象(或 null 表示清掉它),给的是 ${typeof raw}`)
+  }
+  const record = raw as Record<string, unknown>
+  const sample = typeof record.sample === 'string' ? record.sample.trim() : ''
+  if (sample === '') {
+    throw new GalfreeError('character-invalid', '音色档案需要 `sample`(服务端音色库里的文件名,如 xiao_tang.wav)')
+  }
+  const emotion = voiceEmotionFromInput(record.emotion)
+  return {
+    sample,
+    ...(typeof record.speaker === 'string' && record.speaker.trim() !== '' ? { speaker: record.speaker.trim() } : {}),
+    ...(typeof record.lang === 'string' && record.lang.trim() !== '' ? { lang: record.lang.trim() } : {}),
+    ...(emotion === undefined ? {} : { emotion }),
+    ...(typeof record.note === 'string' && record.note !== '' ? { note: record.note } : {}),
+  }
+}
 
+/** 情感输入(同上:没给 = 不给,形状不对就抛)。 */
+export function voiceEmotionFromInput(raw: unknown): VoiceEmotion | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'object') {
+    throw new GalfreeError('character-invalid', `情感输入要是一个对象(mode + 它自己的那几项),给的是 ${typeof raw}`)
+  }
+  const record = raw as Record<string, unknown>
+  const mode = record.mode
+  if (mode !== 'follow' && mode !== 'reference' && mode !== 'vector' && mode !== 'text') {
+    throw new GalfreeError('character-invalid', `情感模式只有 follow / reference / vector / text:${String(mode ?? '(空)')}`)
+  }
+  const vector = Array.isArray(record.vector) ? record.vector.map((value) => Number(value)) : undefined
+  return {
+    mode: mode as VoiceEmotionMode,
+    ...(typeof record.refSample === 'string' && record.refSample.trim() !== '' ? { refSample: record.refSample.trim() } : {}),
+    ...(typeof record.weight === 'number' ? { weight: record.weight } : {}),
+    ...(vector === undefined ? {} : { vector }),
+    ...(typeof record.text === 'string' && record.text !== '' ? { text: record.text } : {}),
+  }
+}
+
+// ─── 整部戏的嗓子清单(面板与 agent 工具读的那一份)────────────────────
 export interface VoiceAnchorRow {
   character: string
   name: string
