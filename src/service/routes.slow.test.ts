@@ -1043,6 +1043,113 @@ describe('路由适配层(/api/galfree)', () => {
     expect(library.status).toBe(503)
   })
 
+  it('建音频任务:面板路由与 agent 工具**落到同一份账本**,「跑队列」把两边一起算(T33)', async () => {
+    // 这一条挡的是"两条管线":面板建一条、工具建一条,如果它们不落在同一处,
+    // 面板上那句"这一跑 = N 条"就会漏数(而漏的正是要花钱的那一条)。
+    const { clearAudioAdapters, registerAudioAdapter } = await import('./audio-generation.ts')
+    const { createSunoAdapter } = await import('./audio-adapter-suno-register.ts')
+    const { registerGalfreeTools } = await import('./tools.ts')
+    const audioData = join(dataDir, 't33-data')
+    const audioProjects = join(dataDir, 't33-projects')
+    await mkdir(audioProjects, { recursive: true })
+    clearAudioAdapters()
+    registerAudioAdapter(createSunoAdapter())
+    const audioService = createProjectService({
+      dataDir: audioData,
+      uiTemplate: fakeUiTemplate(sdkDir),
+      audio: {
+        http: {
+          send: async (request: { url: string; body: string }) => {
+            if (request.url.includes('/generate/record-info')) {
+              return { status: 200, text: JSON.stringify({ code: 200, data: { status: 'SUCCESS', response: { sunoData: [{ audio_url: 'http://music.local/a.mp3' }] } } }) }
+            }
+            return { status: 200, text: JSON.stringify({ code: 200, msg: 'ok', data: { taskId: 't1' } }) }
+          },
+          download: async () => ({ status: 200, bytes: new TextEncoder().encode('MP3'), contentType: 'audio/mpeg' }),
+        },
+        channel: (purpose: 'music' | 'voice') => purpose === 'music'
+          ? {
+              name: 'music-agg',
+              baseUrl: 'http://music.local',
+              models: [{
+                id: 'suno-generation', purpose: 'music', adapter: 'async-task',
+                capabilities: {
+                  textToMusic: true, instrumental: true, lyrics: false, audioReference: false,
+                  textToSpeech: false, voiceCloning: false, voiceId: false, urlResult: true,
+                },
+              }],
+            }
+          : null,
+      },
+    })
+    await audioService.createProject({ projectsRoot: audioProjects, name: 't33', title: undefined })
+    const audioRoutes = makeRoutes({ service: audioService, config: () => ({ enabled: true, defaultProjectsRoot: audioProjects }) })
+    const audioServer = createServer((request, response) => { void audioRoutes[0]!.handler(request, response) })
+    await new Promise<void>((resolve) => audioServer.listen(0, '127.0.0.1', resolve))
+    const audioBase = `http://127.0.0.1:${(audioServer.address() as { port: number }).port}`
+    try {
+      // 1) 面板那条路(路由)→ 只入队。
+      const panel = await fetch(`${audioBase}/api/galfree/audio/tasks/create`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ outputPath: 'game/audio/bgm/panel.ogg', model: 'suno-generation', prompt: '面板建的', run: false }),
+      })
+      expect(panel.status).toBe(201)
+      // 201/200 的语义:**只建了 = 201;已经跑过一次 = 200**(与契约同口径)。
+      const ranPanel = await fetch(`${audioBase}/api/galfree/audio/tasks/create`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ outputPath: 'game/audio/bgm/panel-ran.ogg', model: 'suno-generation', prompt: '面板建的(立刻跑)', run: true }),
+      })
+      expect(ranPanel.status).toBe(200)
+      expect(((await ranPanel.json()) as { task: { state: string } }).task.state).toBe('awaiting-review')
+      // 认不出的 `purpose` **不静默丢掉**(用途本身按路径判;给了个不认识的值就如实拒)。
+      const bogusPurpose = await fetch(`${audioBase}/api/galfree/audio/tasks/create`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ outputPath: 'game/audio/bgm/x.ogg', model: 'suno-generation', prompt: 'x', purpose: 'sfx' }),
+      })
+      expect(bogusPurpose.status).toBe(400)
+      expect(((await bogusPurpose.json()) as { code: string }).code).toBe('invalid-request')
+
+      // 2) agent 那条路(工具)→ 也只入队。
+      const collected: Array<{ name: string; execute: (args: Record<string, unknown>) => Promise<string> }> = []
+      registerGalfreeTools(
+        { tools: { register: (tool: unknown) => { collected.push(tool as never); return () => {} } } } as never,
+        audioService,
+      )
+      await collected.find((tool) => tool.name === 'galfree_generate_audio')!.execute({
+        project: 't33', output_path: 'game/audio/bgm/agent.ogg', model: 'suno-generation', prompt: '工具建的', run: false,
+      })
+
+      // 3) 两边都在**同一份账本**里(面板读它、工具读它、跑队列也读它)。
+      const listed = await (await fetch(`${audioBase}/api/galfree/audio/tasks`)).json() as { tasks: Array<{ outputPath: string; state: string }> }
+      expect(listed.tasks.map((task) => task.outputPath).sort())
+        .toEqual(['game/audio/bgm/agent.ogg', 'game/audio/bgm/panel-ran.ogg', 'game/audio/bgm/panel.ogg'])
+      expect(listed.tasks.filter((task) => task.state === 'queued').map((task) => task.outputPath).sort())
+        .toEqual(['game/audio/bgm/agent.ogg', 'game/audio/bgm/panel.ogg'])
+
+      // 4) 一次「跑队列」把**排队中的**都跑了(面板那句"这一跑 = 2 条"因此是真的;
+      //    已经跑过的那条不在队列里,不该被再花一次钱)。
+      const ran = await (await fetch(`${audioBase}/api/galfree/audio/tasks/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ purpose: 'music' }),
+      })).json() as { tasks: Array<{ state: string; outputPath: string }> }
+      expect(ran.tasks).toHaveLength(2)
+      expect(ran.tasks.map((task) => task.outputPath).sort()).toEqual(['game/audio/bgm/agent.ogg', 'game/audio/bgm/panel.ogg'])
+      expect(ran.tasks.every((task) => task.state === 'awaiting-review')).toBe(true)
+      // 产物都落进了 game/(池是派生的,立刻有三条)。
+      const pool = await (await fetch(`${audioBase}/api/galfree/audio`)).json() as { files: Array<{ path: string }> }
+      expect(pool.files.map((file) => file.path).sort())
+        .toEqual(['audio/bgm/agent.ogg', 'audio/bgm/panel-ran.ogg', 'audio/bgm/panel.ogg'])
+    } finally {
+      await audioService.dispose()
+      await new Promise<void>((resolve) => audioServer.close(() => resolve()))
+      clearAudioAdapters()
+    }
+  })
+
   it('停用开关:仅 /state 可读,其余 503', async () => {
     const offline = createProjectService({ dataDir: join(dataDir, 'disabled'), uiTemplate: fakeUiTemplate(sdkDir) })
     const routes = makeRoutes({ service: offline, config: () => ({ enabled: false, defaultProjectsRoot: '' }) })

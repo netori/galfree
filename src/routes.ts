@@ -1031,6 +1031,11 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     const outputPath = String(body.outputPath ?? '')
     if (outputPath === '') throw new GalfreeError('invalid-audio-path', '需要 `outputPath`(项目内相对路径,如 game/audio/bgm/rain.ogg)')
     const run = body.run === true
+    // **用途按路径判**(接缝那一处);这里只做一件事:给了 `purpose` 就必须是认得的两个字面值
+    // —— 不静默丢一个 `'sfx'`(那会让人以为它生效了)。不一致由接缝当场拒。
+    if (body.purpose !== undefined && body.purpose !== 'music' && body.purpose !== 'voice') {
+      throw new GalfreeError('invalid-request', `purpose 只有 music / voice(用途本身按目标路径判):${JSON.stringify(body.purpose)}`)
+    }
     const task = await service.createAudioTask(active.id, {
       outputPath,
       model: String(body.model ?? ''),

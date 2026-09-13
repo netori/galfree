@@ -17,6 +17,7 @@ import { PLAYTEST_DEFAULT_WAIT_MINUTES, PLAYTEST_MAX_WAIT_MS, PLAYTEST_TIMEOUT_M
 import { COVER_TARGETS, expectedCoverSize } from './covers.ts'
 import { renderVoiceBatchCsv, renderVoiceBatchJson } from './voice-batch.ts'
 import { voiceProfileFromInput } from './voice-anchor.ts'
+import { countAudioTasks } from './audio-generation.ts'
 import type { ProjectService } from './project-service.ts'
 import type { BibleChapter } from './bible.ts'
 import type { SceneEdit } from './scene-form.ts'
@@ -1467,11 +1468,12 @@ export function registerGalfreeTools(
           ...(typeof args.voice_id === 'string' && args.voice_id !== '' ? { voiceId: args.voice_id } : {}),
           run: args.run ?? true,
         })
-        // **成本预览**:这一跑(跑队列)会真发几条 —— 按用途分开数,因为两张卡各跑各的。
-        const all = await service.audioTasks(active)
-        const queuedOf = (purpose: 'music' | 'voice'): number =>
-          all.filter((candidate) => candidate.purpose === purpose && candidate.state === 'queued').length
-        const queued = queuedOf(task.purpose)
+        // **成本**:两件事分开报 —— 这一下真跑过几次(`attempted`)、以及此刻排队中
+        // 点「跑队列」会真发的条数(`pending`,按用途分)。
+        // 为什么不是一句"这一跑要花 N 条":`run` 缺省 true 时"这一跑"**已经跑过了**,
+        // 那时再报队列数就成了空话(跑的这条已经离开 queued)。两个数分开说,两条路都如实。
+        const counts = countAudioTasks(await service.audioTasks(active))
+        const pending = { music: counts.music.queued, voice: counts.voice.queued }
         return JSON.stringify({
           ok: task.state === 'awaiting-review',
           id: task.id,
@@ -1487,10 +1489,10 @@ export function registerGalfreeTools(
             ? { character: task.voiceId ?? null, sample: task.voiceSample ?? null, speaker: task.voiceSpeaker ?? null }
             : null,
           cost: {
-            queued,
-            music: queuedOf('music'),
-            voice: queuedOf('voice'),
-            note: '跑队列会真发这么多条上游请求(音乐单次最贵;TTS 按台词行计费)—— 工作台两张卡各跑各的。',
+            attempted: task.attempts.length,
+            pending,
+            note: 'pending 是此刻排队中、点「跑队列」会真发的条数(音乐单次最贵;TTS 按台词行计费);'
+              + 'attempted 是这一下真跑过的次数(0 = 只入队,没发请求)。',
           },
           next: task.state === 'awaiting-review'
             ? `产物已落盘,用 galfree_wire_audio 接进场景(引用是**相对 game/ 的路径**);试听后由人盖场景戳。`
@@ -1539,16 +1541,19 @@ export function registerGalfreeTools(
       const purpose = args.purpose === 'music' || args.purpose === 'voice' ? args.purpose : undefined
       try {
         if (action === 'run') {
-          const targets = (await service.audioTasks(active))
-            .filter((task) => task.state === 'queued')
-            .filter((task) => purpose === undefined || task.purpose === purpose)
-          // **成本先说出来**:跑之前的那一句比跑完之后的解释有用。
+          const before = countAudioTasks(await service.audioTasks(active))
+          const targets = purpose === undefined
+            ? before.music.queued + before.voice.queued
+            : before[purpose].queued
+          // **成本先说出来**:跑之前算的数,而不是跑完之后的解释。
           const ran = await service.runAudioQueue(active, purpose === undefined ? {} : { purpose })
           const failed = ran.filter((task) => task.state === 'failed')
+          const after = countAudioTasks(await service.audioTasks(active))
           return JSON.stringify({
             ran: ran.length,
             failed: failed.length,
-            spend: `这一跑真发了 ${targets.length} 条上游请求`,
+            spend: `这一跑真发了 ${targets} 条上游请求`,
+            pending: { music: after.music.queued, voice: after.voice.queued },
             tasks: ran.map((task) => ({
               id: task.id,
               purpose: task.purpose,
@@ -1582,6 +1587,7 @@ export function registerGalfreeTools(
 
         const tasks = await service.audioTasks(active)
         const channels = await service.audioChannels()
+        const counts = countAudioTasks(tasks)
         return JSON.stringify({
           channels: {
             music: channels.music.configured ? `${channels.music.name ?? '已配'} · ${channels.music.models.length} 个模型` : '没配',
@@ -1603,10 +1609,7 @@ export function registerGalfreeTools(
               lastError: task.lastError ?? null,
               rejections: task.rejections.map((rejection) => ({ note: rejection.note, via: rejection.via })),
             })),
-          queued: {
-            music: tasks.filter((task) => task.purpose === 'music' && task.state === 'queued').length,
-            voice: tasks.filter((task) => task.purpose === 'voice' && task.state === 'queued').length,
-          },
+          queued: { music: counts.music.queued, voice: counts.voice.queued },
           next: '跑用 action:"run"(会真发上游请求:音乐最贵、TTS 按台词行计费);试听靠试玩,认可靠人盖场景戳。',
         }, null, 2)
       } catch (error) {

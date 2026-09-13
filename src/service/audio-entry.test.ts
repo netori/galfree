@@ -151,13 +151,18 @@ describe('建音频任务的入口(T33)', () => {
       output_path: 'game/audio/bgm/rain.ogg',
       model: 'suno-generation',
       prompt: '雨夜的天台,钢琴与弦乐,慢速,忧郁',
-    })) as { ok: boolean; purpose: string; state: string; outputPath: string; attempts: number }
+    })) as { ok: boolean; purpose: string; state: string; outputPath: string; attempts: number; cost: { attempted: number; pending: { music: number; voice: number }; note: string } }
 
     expect(out.ok).toBe(true)
     expect(out.purpose).toBe('music')
     expect(out.state).toBe('awaiting-review')
     expect(out.outputPath).toBe('game/audio/bgm/rain.ogg')
     expect(out.attempts).toBe(1)
+    // **成本在 run:true 这条路上也要如实**:这一下真跑过 1 次,而排队里已经没有它了
+    // (此前这里报的是"跑队列会真发 0 条" —— 一句空话)。
+    expect(out.cost.attempted).toBe(1)
+    expect(out.cost.pending).toEqual({ music: 0, voice: 0 })
+    expect(out.cost.note).toMatch(/按台词行计费|最贵/)
 
     // 上游真被打过三道:提交体里是那句制作指令。
     expect(upstream.submit).toHaveLength(1)
@@ -176,13 +181,14 @@ describe('建音频任务的入口(T33)', () => {
     })
     const second = JSON.parse(await find('galfree_generate_audio').execute({
       project: 'entry', output_path: 'game/audio/bgm/b.ogg', model: 'suno-generation', prompt: '第二首', run: false,
-    })) as { state: string; cost: { queued: number; music: number; voice: number; note: string } }
+    })) as { state: string; cost: { attempted: number; pending: { music: number; voice: number }; note: string } }
 
     expect(second.state).toBe('queued')
     // 一个字节都没出网(建 ≠ 跑)。
     expect(upstream.submit).toEqual([])
-    expect(second.cost.music).toBe(2)
-    expect(second.cost.voice).toBe(0)
+    // 只入队 ⇒ 没跑过(attempted 0),而排队里真的躺着两条 —— 这才是"跑之前看得见"。
+    expect(second.cost.attempted).toBe(0)
+    expect(second.cost.pending).toEqual({ music: 2, voice: 0 })
     expect(second.cost.note).toMatch(/最贵|计费/)
   })
 
@@ -217,6 +223,22 @@ describe('建音频任务的入口(T33)', () => {
     expect(await tool.execute({ project: 'entry', output_path: 'game/audio/bgm/x.ogg', model: 'suno-generation', prompt: '  ' }))
       .toMatch(/提示词/)
     // 一个请求都没发出去。
+    expect(upstream.submit).toEqual([])
+  })
+
+  it('**用途只由路径判**:显式给一个不一致的 purpose 会被当场拒(不让两条判断并存)', async () => {
+    // 路径说是语音、声明说是音乐 —— 两条渠道的端点与目录不通用,所以这里必须拒。
+    await expect(service.createAudioTask('entry', {
+      outputPath: 'game/voice/start_0000.wav',
+      model: 'indextts-2.5',
+      prompt: '你来啦。',
+      purpose: 'music',
+    })).rejects.toThrow(/不一致/)
+    // 一致的时候照旧能用(声明只是个断言,不是第二个真相)。
+    const ok = await service.createAudioTask('entry', {
+      outputPath: 'game/voice/start_0000.wav', model: 'indextts-2.5', prompt: '你来啦。', purpose: 'voice', run: false,
+    })
+    expect(ok.purpose).toBe('voice')
     expect(upstream.submit).toEqual([])
   })
 

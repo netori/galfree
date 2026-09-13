@@ -26,6 +26,7 @@ import {
   type TaskKind,
 } from './tasks.ts'
 import type { VoiceEmotion } from './characters.ts'
+import type { GenerationTaskState } from './tasks.ts'
 
 /** 上游协议适配器 id(按**协议**收,不按厂商收)。 */
 export type AudioAdapterId =
@@ -135,6 +136,39 @@ export interface AudioPorts {
 export function audioModels(channel: AudioChannelSettings, purpose?: AudioPurpose): AudioModelDescriptor[] {
   const usable = channel.models.filter((model) => purpose === undefined || model.purpose === purpose)
   return usable
+}
+
+/** 一个用途的四个计数(面板两张卡各读自己那一份)。 */
+export interface AudioTaskCounts {
+  queued: number
+  running: number
+  awaitingReview: number
+  failed: number
+}
+
+/**
+ * 任务 → **按用途分开**的四个计数。
+ *
+ * 存在的理由:同一个数在三处要用 —— 面板卡上的"排队 N 条"、agent 建任务后报的成本、
+ * 以及跑队列前那句"这一跑真发几条"。三处各写一遍迟早分叉,而分叉的后果是
+ * **面板上说的条数不是真会发出去的条数**(那正是 T27 踩过的那个坑:替另一条渠道花了钱)。
+ * 所以这里是唯一实现,面板与工具都调它。
+ */
+export function countAudioTasks(
+  tasks: ReadonlyArray<{ purpose: AudioPurpose; state: GenerationTaskState }>,
+): Record<AudioPurpose, AudioTaskCounts> {
+  const counts: Record<AudioPurpose, AudioTaskCounts> = {
+    music: { queued: 0, running: 0, awaitingReview: 0, failed: 0 },
+    voice: { queued: 0, running: 0, awaitingReview: 0, failed: 0 },
+  }
+  for (const task of tasks) {
+    const bucket = counts[task.purpose]
+    if (task.state === 'queued') bucket.queued += 1
+    else if (task.state === 'running') bucket.running += 1
+    else if (task.state === 'awaiting-review') bucket.awaitingReview += 1
+    else bucket.failed += 1
+  }
+  return counts
 }
 
 // ─── 任务(与图像任务同底层,字段按音频的用途)──────────────────────
@@ -253,14 +287,23 @@ export interface CreateAudioTaskInput {
   run?: boolean
 }
 
+/** 路径归一化(`\` → `/`)**唯一一处**:别处的形状判断与落盘都调它,不各自 replace 一遍。 */
+export function normalizeAudioOutputPath(outputPath: string): string {
+  return outputPath.replace(/\\/g, '/')
+}
+
 /**
  * 目标路径 → 用途的**唯一口径**。
  *
  * 为什么按路径推:`game/voice/` 是 ADR-0013 定下的语音目录(`config.auto_voice = "voice/{id}.ogg"`),
- * 而"这句话是对白配音还是 BGM"在路径上就已经说清了。让调用方每次显式声明反而容易漏。
+ * 而"这句话是对白配音还是 BGM"在路径上就已经说清了。让调用方每次显式声明反而容易漏
+ * —— 而"漏了就按错的渠道发"的代价是**真金**(两条渠道的端点与目录都不通用)。
+ *
+ * 所以 T33 起:**用途只由这里判**;调用方若显式给了不一致的 `purpose`,接缝当场拒
+ * (见 `createAudioTask`),不让两条判断并存。
  */
 export function purposeOfPath(outputPath: string): AudioPurpose {
-  return /(^|\/)voice\//.test(outputPath.replace(/\\/g, '/')) ? 'voice' : 'music'
+  return /(^|\/)voice\//.test(normalizeAudioOutputPath(outputPath)) ? 'voice' : 'music'
 }
 
 /**
@@ -271,7 +314,7 @@ export function purposeOfPath(outputPath: string): AudioPurpose {
  *  - 必须是相对路径(绝对路径会被静默回退,T17 的实测教训)。
  */
 export function assertAudioOutputPath(outputPath: string): void {
-  const normalized = outputPath.replace(/\\/g, '/')
+  const normalized = normalizeAudioOutputPath(outputPath)
   if (/^[A-Za-z]:\//.test(normalized) || normalized.startsWith('/')) {
     throw new Error(`音频产物要用**项目内相对路径**(给的是绝对路径:${outputPath})—— 引擎的 searchpath 只有 game/`)
   }

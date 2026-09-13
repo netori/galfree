@@ -2186,8 +2186,16 @@ export class ProjectService {
       } catch (error) {
         throw new GalfreeError('invalid-audio-path', error instanceof Error ? error.message : String(error))
       }
-      // 用途先定:它决定走哪条渠道、查哪份模型目录(`voice/` 下 = 语音,其余 = 音乐)。
-      const purpose = input.purpose ?? purposeOfPath(outputPath)
+      // 用途**只由目标路径判**(唯一口径)。调用方若显式给了不一致的 `purpose`,
+      // 那是两条判断并存 —— 当场拒,而不是让"音乐任务写进 voice/ 目录"这种事静静发生。
+      const purpose = purposeOfPath(outputPath)
+      if (input.purpose !== undefined && input.purpose !== purpose) {
+        throw new GalfreeError(
+          'invalid-request',
+          `用途按**目标路径**判(${outputPath} ⇒ ${purpose === 'voice' ? '语音' : '音乐'}),与给的 purpose「${input.purpose}」不一致`
+          + ' —— 两条渠道的端点与模型目录不通用,所以这里只认路径',
+        )
+      }
       const { channel, model } = this.#requireAudioModel(input.model, purpose)
       const prompt = input.prompt.trim()
       if (prompt === '') throw new GalfreeError('empty-prompt', '提示词是空的:给一句能用的制作指令(风格/情绪/场景)')

@@ -113,7 +113,8 @@ export function AudioCard({ purpose, api, hasProject, onNotice, onChanged }: {
         outputPath: draft.outputPath.trim(),
         model: draft.model,
         prompt: draft.prompt,
-        purpose,
+        // **不递 purpose**:用途由接缝按目标路径判(`game/voice/` 下 = 语音)——
+        // 递一份等于把同一个判断写两遍,而不一致时后果是真金(走错渠道)。
         ...(draft.dialogueId.trim() === '' ? {} : { dialogueId: draft.dialogueId.trim() }),
         ...(purpose === 'music' ? { loop: draft.loop } : {}),
         run: draft.run,

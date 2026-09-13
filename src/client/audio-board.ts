@@ -24,6 +24,9 @@ export interface AudioChannelFacts {
  */
 export type { AudioPurpose } from '../service/audio-generation.ts'
 import type { AudioPurpose } from '../service/audio-generation.ts'
+// 计数用**接缝那一份**(`countAudioTasks`):面板上的"排队 N 条"、agent 报的成本、
+// 以及跑队列前那句"这一跑真发几条"必须是同一个数 —— 三处各写一遍迟早分叉。
+import { countAudioTasks } from '../service/audio-generation.ts'
 
 export interface AudioTaskFacts {
   id: string
@@ -80,14 +83,7 @@ export function audioPurposeLabel(purpose: AudioPurpose): {
  *    (点了「跑队列」音乐卡不会去跑语音的任务)。
  */
 export function summarizeAudioBoard(purpose: AudioPurpose, channel: AudioChannelFacts | null, tasks: AudioTaskFacts[]): AudioBoardSummary {
-  const counts = { queued: 0, running: 0, awaitingReview: 0, failed: 0 }
-  for (const task of tasks) {
-    if (task.purpose !== purpose) continue
-    if (task.state === 'queued') counts.queued += 1
-    else if (task.state === 'running') counts.running += 1
-    else if (task.state === 'awaiting-review') counts.awaitingReview += 1
-    else counts.failed += 1
-  }
+  const counts = countAudioTasks(tasks)[purpose]
   const label = audioPurposeLabel(purpose)
   const blockedBy = channel === null || !channel.configured
     ? label.notConfigured
