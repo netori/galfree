@@ -807,6 +807,12 @@ AudioPoolView = {
 池与真磁盘一致(删文件 → `missing-audio` 立刻上板)。方言子集契约要求"扩语法要过慢集成带验证",
 这条就是音频语法的那个证据:**我们自己解析得对 ≠ 引擎认**。
 
+**导出一份对白清单**(T24 之后实测,为 #37 的"本地 TTS 批量"备料):引擎自带
+`renpy.exe <项目> dialogue None`(= launcher 的「Extract Dialogue」,**不需要显示**),
+落一份 `dialogue.tab`,列为 `Identifier / Character / Dialogue / Filename / Line Number /
+Ren'Py Script` —— **第一列就是语音文件名要用的那个标识符**(口径见 ADR-0013)。
+所以那条路不该自己发明格式。
+
 ### 已知边界(这一票**没有**覆盖的,别当成"已经管了")
 
 1. **只有子集内的形态会被校验**。`play <channel> "<文件>" [loop]` 之外的一切
@@ -823,7 +829,34 @@ AudioPoolView = {
    **对话 id + `config.auto_voice`**(理由:引擎在下一次交互就会停掉上一句语音,而
    `play voice` 需要每句手动 `stop`;auto_voice 是官方为配音留的那条路)。
 
-## 本地发布(T18 之后追加)
+## 界面图:三张是**给人/给工具换的**(T24 之后再追加,为 #38 备料)
+
+`game/gui/` 下那一整套界面图是 Ren'Py **首次运行时程序生成**的(生成器在 SDK 的
+`launcher/game/gui7/`,按九宫格模板 + 参数画,基准 1280×720,
+`scale = min(w/1280, h/720)`)。但其中**三张是例外** —— 生成器**不覆盖**它们:
+
+| 文件 | 谁在读 | 尺寸 |
+|---|---|---|
+| `gui/main_menu.png` | 模板 `gui.rpy:91` 的 `gui.main_menu_background` | 项目分辨率(1280×720 基准;1920×1080 项目就是 1920×1080) |
+| `gui/game_menu.png` | 游戏内菜单背景 | 同上 |
+| `gui/window_icon.png` | **模板 `options.rpy` 设的** `config.window_icon`(SDK 模板那一行是 `options.rpy:156`) | 正方形最佳;引擎会补成正方形再缩到 ≤1024 |
+
+依据:生成器那两个 `save(..., overwrite=False)`(`gui7/images.py:398,404,405`)+ launcher 的
+原话"**不会**覆盖 `gui/main_menu.png`、`gui/game_menu.png`、`gui/window_icon.png`"
+(`launcher/game/launcher.rpy:920` 那一串译文)。
+
+### 一个会**启动即崩**的坑(实现 #38 之前必须知道)
+
+`config.window_icon` 指向的文件**不存在**时,引擎**不兜底**:
+`set_icon()` 里只 `except renpy.webloader.DownloadNeeded`(`renpy/display/core.py:1044-1071`),
+读不到文件会直接抛出去 —— 也就是**启动期崩**。
+
+所以"让 AI 出的图标生效"不能在项目里凭空写一行 `config.window_icon = "gui/window_icon.png"`:
+
+- **要么**先保证那个文件真在(我们的模板现在**没有**这行、也没有这个文件);
+- **要么**用引擎的兜底路径:先出图 → 落进项目 → 再设 config;两步都要经写网关 + 进快照。
+
+这一条与 T23 那次"关窗确认崩"同一个形状:**界面文件少一个,崩在启动期**,而只有真引擎跑一次才看得见。
 
 **一键把项目打成可发行物**(spec User Story 19):钉版 SDK 的 `build_dists`,默认 `pc` 包
 (Windows + Linux)。平台上传与在线分发**不做**(spec Out of Scope)—— 这一票只把产物放到
