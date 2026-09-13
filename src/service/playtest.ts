@@ -25,6 +25,8 @@ export interface SpawnResult {
   timedOut?: boolean
   /** 被取消(协作式取消:调用方中止了 `signal`)。 */
   aborted?: boolean
+  /** 需要中止时,进程**确认**停了没有(正常退出恒为 true)。 */
+  killed?: boolean
   /** 从起到停真实过了多少毫秒(面板与账本据此说得出"跑了多久")。 */
   elapsedMs?: number
 }
@@ -59,6 +61,11 @@ export interface PlaytestRun {
   timedOut: boolean
   /** 等了多久才停(毫秒)——“为什么停”的第二半。 */
   elapsedMs: number
+  /**
+   * 需要中止时,进程**确认**停了没有(正常退出恒为 true)。
+   * `false` = 发了中止信号但它没在宽限期内退出 —— 窗口可能还开着,得照实说。
+   */
+  killed: boolean
 }
 
 export interface PlaytestDocument {
@@ -193,6 +200,8 @@ export async function launchPlaytest(
       from: fromLabel,
       timedOut: result.timedOut === true,
       elapsedMs: result.elapsedMs ?? 0,
+      // 缺省 true(正常退出那条路):只有端口**明确**说"没杀掉"时才是 false。
+      killed: result.killed !== false,
     }
   } finally {
     if (temporary !== null) await rm(temporary, { recursive: true, force: true }).catch(() => {})
@@ -216,6 +225,14 @@ export const PLAYTEST_DEFAULT_WAIT_MINUTES = Math.round(PLAYTEST_TIMEOUT_MS / 60
 
 /** 工具面按次能给的上限:再长就回到"卡住"那一版了(缺省仍按上面那个)。 */
 export const PLAYTEST_MAX_WAIT_MS = 15 * 60 * 1000
+
+/**
+ * 发了中止信号之后,再等多久确认进程真的退了(实现在 `spawn-log.ts` 里,试玩与发布共用)。
+ * 在这里再导出一次:试玩的守卫要拿它当"宽限期"的时间基准,不该去 import 那个实现模块。
+ *
+ * `waitForExit` 同理 —— 它是那条判据本身,守卫直接在它两个出口上验(真进程量不出来)。
+ */
+export { KILL_GRACE_MS, waitForExit } from './spawn-log.ts'
 
 /**
  * 真 spawn 实现(Host 装配用):启动游戏进程,退出后回传合并日志。
@@ -255,7 +272,11 @@ export async function realSpawn(
 /**
  * "被取消"不是失败,是**没发生**:它有自己的错误码,于是工具面/面板/账本三处都能
  * 按码判别,而不是去猜一句文案。抛出它的地方一律**不记账本**。
+ *
+ * 措辞**不承诺"进程已停"**:这个错误在"还没起进程""跑在中途""进程没响应信号"三种处境下
+ * 都会抛,那一刻我们并不知道它停没停(确认过的那一半是 `PlaytestRun.killed`)。
+ * 说不知道的事,就是这张票要消灭的那类假事实。
  */
 export function abortError(): GalfreeError {
-  return new GalfreeError('aborted', '这次试玩被取消了(调用方中止了 CancellationToken):游戏进程已中止,账本没有记这一条 —— 它不是一个结果。')
+  return new GalfreeError('aborted', '这次试玩被取消了(调用方中止了 CancellationToken):这次运行不再往下走,账本也不记它 —— 被取消不是一个结果。')
 }

@@ -10,7 +10,7 @@ import { createProjectService, type ProjectService } from './project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
 import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 import type { SpawnResult } from './playtest.ts'
-import { realSpawn } from './playtest.ts'
+import { realSpawn, waitForExit } from './playtest.ts'
 
 describe('试玩控制(T7,假 spawn)', () => {
   let dataDir: string
@@ -150,6 +150,8 @@ describe('试玩控制(T7,假 spawn)', () => {
     delete process.env.GALFREE_TEST_SRC
     expect(result.aborted).toBe(true)
     expect(result.timedOut).toBe(false)
+    // "确认"那一半:进程真退了才叫 killed(替身进程对 SIGTERM 是有反应的)。
+    expect(result.killed).toBe(true)
     // 关键:不是"等到 10 分钟超时才回来"。
     expect(Date.now() - started).toBeLessThan(10_000)
   })
@@ -162,6 +164,7 @@ describe('试玩控制(T7,假 spawn)', () => {
     delete process.env.GALFREE_TEST_SRC
     expect(result.timedOut).toBe(true)
     expect(result.aborted).toBe(false)
+    expect(result.killed).toBe(true)
     expect(result.elapsedMs).toBeGreaterThanOrEqual(400)
     expect(result.elapsedMs).toBeLessThan(10_000)
   })
@@ -272,6 +275,63 @@ describe('试玩控制(T7,假 spawn)', () => {
       expect((await service.progress('serial')).playtest?.at).toBe(second.at)
     })
 
+    it('排队中的第二个调用:不算"在跑",而且取消它当场生效(不白等前一个)', async () => {
+      // 两个真缺陷的守卫:① 排队中的调用不该让 `playtestRunning()` 说"在跑"
+      // (面板会对着一个还没开始的调用显示"取消",还声称杀掉了一个进程);
+      // ② 它在排队期间被取消要**立刻**退出,而不是"等前一个跑完再照跑一遍"。
+      let spawned = 0
+      service = createProjectService({
+        dataDir: dataDir + '-queued',
+        uiTemplate: fakeUiTemplate(sdkDir),
+        playtest: {
+          resolveLauncher: async () => '/fake/renpy.exe',
+          // 超时 0 → 第一个调用一进来就"等满上限",于是它占着位子待一会儿。
+          spawn: async (_launcher, _root, options) => await new Promise<SpawnResult>((resolve) => {
+            spawned += 1
+            setTimeout(() => resolve({ code: -1, log: 'timeout', timedOut: true, aborted: false, elapsedMs: options?.timeoutMs ?? 0 }), 120)
+          }),
+        },
+      })
+      await service.createProject({ projectsRoot, name: 'queued', title: undefined })
+      const first = service.playtestStart('queued', null, { timeoutMs: 0 })
+      const deadline = Date.now() + 3_000
+      while (!service.playtestRunning() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5))
+      expect(service.playtestRunning()).toBe(true)
+
+      const controller = new AbortController()
+      const queued = service.playtestStart('queued', null, { signal: controller.signal })
+      expect(service.playtestRunning()).toBe(true) // 是**第一个**在跑,不是排队的这个
+      controller.abort()
+      const started = Date.now()
+      await expect(queued).rejects.toMatchObject({ code: 'aborted' })
+      expect(Date.now() - started).toBeLessThan(1_000) // 等了前一个才回来 = 红
+      expect(spawned).toBe(1) // 排队那个**一个进程都没起**
+      await first
+    })
+
+    it('中止了但进程没停 → 如实说 `killed: false`(不替它宣布"已杀掉")', async () => {
+      // "确认"那一半(Windows 上 SIGTERM 对 GUI 子树是尽力而为)没法在真进程上量 ——
+      // `child.kill()` 一定能让替身退掉。所以直接验那条判据的两个出口(`waitForExit`)。
+      const neverClosed = await waitForExit({
+        hasExited: () => false,
+        onClosed: () => { /* 永远不会有 close */ },
+        graceMs: 50,
+      })
+      expect(neverClosed).toBe(false)
+
+      const closedLater = await waitForExit({
+        hasExited: () => false,
+        onClosed: (callback) => setTimeout(callback, 20),
+        graceMs: 500,
+      })
+      expect(closedLater).toBe(true)
+
+      // 已经退了的:不用等,立刻 true(那条路是"正常退出",不该白等一个宽限期)。
+      const started = Date.now()
+      expect(await waitForExit({ hasExited: () => true, onClosed: () => {}, graceMs: 5_000 })).toBe(true)
+      expect(Date.now() - started).toBeLessThan(500)
+    })
+
     it('超时不再默认静默等 15 分钟:有界、且回报里带"等了多久 / 为什么停"', async () => {
       service = createProjectService({
         dataDir: dataDir + '-timeout',
@@ -291,7 +351,13 @@ describe('试玩控制(T7,假 spawn)', () => {
       expect(run.elapsedMs).toBe(40)
       expect(run.exitCode).toBe(-1)
       // 超时是一次**没跑成**的试玩:记进账本,但不冒充技术通过。
-      expect((await service.progress('slow')).playtest?.state).toBe('fail')
+      const progress = await service.progress('slow')
+      expect(progress.playtest?.state).toBe('fail')
+      expect(progress.playtest?.timedOut).toBe(true)
+      // 「下一步」要指对方向:等满上限不是"照 traceback 修",而是"请人把窗口关掉"(T24)。
+      const action = progress.nextActions.find((candidate) => candidate.code.startsWith('playtest'))
+      expect(action?.code).toBe('playtest-timed-out')
+      expect(action?.actor).toBe('human')
     })
   })
 })

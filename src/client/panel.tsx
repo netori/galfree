@@ -35,6 +35,18 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/**
+ * 试玩取消的两句话 —— **只有一处文案**(同一个动作不该有两个说法:先弹"已取消"、
+ * 再被"没有可取消的"覆盖,读起来就是自相矛盾)。
+ *
+ * 而"没有在跑"那句**只在服务端真这么说了**的时候才用(409 的 `no-running-playtest`):
+ * 网络断了、500 了,那不是"没有在跑的",是**没问到** —— 两种话不能混。
+ */
+const CANCELLED_NOTICE = '已取消这次试玩(中止信号已发)。账本没有记它 —— 被取消不是一个结果。'
+const NOTHING_RUNNING_NOTICE = '此刻没有在跑的试玩(可能刚好自己退了):账本照旧,没有东西被中止。'
+/** 取消没**问到**结果(网络 / 500):照实说,不冒充"没有在跑"。 */
+const CANCEL_UNKNOWN_NOTICE = '取消没问出结果(服务端没答上来):试玩可能还在跑,刷新一次看看。'
+
 export function WorkbenchPanel() {
   const api = useMemo(() => new GalfreeApi(), [])
   const [state, setState] = useState<StateView | null>(null)
@@ -240,8 +252,9 @@ export function WorkbenchPanel() {
       await refresh()
     } catch (error) {
       // 取消不是失败:面板自己断的这次 fetch 会走到这里 —— 别报成"试玩失败"。
-      if (controller.signal.aborted) pushNotice('warn', '已取消这次试玩:游戏进程已中止,账本没有记它 —— 被取消不是一个结果。')
-      else pushNotice('bad', `试玩失败:${describeError(error)}`)
+      // 这句话也**只有这条按钮的路**能落定:进程到底停没停要看服务端的回话,
+      // 所以这里不抢着替它宣布结果(见 `cancelPlaytest`)。
+      if (!controller.signal.aborted) pushNotice('bad', `试玩失败:${describeError(error)}`)
     } finally {
       if (playtestAbort.current === controller) playtestAbort.current = null
       setPlaying(false)
@@ -250,23 +263,30 @@ export function WorkbenchPanel() {
   }
 
   /**
-   * 取消正在跑的那一次试玩:断掉面板手里那次 fetch,**再**打一趟 `/playtest/cancel`。
+   * 取消正在跑的那一次试玩。两下都要,而**真正停住游戏的是第二下**:
    *
-   * 两下都要:前者管"面板自己起的"，后者管"**agent 起的**"(那次 fetch 从来不在面板手里,
-   * 而 AI 那一轮正因为它在等着而挂着 —— 人在这里就能把它停掉)。
-   * 服务端那条路是**同一个**中止信号,所以不存在"面板停了但游戏还开着"。
+   * 1. 断掉面板手里那次 fetch —— 只是让面板那条悬挂的请求当场收口(浏览器里立刻
+   *    AbortError,界面马上从"运行中"回来);
+   * 2. `POST /playtest/cancel` —— 服务端在那个信号上中止子进程。它也是**唯一**能停住
+   *    "**agent 起的**那一次"的路(那次 fetch 从来不在面板手里,而 AI 那一轮正因为
+   *    它挂着)。没有在跑 → 409,面板如实说"没有可取消的",不假装杀掉了什么。
+   *
+   * 为什么不能只靠第 1 下:浏览器把 `fetch` 的 abort 收在自己那侧,服务端那个 socket
+   * 不一定跟着关(实测),所以"断开即取消"只当兜底,不能当契约。
    */
   const cancelPlaytest = async (): Promise<void> => {
     setCancelling(true)
     playtestAbort.current?.abort()
     try {
       await api.playtestCancel()
-      // 与 `runPlaytest` 里那句**同一条**(同一个动作:取消就是取消,不管是谁发起的);
-      // pushNotice 按文本去重,所以两条路一起走到这里也只显示一条。
-      pushNotice('warn', '已取消这次试玩:游戏进程已中止,账本没有记它 —— 被取消不是一个结果。')
+      // 这里是**唯一的收口**:不管是谁发起的取消,结果都由服务端这一句话说了算。
+      // 措辞不承诺"进程已停" —— 那个结论在这条路上还拿不到(宽限期没过完)。
+      pushNotice('warn', CANCELLED_NOTICE)
     } catch (error) {
-      // 409 = 此刻没有在跑的(可能刚好自己退了):如实说,不假装我们杀掉了什么。
-      pushNotice('warn', `没有可取消的试玩:${describeError(error)}`)
+      // 只有服务端**真的说**"没有在跑"(409 / `no-running-playtest`)才是那句话;
+      // 网络断了或 500 是"没问到",照实说没问到 —— 别把两种话混成一句。
+      if (error instanceof GalfreeApiError && error.code === 'no-running-playtest') pushNotice('warn', NOTHING_RUNNING_NOTICE)
+      else pushNotice('warn', `${CANCEL_UNKNOWN_NOTICE}(${describeError(error)})`)
     } finally {
       setCancelling(false)
       await refresh({ quiet: true })

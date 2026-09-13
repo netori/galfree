@@ -148,8 +148,9 @@ GALFree v1 的**唯一测试接缝** = Host 侧项目服务(`src/service/project
   - `POST /playtest` → `{run}`;`POST /playtest/cancel` → `{cancelled,note}`(T24;没在跑 = 409
     + `no-running-playtest`);`GET /sdk` → `{requested,dir,launcherReady,version,mismatch,provision}`、`POST /sdk/ensure` → 触发下载(首次使用进度可见)
     - `/playtest` 的请求**挂着不返回**直到游戏退出 —— 那是故意的(面板那颗按钮的"运行中"是真的)。
-      取消不靠断这条 HTTP,靠上面那条显式路由;不过**断开它也算取消**(`res` 在响应写完前 close
-      → 中止 → 409 `aborted`)—— 关掉标签页 / 断掉那次 fetch 与点「取消」是同一条路。
+      **取消走上面那条显式路由**;"服务端发现这次请求断开"只当兜底(`res` 在响应写完前 close →
+      中止 → 409 `aborted`),不当契约:实测浏览器把 `fetch` 的 abort 收在自己那侧,服务端那个
+      socket 不一定跟着关,所以"断开即取消"**不能**保证停住进程。
   - `GET /snapshots?path=` / `GET /snapshots/diff?path=&from=&to=`
   - `POST /snapshots/rollback` → `{result}`(`{path,to}`)—— 回滚是**写**:经接缝的
     `snapshotRollback` 走网关落盘,并自动产生一条回滚快照(历史不改写)
@@ -1346,22 +1347,60 @@ T19 往会话的 system prompt 注入一段指引,T20 把工具面补成 16 个,
    取消的**结果是如实回报,不是抛异常** —— `aborted` 只是"为什么停"的第三种取值,
    于是调用方分得清"被取消"与"这条路坏了"。**被取消的那一次不进账本**:它不是一次试玩,
    记进去板上就会多出一条假事实(守卫:`playtest.test.ts` 的"不 spawn、账本里不留一条假试玩")。
+   顺手记一条:**不声明的期限不算期限** —— `defineTool` 的 `timeoutMs` 只是给
+   `dsh-tool-call-timeout-policy` 用的声明,本部署没装它,注册表从不执行任何期限。
+   有界等待只能自己兑现(工具面的 `timeout_seconds` + 接缝的缺省值)。
 2. **默认等待从 15 分钟改成 3 分钟** —— 这是个**产品决定**:人**总是**要亲手关那个窗口,
    所以"等多久算久"取决于人要多快知道 agent 没在傻等。工具面能按次给 `timeout_seconds`
    (封顶 `PLAYTEST_MAX_WAIT_MS`,再长就把"卡住"那一版请回来了)。
    **描述里的分钟数与常量同源**(`PLAYTEST_DEFAULT_WAIT_MINUTES`),守卫断言描述里真有那个数。
-3. **"为什么停"要能断言**。`SpawnResult` 回 `{timedOut, aborted, elapsedMs}`,
-   `PlaytestRun` 与 `progress.playtest` 原样带出去(老账本缺这两个字段 → 按 `false`/`0` 读)。
-   板上的试玩格因此说得出"等满 N 秒没关窗口",而不是与"游戏自己崩了"混在一个红格子里。
+3. **"为什么停"要能断言,而且要**到处一致**。`SpawnResult` 回
+   `{timedOut, aborted, killed, elapsedMs}`,`PlaytestRun` 与 `progress.playtest` 原样带出去
+   (老账本缺这几个字段 → 按 `false`/`true`/`0` 读)。板上的试玩格因此说得出
+   "等满 N 秒 · 窗口没关",而不是与"游戏自己崩了"混在一个红格子里。
+   **推导那一侧也要分流**:`state` 仍是 `fail`(技术通过就是没通过),但
+   `nextActions` 给的是 `playtest-timed-out`(actor = **human**:请人把窗口关掉),
+   而不是 `playtest-failed`("照 traceback 修") —— 超时与"剧本报错"是两个人的活,
+   混成一条会把人指到错的方向(`progress.ts` 的 deriveNextActions 分支 + 守卫)。
+   `killed` 是**确认**过的那一半:发了中止信号之后等一个宽限窗口(`KILL_GRACE_MS`)看进程
+   到底退没退;没等到就如实说"信号发了但它没停,窗口可能还开着" —— 承诺"进程已杀掉"而
+   窗口还开着,正是这张票要消灭的那类假事实(工具、面板、板三处都按它措辞)。
 4. **两条入口同一个信号**。面板的「取消」打 `POST /playtest/cancel` → `cancelPlaytest()` →
-   中止的是**同一个** `AbortController`;面板自己那次 fetch 的 `signal` 与它并联。
-   所以"面板停了、游戏还开着"这种状态不存在。`playtestRunning()` 是**运行时事实**
-   (不是推导),面板那颗按钮据此显示 —— 否则 **agent 起的试玩**人只能干看着。
+   中止的是**同一个** `AbortController`(面板自己那次 fetch 的 `signal` 与它并联),
+   所以"面板停了、游戏还开着"这种状态不存在。**这条显式路由是取消的主路**:面板断开自己那次
+   fetch 只让界面立刻收口(浏览器侧),服务端不一定会跟着发现 —— 所以"断开即取消"只当兜底。
+   `playtestRunning()` 是**运行时事实**(不是推导),面板那颗按钮据此显示 ——
+   否则 **agent 起的试玩**人只能干看着。
+
+### 顺带的一条:**试玩串行**(票面没要,但"取消"要它才算数)
+
+一次只跑一个:`#playtestQueue` 把第二个调用排在后面(同时开两个游戏窗口没有意义)。
+连带两条必须做对,否则它自己就成了新的"绊住":
+
+- **排队 ≠ 在跑**:占位(`#playtestAbort`)在**排到队之后**才写。排在队列里的调用不能让
+  `playtestRunning()` 说"在跑" —— 那样面板会对着一个还没开始的调用显示「取消」并声称
+  杀掉了一个进程(假话);
+- **排队期间能取消**:调用方的信号与队列赛跑(`Promise.race`),取消到了就当场抛 `aborted`,
+  **一个进程都不起**。不然第二个调用要等"前一个的最多 3 分钟 + 自己的 3 分钟"。
+  守卫:`playtest.test.ts` 的"排队中的第二个调用:不算'在跑',而且取消它当场生效"。
+
+两条都记在案,是因为**票面只要了"面板给个取消"**,串行队列是本票自己加的(scope creep 的
+自觉):既然加了,它带来的等待就必须同样有界、同样停得掉。
 
 **没做的一条**(票面列为方向 3):"提交 → 立刻拿句柄 → 之后再查"那种后台队列。
 它要动接缝(`playtestStart` 现在退出才记账本),而"有界 + 能取消"已经把用户报的
 "卡住"收口;真要做成后台任务,是一张独立的票。
 
-**可红的守卫**:`playtest.test.ts` 的"真 spawn:取消要立刻杀掉子进程"与工具面那三条
-"取消已经发生 / 跑到一半被取消 / 人没关窗口" —— 夹具里的 `spawn` **永不退出**,
+### 一个非直觉的实测事实(改 `spawn-log.ts` 之前先读)
+
+**Windows 上 `child.kill()` 是同步的**:`close` 会在同一个宏任务里紧接着来(实测),
+而 `child.exitCode` 也会被**同步**设上(实测设成 0)。所以:
+
+- 不能拿 `exitCode` 当"进程退没退"的判据 —— 拿它判会直接丢掉"超时/取消"这两个原因
+  (第一版就这么错了:回报变成"正常退出,code 0");
+- "为什么停"必须由**发起方记着**(`stopReason`),而"退没退"由 `close` 回答。两者分开,
+  才不会互相抹掉。
+
+**可红的守卫**:`playtest.test.ts` 的"真 spawn:取消要立刻杀掉子进程"(真起进程 + 真杀)与
+工具面那三条"取消已经发生 / 跑到一半被取消 / 人没关窗口" —— 后者的夹具 `spawn` **永不退出**,
 正是"人没关窗口"的形状;红了就是"等到 15 分钟"。

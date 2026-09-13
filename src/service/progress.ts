@@ -113,6 +113,8 @@ export interface PlaytestView {
   /** 等了多久才停(毫秒)。老账本没有 = 0(如实)。
    *  这两项与 `PlaytestRun` 同源,不是这里算的 —— 推导只负责带出去。 */
   elapsedMs: number
+  /** 需要中止时进程确认停了没有(正常退出 = true;老账本没有 = true)。 */
+  killed: boolean
 }
 
 /** 项目级完整性处境(T13):板上一眼看出"这条线走不走得通"。 */
@@ -137,6 +139,8 @@ export type NextActionCode =
   | 'missing-audio'
   | 'playtest-not-run'
   | 'playtest-failed'
+  /** 等满上限被中止(**不是**报错):窗**口没关**,不是剧本有 traceback。 */
+  | 'playtest-timed-out'
   | 'playtest-stale'
   | 'scenes-awaiting-review'
   | 'art-awaiting-review'
@@ -295,6 +299,16 @@ export function deriveNextActions(input: {
       actor: 'agent',
       label: '跑一次试玩(会用钉版 SDK 开真窗口)',
       detail: '还没跑过:技术通过是推导(退出码 + 日志干净);认可才是人的事',
+      target: { kind: 'playtest' },
+    })
+  } else if (input.playtest.state === 'fail' && input.playtest.timedOut) {
+    // **等满上限**与"跑出 traceback"不是同一种坏(T24):前者的下一步是"请人把窗口关掉",
+    // 后者才是"照 traceback 修"。混成一条会把人指到错的方向(那是这条推导本来要避免的)。
+    actions.push({
+      code: 'playtest-timed-out',
+      actor: 'human',
+      label: '请人把游戏窗口关掉,再跑一次试玩',
+      detail: `上一次等满 ${Math.round(input.playtest.elapsedMs / 1000)} 秒,窗口一直没关就被中止了 —— 不是剧本报错`,
       target: { kind: 'playtest' },
     })
   } else if (input.playtest.state === 'fail') {
@@ -766,6 +780,7 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
       from: last.from ?? null,
       timedOut: last.timedOut ?? false,
       elapsedMs: last.elapsedMs ?? 0,
+      killed: last.killed !== false,
     }
   }
 

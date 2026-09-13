@@ -42,7 +42,7 @@ import {
 import { BIBLE_STAMP_TARGET } from './stamps.ts'
 import { composeSceneFile, extractSceneBlock, gatewayPathOf, scenesPathOf } from './scene-file.ts'
 import { applySceneEdit, buildSceneForm, type SceneEdit, type SceneFormModel } from './scene-form.ts'
-import { contentFingerprint, launchPlaytest, playtestDocument, readPlaytest, PLAYTEST_FILE, type PlaytestPorts, type PlaytestRun } from './playtest.ts'
+import { abortError, contentFingerprint, launchPlaytest, playtestDocument, readPlaytest, PLAYTEST_FILE, type PlaytestPorts, type PlaytestRun } from './playtest.ts'
 import {
   DEFAULT_PACKAGES, GUI_IMAGES_SENTINEL, PUBLISH_FILE, assertDestinationOutsideProject, buildIdentityBlockers,
   collectArtifacts, guiImagesBlockers, logTailOf,
@@ -490,15 +490,34 @@ export class ProjectService {
     fromLabel: string | null = null,
     options: { signal?: AbortSignal; timeoutMs?: number } = {},
   ): Promise<PlaytestRun> {
+    // 排队期间也得能取消(T24):否则第二个调用方要等"前一个的最多 3 分钟 + 自己的 3 分钟",
+    // 而取消它完全没反应 —— 那正是这张票要消灭的"等而不知道、停也停不掉"。
+    // 做法就是**别硬等**:谁先落定(上一个人跑完 / 取消到了)谁说了算。
+    if (options.signal?.aborted === true) throw abortError()
     const previous = this.#playtestQueue
     let release!: () => void
     this.#playtestQueue = new Promise<void>((resolve) => { release = resolve })
-    await previous
+    const { signal } = options
+    if (signal !== undefined) {
+      const abortSignal = signal
+      // 一个 `once` 监听器,finally 里摘掉(信号可能活一整轮会话,挂着不管就是一路漏)。
+      const cancelled = new Promise<boolean>((resolve) => {
+        const onAbort = (): void => resolve(true)
+        abortSignal.addEventListener('abort', onAbort, { once: true })
+        void previous.then(() => { abortSignal.removeEventListener('abort', onAbort) })
+      })
+      if (await Promise.race([previous.then(() => false), cancelled])) throw abortError()
+    } else {
+      await previous
+    }
+    // 占位**在排到队之后**才写:排队中的第二次调用不是"在跑",`cancelPlaytest()` 也不该
+    // 对着它说"中止了正在跑的那一次"(那是假话 —— 契约明写没有在跑就返回 false)。
     const controller = new AbortController()
     this.#playtestAbort = controller
     const onCallerAbort = (): void => controller.abort()
+    // 这里不用再查一次"已经取消过没有":上面那条 `cancelledWhileQueued` 已经覆盖了
+    // (tsc 也知道 —— 它把 `signal.aborted` 窄化成了 `false`,再判一次会被它当死代码)。
     options.signal?.addEventListener('abort', onCallerAbort, { once: true })
-    if (options.signal?.aborted === true) controller.abort()
     try {
       const graph = await this.branchGraph(projectRef)
       const entry = await this.#resolve(projectRef)

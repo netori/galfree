@@ -18,13 +18,6 @@ import type { ProjectService } from './project-service.ts'
 import type { BibleChapter } from './bible.ts'
 import type { SceneEdit } from './scene-form.ts'
 
-/**
- * 工具面按次给的等待上限:缺省用接缝那个**同一个**常量(描述里那句"默认 3 分钟"
- * 就是从这里来的人话),给的值再大也封顶到 `PLAYTEST_MAX_WAIT_MS` —— 否则
- * `timeout_seconds: 99999` 就把"卡住"那一版又请回来了。
- */
-const PLAYTEST_DEFAULT_WAIT_MS = PLAYTEST_TIMEOUT_MS
-
 function describe(error: unknown): string {
   if (error instanceof GalfreeError) return `[${error.code}] ${error.message}`
   return error instanceof Error ? error.message : String(error)
@@ -1037,7 +1030,8 @@ export function registerGalfreeTools(
       '一键试玩:用**钉版 SDK** 真跑一次游戏(会开真窗口,退出后回传)。',
       '**这条命令会等 —— 等的是人去把那个游戏窗口关掉**(窗口没关,它就一直在等):',
       `默认最多等 ${PLAYTEST_DEFAULT_WAIT_MINUTES} 分钟,到点中止进程并如实报"等满多久、为什么停";`,
-      '想等更久/更短用 `timeout_seconds`。取消(打断这一轮)会让它**立刻**停,不会拖到上限。',
+      '想等更久/更短用 `timeout_seconds`。取消(打断这一轮)会让它**立刻**停,不会拖到上限',
+      '(取消是中止信号,不保证游戏进程当场就没了 —— 若那个窗口还开着,请人手动关掉)。',
       '所以别把它当成一条"几百毫秒"的快命令来安排:跑之前告诉人"游戏窗口要开了,看完请关掉它"。',
       '技术通过是**推导**(退出码 + 日志干净),不是人盖的戳:退出码非 0 或日志里有 traceback 就如实报失败,',
       '并把 traceback 摘要带回来给你照它修。**"玩过了、行"只有人能说**(盖场景戳)—— 技术通过不等于好玩。',
@@ -1062,10 +1056,11 @@ export function registerGalfreeTools(
       const requested = Number(args.timeout_seconds ?? Number.NaN)
       const timeoutMs = Number.isFinite(requested) && requested > 0
         ? Math.min(Math.round(requested * 1000), PLAYTEST_MAX_WAIT_MS)
-        : PLAYTEST_DEFAULT_WAIT_MS
+        : PLAYTEST_TIMEOUT_MS
       try {
         const run = await service.playtestStart(active, String(args.from ?? '') === '' ? null : String(args.from), {
-          // 宿主的协作式取消:谁等谁就得自己观察这个信号(注册表只声明 `timeoutMs`,不执行期限)。
+          // 宿主的协作式取消:谁等谁就得自己观察这个信号。**不能指望注册表** ——
+          // `defineTool` 的 `timeoutMs` 只是声明,没人执行它(本部署也没装那个 policy)。
           signal: exec?.signal,
           timeoutMs,
         })
@@ -1077,12 +1072,16 @@ export function registerGalfreeTools(
           technicalPass: run.technicalPass,
           timedOut: run.timedOut,
           waitedSeconds,
+          // "进程真停了没有"照实说:没停就别替它说"已杀掉"(窗口可能还开着)。
+          processStopped: run.killed,
           traceback: run.traceback,
           from: run.from ?? null,
           at: run.at,
           board: board === null ? null : { state: board.state, technicalPass: board.technicalPass, from: board.from },
           next: run.timedOut
-            ? `窗口一直没关,等满 ${waitedSeconds} 秒就中止了(进程已杀掉,账本记的是"没跑成")。`
+            ? (run.killed
+                ? `窗口一直没关,等满 ${waitedSeconds} 秒就中止了(进程已停,账本记的是"没跑成")。`
+                : `窗口一直没关,等满 ${waitedSeconds} 秒我发了中止信号,但它**没有退出** —— 那个窗口可能还开着,请人手动关掉它。`)
               + '要么请人把窗口关掉后重跑;要么这次本来就只是看一眼窗口能不能开 —— 那就够了。'
             : run.technicalPass
               ? '技术通过。请人玩一遍并盖场景戳("玩过了、行"只有人能说);界面图也是这一刻生成进项目的。'
@@ -1090,8 +1089,11 @@ export function registerGalfreeTools(
         }, null, 2)
       } catch (error) {
         // 取消不是"试玩失败":如实说它没发生,而且账本没记 —— 别让人以为板上多了一条事实。
+        // **也不替它说"进程已停"**:那一刻的确认结果(`killed`)在失败路径上拿不到,
+        // 说不准的事就只说信号那半句。
         if (error instanceof GalfreeError && error.code === 'aborted') {
-          return '试玩被取消:这一轮的取消信号到了,游戏进程已中止,账本没有记这一条(它不是一个结果)。'
+          return '试玩被取消:这一轮的取消信号到了,这次运行不再往下走,账本没有记这一条(它不是一个结果)。'
+            + '如果那个游戏窗口还开着,说明它没响应中止信号 —— 请人手动关掉它。'
         }
         return `试玩未执行:${describe(error)}`
       }

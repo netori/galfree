@@ -124,11 +124,14 @@ export function StageBoard({ progress, busyKey, playing, running, cancelling, on
                   title="试玩 = 用钉版 SDK 真跑一次;技术通过是推导,不是人盖的戳"
                 >
                   {progress.playtest === null ? '试玩未跑'
+                    // `stale` 先判(那是"跑过之后内容又变了",比当时怎么停的更当紧);
+                    // 再判超时 —— 等满上限**不是**"有报错"(T24):那次是窗口没关,剧本可能一点毛病都没有。
+                    : progress.playtest.state === 'stale' ? `已过期 · ${relativeTime(progress.playtest.at)}`
+                    : progress.playtest.timedOut ? `等满 ${Math.round(progress.playtest.elapsedMs / 1000)} 秒 · 窗口没关`
                     : progress.playtest.state === 'pass' ? `技术通过 · ${relativeTime(progress.playtest.at)}`
-                    : progress.playtest.state === 'fail' ? `有报错 · 退出码 ${progress.playtest.exitCode}`
-                    : `已过期 · ${relativeTime(progress.playtest.at)}`}
-                  {/* "为什么停"要看得见(T24):等满上限那一次与"游戏自己崩了"不是一回事。 */}
-                  {progress.playtest?.timedOut === true ? ` · 等满 ${Math.round(progress.playtest.elapsedMs / 1000)} 秒没关窗口` : ''}
+                    : `有报错 · 退出码 ${progress.playtest.exitCode}`}
+                  {/* 中止了但进程没确认停下:如实说,别让人以为窗口已经没了(T24)。 */}
+                  {progress.playtest?.killed === false ? ' · 进程没停,窗口可能还开着' : ''}
                   {progress.playtest !== null && progress.playtest.from !== null ? ` · 从 ${progress.playtest.from}` : ''}
                 </Chip>
               ) : null}

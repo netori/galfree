@@ -797,8 +797,10 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
     const body: Record<string, unknown> = await readJsonBody(req).catch(() => ({}))
     const from = typeof body.from === 'string' && body.from !== '' ? body.from : null
-    // 面板自己也是一个"调用方":它**断开**（关标签页 / 取消那次 fetch）就中止这一轮。
-    // 判据 `!res.writableFinished` 是关键:响应正常写完时 `close` 也会来 —— 那时不能中止。
+    // 断开**真发生**时也算取消(浏览器关标签页 / 断掉那次 fetch)。判据
+    // `!res.writableFinished` 是关键:响应正常写完时 `close` 也会来 —— 那时不能中止。
+    // 如实标注:**这只是一道兜底**,不是取消的主路(实测:undici 把 `fetch` 的 abort 收在
+    // 自己那侧,服务端那个 socket 不一定会关 → `close` 不一定来)。主路是下面那条显式路由。
     const controller = new AbortController()
     const onClose = (): void => { if (!res.writableFinished) controller.abort() }
     res.on('close', onClose)
@@ -827,7 +829,12 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
       writeJson(res, 409, { error: '此刻没有在跑的试玩', code: 'no-running-playtest' })
       return
     }
-    writeJson(res, 200, { cancelled: true, note: '已中止游戏进程;这一次试玩不会被记进账本。' })
+    // 说"信号已发",**不**说"进程已停":宽限期(`KILL_GRACE_MS`)还没走完,那一刻我们
+    // 根本不知道它退没退 —— 承诺"已杀掉"而窗口还开着,正是这张票要消灭的假事实。
+    writeJson(res, 200, {
+      cancelled: true,
+      note: '中止信号已发(游戏进程应会随之结束;若那个窗口还开着,说明它没响应信号,请手动关掉它)。这一次试玩不会被记进账本。',
+    })
     return
   }
 

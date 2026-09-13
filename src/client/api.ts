@@ -354,7 +354,7 @@ export interface ProgressView {
   audio: AudioPoolView
   problems: DialectProblemView[]
   lint: { ok: boolean; errors: number; warnings: number }
-  playtest: { at: string; state: 'pass' | 'fail' | 'stale'; exitCode: number; technicalPass: boolean; traceback: string | null; from: string | null; timedOut: boolean; elapsedMs: number } | null
+  playtest: { at: string; state: 'pass' | 'fail' | 'stale'; exitCode: number; technicalPass: boolean; traceback: string | null; from: string | null; timedOut: boolean; elapsedMs: number; killed: boolean } | null
   /**
    * 此刻有没有一次试玩在跑(T24 / #32):运行时事实,不是从磁盘推的。
    * 面板那颗「取消」按钮据此显示 —— agent 起的试玩,人也能在这里停下它。
@@ -536,9 +536,8 @@ export class GalfreeApi {
   /**
    * 试玩(T13):`from` 给了就从这一场开始(副本里覆写 start;项目不动)。
    *
-   * `signal` 断开 = **取消这一次试玩**(T24):服务端把请求断开当取消,中止游戏进程并
-   * 409 回来 —— 面板那颗「取消」按钮走的就是它,外加 `/playtest/cancel` 兜住
-   * "agent 起的那一次"(面板自己那一份 fetch 早就不在手里了)。
+   * `signal` 断开会立刻结束**面板这一侧**的等待(界面马上从"运行中"回来),但它是
+   * 浏览器侧的收口 —— **停住游戏进程靠 `playtestCancel()`**(见它那里的说明)。
    */
   async playtest(
     from?: string,
@@ -557,10 +556,9 @@ export class GalfreeApi {
   }
 
   /**
-   * 取消正在跑的那一次试玩(T24 / #32)。
-   *
-   * 与"断掉那次 fetch"是**同一条路**(服务端同一个中止信号),但它不需要手里有那个
-   * fetch —— 所以 agent 起的试玩，人也能从面板上停掉。没在跑 → 抛 409 的原话。
+   * 取消正在跑的那一次试玩(T24 / #32)。**这是真正停住游戏进程的那条路** ——
+   * 与宿主那一轮的中断走服务端同一个中止信号。它不需要手里有那次 fetch,
+   * 所以 agent 起的试玩,人也能从面板上停掉。没在跑 → 409(`no-running-playtest`)的原话。
    */
   async playtestCancel(): Promise<{ cancelled: boolean; note: string }> {
     return await readJson<{ cancelled: boolean; note: string }>(

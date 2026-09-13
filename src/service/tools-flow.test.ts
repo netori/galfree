@@ -811,6 +811,7 @@ describe('全流程工具面(T20)', () => {
         exitCode: number
         timedOut: boolean
         waitedSeconds: number
+        processStopped: boolean
         next: string
       }
       expect(out.timedOut).toBe(true)
@@ -819,6 +820,12 @@ describe('全流程工具面(T20)', () => {
       // "等到多久、为什么停"是可断言的字段,不是一句没法核的话。
       expect(out.waitedSeconds).toBeGreaterThanOrEqual(1)
       expect(out.next).toMatch(/窗口|关/)
+      // "进程真停了没有"也照实给(端口说 true,工具不该自己改口)。
+      expect(out.processStopped).toBe(true)
+      // 板那一侧也不许把它说成"有报错"(T24:等满上限 ≠ 剧本有 traceback)。
+      const board = await service.progress('flow')
+      expect(board.playtest?.timedOut).toBe(true)
+      expect(board.nextActions.find((action) => action.code.startsWith('playtest'))?.code).toBe('playtest-timed-out')
     })
 
     it('默认等待是**有界的**(不是 15 分钟),而且工具描述如实写明"要人关窗口"', async () => {
