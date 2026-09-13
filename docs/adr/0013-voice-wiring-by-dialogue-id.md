@@ -30,6 +30,27 @@ ADR-0012 要把 TTS 生成加进来。但"生成出语音文件"只是一半 —
 
 **显式 `id` 子句把文件名钉死**:与内容无关,只与我给的 id 有关。
 
+### 实测(2026-09-12,在钉版 SDK 8.5.3 上真跑过;不是只读源码)
+
+`renpy.exe <项目> dialogue None`(**launcher 那个 "Extract Dialogue" 的命令行形态**,
+不需要显示)会把全部对白导出成 `dialogue.tab`,第一列就是标识符。一个探针项目跑两遍
+(第二遍把台词**整句改写**):
+
+```
+第一遍                                      第二遍(同一项目,改掉措辞)
+start_e49b1e45  Hello with an explicit…     start_e49b1e45  Hello with an explicit…      ← 没动的行,id 不变
+start_90791f80  This line has no id…        start_32447802  This line COMPLETELY…        ← **改一个词,哈希 id 就换了**
+pinned_line_001 Different wording…          pinned_line_001 Different wording…          ← 显式 id,**守住了**
+```
+
+两条附带事实:① `voice "x.ogg"` 语句**不进**哈希(带它的那句改词后 id 没变);② 子集外
+(`if` 块里)的对白**也**出现在导出里 —— 所以"导出清单"这件事不依赖方言子集。
+
+**还没做的那一条**(归 T26,别在这里补):`renpy.loadable()` 在**运行时**对
+`config.auto_voice` 那个文件到底认不认(源码路径 `00voice.rpy:372` 读到的是"认")。
+这条要一条**真引擎**的守卫(起项目 → 断言那一句的语音文件被采用),不是靠推论 ——
+T26 的验收标准里已经写了它。
+
 ## Decision
 
 - 语音接线一律走 **`config.auto_voice`**,剧本里**不写 `voice` / 不写 `play voice`**:
