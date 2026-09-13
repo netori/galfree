@@ -23,6 +23,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { makeRoutes } from '../routes.ts'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
+import type { SpawnResult } from './playtest.ts'
 
 const SCRIPT = [
   'label start:',
@@ -49,6 +50,14 @@ let pickerKind = 'native'
 let pickedPath: string | null = null
 /** 发布端口收到的构建调用(断言"被阻止时**没有**开始构建")。 */
 let publishCalls: Array<{ destination: string; packages: string[] }> = []
+/**
+ * 试玩端口:默认"游戏窗口开了,等人去关" —— 真正的退出由用例说了算。
+ *
+ * 为什么不是"立刻返回 0":那样就测不出取消(T24)—— 取消的前提是**它还在等**。
+ * 这里与真实现同构:唯一的出路是收到中止信号(或 `settlePlaytest()` 放行)。
+ */
+let playtestSettle: (() => void) | null = null
+let playtestAborts = 0
 
 async function req(path: string, init?: RequestInit): Promise<{ status: number; body: any }> {
   const res = await fetch(`${base}${path}`, init)
@@ -94,6 +103,17 @@ beforeAll(async () => {
     service = createProjectService({
       dataDir,
       uiTemplate: fakeUiTemplate(sdkDir),
+      // 试玩端口:假 SDK 里没有真游戏,所以这里就是"窗口一直开着" —— 取消那条路才测得到。
+      playtest: {
+        resolveLauncher: async () => join(sdkDir, 'renpy.exe'),
+        spawn: async (_launcher, _root, options) => await new Promise<SpawnResult>((resolve) => {
+          playtestSettle = () => resolve({ code: 0, log: "Ren'Py 8.5.3 starting\n", timedOut: false, aborted: false, elapsedMs: 1 })
+          options?.signal?.addEventListener('abort', () => {
+            playtestAborts += 1
+            resolve({ code: -1, log: 'killed', timedOut: false, aborted: true, elapsedMs: 1 })
+          })
+        }),
+      },
       // 发布端口:假构建(真构建在 `publish.slow.test.ts` 的慢带里);输出目录在项目之外。
       publish: {
         ports: {
@@ -796,10 +816,48 @@ describe('路由适配层(/api/galfree)', () => {
     expect(bogus.status).toBe(404)
     expect(bogus.body.code).toBe('unknown-scene')
 
-    // 不带 body(面板的"启动试玩")也不该因为读不到 JSON 而 500 —— 这里没有真 SDK,
-    // 所以期望的是 **sdk-not-ready**(409),而不是解析错误。
-    const noBody = await postJson('/api/galfree/playtest', {})
-    expect([409, 200]).toContain(noBody.status)
+    // 不带 body(面板的"启动试玩")也不该因为读不到 JSON 而 500。
+    // 本夹具的试玩端口是"窗口一直开着",所以这条**会挂在那儿等** —— 这正是 T24 要治的
+    // 形状,所以就地取消掉它(下面那条用例专门测这条路)。
+    const noBody = postJson('/api/galfree/playtest', {})
+    const started = Date.now()
+    while (playtestSettle === null && Date.now() - started < 5_000) await new Promise((r) => setTimeout(r, 20))
+    expect((await postJson('/api/galfree/playtest/cancel', {})).status).toBe(200)
+    expect((await noBody).status).toBe(409)
+  })
+
+  it('试玩取消(T24):面板那颗按钮真的能停下"还在等人关窗口"的那一次', async () => {
+    // 用户报的"卡住"就发生在这里:agent(或面板)起了游戏窗口,人没关 → 请求一直悬挂。
+    // 取消必须**立刻**生效,而且被取消的那一次**不进账本**(它不是一个结果)。
+    await freshProject()
+
+    // 没有在跑的时候:如实说"没有可取消的"(不假装杀掉了一个进程)。
+    const idle = await postJson('/api/galfree/playtest/cancel', {})
+    expect(idle.status).toBe(409)
+    expect(idle.body.code).toBe('no-running-playtest')
+
+    playtestAborts = 0
+    const running = postJson('/api/galfree/playtest', {})
+    const deadline = Date.now() + 5_000
+    while (playtestSettle === null && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20))
+    expect(playtestSettle).not.toBeNull()
+    // 板上**看得到它在跑**(面板那颗取消按钮的依据;agent 起的也一样看得到)。
+    expect((await req('/api/galfree/progress')).body.playtestRunning).toBe(true)
+
+    const cancelled = await postJson('/api/galfree/playtest/cancel', {})
+    expect(cancelled.status).toBe(200)
+    expect(cancelled.body.cancelled).toBe(true)
+    expect(playtestAborts).toBe(1) // 子进程真收到中止(不是"面板自己不等了")
+
+    const stopped = await running
+    expect(stopped.status).toBe(409)
+    expect(stopped.body.code).toBe('aborted')
+
+    const after = await req('/api/galfree/progress')
+    expect(after.body.playtestRunning).toBe(false)
+    // 账本里没有这一条:板上照旧"试玩未跑"(被取消的不是一次试玩)。
+    expect(after.body.playtest).toBeNull()
+    expect(after.body.summary.playtestNotRun).toBe(1)
   })
 
   it('T20 同一条写路:面板路由与 agent 工具落到**同一份账本与推导**(互相看得见)', async () => {

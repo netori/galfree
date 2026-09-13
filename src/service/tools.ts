@@ -13,9 +13,17 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { GalfreeError } from './error.ts'
+import { PLAYTEST_DEFAULT_WAIT_MINUTES, PLAYTEST_MAX_WAIT_MS, PLAYTEST_TIMEOUT_MS } from './playtest.ts'
 import type { ProjectService } from './project-service.ts'
 import type { BibleChapter } from './bible.ts'
 import type { SceneEdit } from './scene-form.ts'
+
+/**
+ * 工具面按次给的等待上限:缺省用接缝那个**同一个**常量(描述里那句"默认 3 分钟"
+ * 就是从这里来的人话),给的值再大也封顶到 `PLAYTEST_MAX_WAIT_MS` —— 否则
+ * `timeout_seconds: 99999` 就把"卡住"那一版又请回来了。
+ */
+const PLAYTEST_DEFAULT_WAIT_MS = PLAYTEST_TIMEOUT_MS
 
 function describe(error: unknown): string {
   if (error instanceof GalfreeError) return `[${error.code}] ${error.message}`
@@ -1019,11 +1027,18 @@ export function registerGalfreeTools(
   })))
 
   // ─── 试玩(T20):用钉版 SDK 真跑一次,退出回传 ───────────────────────
+  //
+  // 描述里那几句"要人去点关窗口""默认等 3 分钟"是**契约不是客套**(T24 / #32):
+  // 用户报的"卡住"就发生在模型与人都以为这是条快命令的时候。
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'galfree_playtest',
     description: [
       '一键试玩:用**钉版 SDK** 真跑一次游戏(会开真窗口,退出后回传)。',
+      '**这条命令会等 —— 等的是人去把那个游戏窗口关掉**(窗口没关,它就一直在等):',
+      `默认最多等 ${PLAYTEST_DEFAULT_WAIT_MINUTES} 分钟,到点中止进程并如实报"等满多久、为什么停";`,
+      '想等更久/更短用 `timeout_seconds`。取消(打断这一轮)会让它**立刻**停,不会拖到上限。',
+      '所以别把它当成一条"几百毫秒"的快命令来安排:跑之前告诉人"游戏窗口要开了,看完请关掉它"。',
       '技术通过是**推导**(退出码 + 日志干净),不是人盖的戳:退出码非 0 或日志里有 traceback 就如实报失败,',
       '并把 traceback 摘要带回来给你照它修。**"玩过了、行"只有人能说**(盖场景戳)—— 技术通过不等于好玩。',
       '`from` 给一个场景 label 就**从那一场开始**(做法是在副本里覆写 start,你的项目一个字节都不动)。',
@@ -1032,31 +1047,52 @@ export function registerGalfreeTools(
     parameters: {
       project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
       from: { type: 'string', description: '从哪一场开始试玩(省略 = 从头);label 必须在剧本里存在' },
+      timeout_seconds: {
+        type: 'number',
+        description: `等多久算久(秒;省略 = ${PLAYTEST_DEFAULT_WAIT_MINUTES * 60} 秒)。到点会中止游戏进程并如实报"等满多久"`,
+      },
     },
     output: {
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    async execute(args) {
+    async execute(args, exec) {
       const active = await resolveProject(service, args.project)
       if (active === null) return '没有激活项目:先建一个(galfree_create_project)。'
+      const requested = Number(args.timeout_seconds ?? Number.NaN)
+      const timeoutMs = Number.isFinite(requested) && requested > 0
+        ? Math.min(Math.round(requested * 1000), PLAYTEST_MAX_WAIT_MS)
+        : PLAYTEST_DEFAULT_WAIT_MS
       try {
-        const run = await service.playtestStart(active, String(args.from ?? '') === '' ? null : String(args.from))
-        const progress = await service.progress(active)
-        const board = progress.playtest
+        const run = await service.playtestStart(active, String(args.from ?? '') === '' ? null : String(args.from), {
+          // 宿主的协作式取消:谁等谁就得自己观察这个信号(注册表只声明 `timeoutMs`,不执行期限)。
+          signal: exec?.signal,
+          timeoutMs,
+        })
+        const waitedSeconds = Math.round(run.elapsedMs / 1000)
+        const board = (await service.progress(active)).playtest
         return JSON.stringify({
           ok: run.technicalPass,
           exitCode: run.exitCode,
           technicalPass: run.technicalPass,
+          timedOut: run.timedOut,
+          waitedSeconds,
           traceback: run.traceback,
           from: run.from ?? null,
           at: run.at,
           board: board === null ? null : { state: board.state, technicalPass: board.technicalPass, from: board.from },
-          next: run.technicalPass
-            ? '技术通过。请人玩一遍并盖场景戳("玩过了、行"只有人能说);界面图也是这一刻生成进项目的。'
-            : `没通过,照 traceback 修完再跑一次:${run.traceback ?? '(没有 traceback,看退出码)'}`,
+          next: run.timedOut
+            ? `窗口一直没关,等满 ${waitedSeconds} 秒就中止了(进程已杀掉,账本记的是"没跑成")。`
+              + '要么请人把窗口关掉后重跑;要么这次本来就只是看一眼窗口能不能开 —— 那就够了。'
+            : run.technicalPass
+              ? '技术通过。请人玩一遍并盖场景戳("玩过了、行"只有人能说);界面图也是这一刻生成进项目的。'
+              : `没通过,照 traceback 修完再跑一次:${run.traceback ?? '(没有 traceback,看退出码)'}`,
         }, null, 2)
       } catch (error) {
+        // 取消不是"试玩失败":如实说它没发生,而且账本没记 —— 别让人以为板上多了一条事实。
+        if (error instanceof GalfreeError && error.code === 'aborted') {
+          return '试玩被取消:这一轮的取消信号到了,游戏进程已中止,账本没有记这一条(它不是一个结果)。'
+        }
         return `试玩未执行:${describe(error)}`
       }
     },

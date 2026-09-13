@@ -105,6 +105,14 @@ export interface PlaytestView {
   traceback: string | null
   /** 从哪一场开始试的(null = 从头)。 */
   from: string | null
+  /**
+   * 这一次是**等满上限**被中止的(不是游戏自己退的)—— "为什么停"要能说出口(T24)。
+   * 老账本里没有这一条 = 那时还没有"有界等待"这回事,按 false 读。
+   */
+  timedOut: boolean
+  /** 等了多久才停(毫秒)。老账本没有 = 0(如实)。
+   *  这两项与 `PlaytestRun` 同源,不是这里算的 —— 推导只负责带出去。 */
+  elapsedMs: number
 }
 
 /** 项目级完整性处境(T13):板上一眼看出"这条线走不走得通"。 */
@@ -444,6 +452,14 @@ export interface ProgressSnapshot {
   /** 最近一次试玩事实的推导视图(无记录 = null)。 */
   playtest: PlaytestView | null
   /**
+   * **此刻**有没有一次试玩在跑(T24 / #32)。
+   *
+   * 与 `playtest` 不是一回事:那是"最近记下来的一条事实"(文件里的),这是**运行时事实**。
+   * 面板靠它显示那颗"取消"按钮 —— 否则 agent 起的试玩,人只能干看着等(AI 那一轮
+   * 挂着,面板又什么都说不出)。缺省 false(没装配这个事实来源时如实说"没在跑")。
+   */
+  playtestRunning: boolean
+  /**
    * 「下一步」(T21):**纯推导**的行动清单(带 actor 与跳转目标)。
    * 与 `problems` 分工:那个说哪里坏了(定位缺陷),这个说接着做什么(给动作)。
    */
@@ -574,6 +590,8 @@ export interface ProgressInputs {
   publish?: PublishView | null
   /** 试玩事实(账本 last + 当前内容指纹);缺省视为未跑过。 */
   playtest?: { last: PlaytestRun | null; currentFingerprint: string }
+  /** 此刻有没有试玩在跑(运行时事实,不是从磁盘推的;缺省 false)。 */
+  playtestRunning?: boolean
 }
 
 /** 纯推导:读磁盘(戳账本 + 素材文件指纹)+ 已解析结构 → 进度快照。 */
@@ -746,6 +764,8 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
       technicalPass: last.technicalPass,
       traceback: last.traceback,
       from: last.from ?? null,
+      timedOut: last.timedOut ?? false,
+      elapsedMs: last.elapsedMs ?? 0,
     }
   }
 
@@ -792,6 +812,7 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
     problems,
     lint: { ok: lintErrors === 0, errors: lintErrors, warnings: lintWarnings },
     playtest,
+    playtestRunning: inputs.playtestRunning === true,
     nextActions,
     summary,
     degraded: summary.degraded > 0 || problems.length > 0,

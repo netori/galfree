@@ -144,6 +144,7 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['/picker/create-directory', ['POST']],
   ['/picker/inspect', ['GET']],
   ['/playtest', ['POST']],
+  ['/playtest/cancel', ['POST']],
   ['/publish', ['GET', 'POST']],
   ['/sdk', ['GET']],
   ['/sdk/ensure', ['POST']],
@@ -788,13 +789,45 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
 
   // 一键试玩(T7/T13):接缝同一控制器,无第二管线。
   // `from` 给了就**从这一场开始**(副本里覆写 start;用户项目不动)。
+  //
+  // 请求悬挂到游戏退出 —— 那是**故意的**(这样面板那颗按钮的"运行中"是真的)。
+  // 取消不靠断这条 HTTP,靠下面那条显式路由(T24 / #32)。
   if (method === 'POST' && path === '/playtest') {
     const active = await service.getActiveProject()
     if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
     const body: Record<string, unknown> = await readJsonBody(req).catch(() => ({}))
     const from = typeof body.from === 'string' && body.from !== '' ? body.from : null
-    const run = await service.playtestStart(active.id, from)
-    writeJson(res, 200, { run })
+    // 面板自己也是一个"调用方":它**断开**（关标签页 / 取消那次 fetch）就中止这一轮。
+    // 判据 `!res.writableFinished` 是关键:响应正常写完时 `close` 也会来 —— 那时不能中止。
+    const controller = new AbortController()
+    const onClose = (): void => { if (!res.writableFinished) controller.abort() }
+    res.on('close', onClose)
+    try {
+      const run = await service.playtestStart(active.id, from, { signal: controller.signal })
+      writeJson(res, 200, { run })
+    } catch (error) {
+      // 取消不是故障:如实 409,而且账本没有记这一条(面板据此说"已取消")。
+      // 断开那条路上响应可能已经没了(调用方自己走了)—— 那就别往上写,只当它走了。
+      if (error instanceof GalfreeError && error.code === 'aborted') {
+        if (!res.writableEnded && !res.destroyed) writeJson(res, 409, { error: '试玩已取消', code: 'aborted' })
+        return
+      }
+      throw error
+    } finally {
+      res.off('close', onClose)
+    }
+    return
+  }
+
+  // 取消正在跑的那一次试玩(T24 / #32):与宿主中断走**同一个**中止信号。
+  // 没在跑 → 409 并说明"没有可取消的"(不假装杀掉了一个进程)。
+  if (method === 'POST' && path === '/playtest/cancel') {
+    const stopped = service.cancelPlaytest()
+    if (!stopped) {
+      writeJson(res, 409, { error: '此刻没有在跑的试玩', code: 'no-running-playtest' })
+      return
+    }
+    writeJson(res, 200, { cancelled: true, note: '已中止游戏进程;这一次试玩不会被记进账本。' })
     return
   }
 

@@ -104,8 +104,11 @@ GALFree v1 的**唯一测试接缝** = Host 侧项目服务(`src/service/project
 
 | 方法 | 语义 |
 |---|---|
-| `playtestStart(ref)` | 钉版 SDK 启动项目 → 退出回传 `{at,exitCode,technicalPass,traceback,fingerprint}`;事实经网关落 `.studio/playtest.json` → 进快照 |
+| `playtestStart(ref, from?, options?)` | 钉版 SDK 启动项目 → 退出回传 `{at,exitCode,technicalPass,traceback,fingerprint,from,timedOut,elapsedMs}`;事实经网关落 `.studio/playtest.json` → 进快照 |
+| `cancelPlaytest()` | 中止**正在跑**的那一次(杀掉游戏进程)→ `true`;没有在跑 → `false`(不假装杀掉了什么) |
+| `playtestRunning()` | 此刻有没有一次在跑(运行时事实,面板那颗「取消」的依据) |
 | 板上 `progress.playtest` | 推导:`pass/fail` + 内容再变 → `stale`;SDK 未就绪 → `sdk-not-ready` 如实报错 |
+| 板上 `progress.playtestRunning` | 同上那个运行时事实(板读的是同一份) |
 
 技术通过 = 退出码 0 且日志无 traceback(`extractTraceback`);主观"玩过了、行"
 由人盖场景戳表达(审读戳账本同套机制)。
@@ -142,7 +145,11 @@ GALFree v1 的**唯一测试接缝** = Host 侧项目服务(`src/service/project
     无 activate 路由(切换 UI 明确"后补",见 spec User Story 29 / #9「切换 UI 不做」),
     此处由**发起人明确批准**解除该延迟。只动注册表激活位,不写任何项目文件
   - `GET /progress` → 推导快照;`POST /stamps/scene|slot`(**仅人**经由工作台触发;agent 工具面永远不接此端口)
-  - `POST /playtest` → `{run}`;`GET /sdk` → `{requested,dir,launcherReady,version,mismatch,provision}`、`POST /sdk/ensure` → 触发下载(首次使用进度可见)
+  - `POST /playtest` → `{run}`;`POST /playtest/cancel` → `{cancelled,note}`(T24;没在跑 = 409
+    + `no-running-playtest`);`GET /sdk` → `{requested,dir,launcherReady,version,mismatch,provision}`、`POST /sdk/ensure` → 触发下载(首次使用进度可见)
+    - `/playtest` 的请求**挂着不返回**直到游戏退出 —— 那是故意的(面板那颗按钮的"运行中"是真的)。
+      取消不靠断这条 HTTP,靠上面那条显式路由;不过**断开它也算取消**(`res` 在响应写完前 close
+      → 中止 → 409 `aborted`)—— 关掉标签页 / 断掉那次 fetch 与点「取消」是同一条路。
   - `GET /snapshots?path=` / `GET /snapshots/diff?path=&from=&to=`
   - `POST /snapshots/rollback` → `{result}`(`{path,to}`)—— 回滚是**写**:经接缝的
     `snapshotRollback` 走网关落盘,并自动产生一条回滚快照(历史不改写)
@@ -977,7 +984,7 @@ T19 之后新会话知道**该按什么顺序做**,但其中一半环节**没有
 | `galfree_story_bible` | `writeBible` / `importOutline` / `bible` + `bibleOutline` | `action: read / write / import_outline`;**定稿戳仍只有人能盖** |
 | `galfree_edit_scene` | `sceneForm` / `editScene` | `action: read / edit`;`edit` 是结构化指令(五种 kind) |
 | `galfree_wire_audio` | `audioPool` + `editScene(setAudio)` | `action: pool / wire / stop`;写完当场报悬空 |
-| `galfree_playtest` | `playtestStart`(含 `from`) | 真跑真窗口;退出码 / traceback 原样回传 |
+| `galfree_playtest` | `playtestStart`(含 `from`、`timeout_seconds`) | 真跑真窗口;退出码 / traceback 原样回传。**它会等人去关窗口**(默认 3 分钟,观察 `exec.signal`,取消立刻停)—— T24 起描述里写明了这一条 |
 | `galfree_snapshot` | `snapshotHistory` / `snapshotDiff` / `snapshotRollback` | `action: history / diff / rollback`;回滚也是写(留下一条新快照) |
 
 ### 工具面要用、而接缝不拥有的那点环境事实
@@ -1320,3 +1327,41 @@ T19 往会话的 system prompt 注入一段指引,T20 把工具面补成 16 个,
 
 若将来要把适配层断言收回到 seam(例如改成只断言接缝抛出的错误码映射),删掉那两个文件即可,
 接缝纪律的其他部分不受影响。
+
+## 试玩不会把人绊住(T24 / #32 之后追加)
+
+用户 2026-09-12 报的现象:**`galfree_playtest` 总是容易卡住** —— 点了以后长时间没回音。
+查明后是个形状问题,不是 bug:工具体在 `await playtestStart(...)` 上**同步等游戏窗口被关掉**,
+而"退出"要人去点那个窗口的关闭按钮。三件事一起把"等"变成了"看起来死了":
+
+1. 没人知道它在等(窗口被挡住 / 最小化 → 屏幕上什么都没发生);
+2. **取消这一轮对话不会让它停**:宿主的取消是**协作式**的(每个工具体拿到 `exec.signal`,
+   必须自己观察),而 `galfree_playtest` 没观察 → 它继续等到上限;
+3. 上限是 **15 分钟**;面板那条路运行中只有一个 `disabled` 的按钮,没有取消入口。
+
+### 四个决定(改之前先读这一节)
+
+1. **取消是观察到的,不是假设来的**。`PlaytestPorts.spawn` 的第三个参数多了 `signal`;
+   `exec.signal` 从工具面一路传到子进程(`spawnWithLog` 里 `child.kill()`)。
+   取消的**结果是如实回报,不是抛异常** —— `aborted` 只是"为什么停"的第三种取值,
+   于是调用方分得清"被取消"与"这条路坏了"。**被取消的那一次不进账本**:它不是一次试玩,
+   记进去板上就会多出一条假事实(守卫:`playtest.test.ts` 的"不 spawn、账本里不留一条假试玩")。
+2. **默认等待从 15 分钟改成 3 分钟** —— 这是个**产品决定**:人**总是**要亲手关那个窗口,
+   所以"等多久算久"取决于人要多快知道 agent 没在傻等。工具面能按次给 `timeout_seconds`
+   (封顶 `PLAYTEST_MAX_WAIT_MS`,再长就把"卡住"那一版请回来了)。
+   **描述里的分钟数与常量同源**(`PLAYTEST_DEFAULT_WAIT_MINUTES`),守卫断言描述里真有那个数。
+3. **"为什么停"要能断言**。`SpawnResult` 回 `{timedOut, aborted, elapsedMs}`,
+   `PlaytestRun` 与 `progress.playtest` 原样带出去(老账本缺这两个字段 → 按 `false`/`0` 读)。
+   板上的试玩格因此说得出"等满 N 秒没关窗口",而不是与"游戏自己崩了"混在一个红格子里。
+4. **两条入口同一个信号**。面板的「取消」打 `POST /playtest/cancel` → `cancelPlaytest()` →
+   中止的是**同一个** `AbortController`;面板自己那次 fetch 的 `signal` 与它并联。
+   所以"面板停了、游戏还开着"这种状态不存在。`playtestRunning()` 是**运行时事实**
+   (不是推导),面板那颗按钮据此显示 —— 否则 **agent 起的试玩**人只能干看着。
+
+**没做的一条**(票面列为方向 3):"提交 → 立刻拿句柄 → 之后再查"那种后台队列。
+它要动接缝(`playtestStart` 现在退出才记账本),而"有界 + 能取消"已经把用户报的
+"卡住"收口;真要做成后台任务,是一张独立的票。
+
+**可红的守卫**:`playtest.test.ts` 的"真 spawn:取消要立刻杀掉子进程"与工具面那三条
+"取消已经发生 / 跑到一半被取消 / 人没关窗口" —— 夹具里的 `spawn` **永不退出**,
+正是"人没关窗口"的形状;红了就是"等到 15 分钟"。

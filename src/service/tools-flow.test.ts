@@ -19,13 +19,16 @@ import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
 import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ImageHttpClient } from './images.ts'
+import { PLAYTEST_DEFAULT_WAIT_MINUTES } from './playtest.ts'
+import type { SpawnResult } from './playtest.ts'
 import type { PublishPorts } from './publish.ts'
 
 interface FakeTool {
   name: string
   description: string
   parameters: { properties: Record<string, { type: string; description?: string }>; required?: string[] }
-  execute: (args: Record<string, unknown>) => Promise<string>
+  /** `exec` 可选:直接调工具的那些用例不给它(真宿主一定会给,取消那条路才有信号)。 */
+  execute: (args: Record<string, unknown>, exec?: { signal?: AbortSignal }) => Promise<string>
 }
 
 /** 一张 1×1 的最小 PNG(假上游回它,产物落盘能过"文件存在"这条判据)。 */
@@ -718,6 +721,116 @@ describe('全流程工具面(T20)', () => {
       await seedScene()
       const out = await find('galfree_playtest').execute({ project: 'flow', from: 'nope' })
       expect(out).toContain('unknown-scene')
+    })
+  })
+
+  // ── 切片 D:试玩"卡住"这件事(#32 / T24)─────────────────────────────
+  //
+  // 用户报的现象:点了试玩(或 agent 调了)**长时间没回音** —— 因为工具体在
+  // `await playtestStart` 上**同步等游戏窗口被关掉**,而取消这一轮对话**不会**让它停
+  // (工具没观察 `exec.signal`;宿主注册表只声明 `timeoutMs`、不执行期限)。
+  //
+  // 这里的假 spawn **永不退出**,正是那个形状:它模仿"人没关窗口"。
+  // 断言的是**工具体自己**的行为 —— 它必须观察取消信号、必须有界,而不是等 15 分钟。
+
+  describe('试玩不会把人绊住(#32 取消契约)', () => {
+    /** 造一个"窗口永远开着"的服务:spawn 回来的唯一出路就是收到中止信号。 */
+    const neverClosingService = (config: Parameters<typeof createProjectService>[0]): ProjectService =>
+      createProjectService(config)
+
+    it('取消已经发生 → 工具体**立刻**回来(不去起游戏、不写账本)', async () => {
+      let spawned = 0
+      service = neverClosingService({
+        dataDir: dataDir + '-abort',
+        uiTemplate: fakeUiTemplate(sdkDir),
+        playtest: {
+          resolveLauncher: async () => '/fake/renpy.exe',
+          spawn: async () => {
+            spawned += 1
+            return { code: 0, log: '' }
+          },
+        },
+      })
+      tools = register()
+      await seedScene()
+      const controller = new AbortController()
+      controller.abort()
+      const started = Date.now()
+      const out = await find('galfree_playtest').execute({ project: 'flow' }, { signal: controller.signal })
+      const elapsed = Date.now() - started
+      expect(elapsed).toBeLessThan(2_000) // 红了就是"等到 15 分钟"
+      expect(spawned).toBe(0)
+      expect(out).toMatch(/取消|中止/)
+      expect(out).not.toContain('technicalPass')
+      expect((await service.progress('flow')).playtest).toBeNull()
+    })
+
+    it('跑到一半被取消 → 当场回来并如实说"被取消"(不假装通过、也不留一条假账本)', async () => {
+      service = neverClosingService({
+        dataDir: dataDir + '-during',
+        uiTemplate: fakeUiTemplate(sdkDir),
+        playtest: {
+          resolveLauncher: async () => '/fake/renpy.exe',
+          // 窗口永不关闭:唯一的出路是收到**工具转发下去**的中止信号
+          // (工具不转发它 → 这条测试自己超时红 —— 那正是"卡住"的形状)。
+          spawn: async (_launcher, _root, options) => await new Promise<SpawnResult>((resolve) => {
+            options?.signal?.addEventListener('abort', () => {
+              resolve({ code: -1, log: 'killed', aborted: true, timedOut: false, elapsedMs: 1 })
+            })
+          }),
+        },
+      })
+      tools = register()
+      await seedScene()
+      const controller = new AbortController()
+      const started = Date.now()
+      const pending = find('galfree_playtest').execute({ project: 'flow' }, { signal: controller.signal })
+      setTimeout(() => controller.abort(), 60)
+      const out = await pending
+      expect(Date.now() - started).toBeLessThan(5_000) // 红了就是"一直等到超时上限"
+      expect(out).toMatch(/取消|中止/)
+      expect((await service.progress('flow')).playtest).toBeNull()
+    })
+
+    it('人没关窗口 → 有界的等待,回报里写明"等到多久、为什么停"(可断言)', async () => {
+      service = neverClosingService({
+        dataDir: dataDir + '-slow',
+        uiTemplate: fakeUiTemplate(sdkDir),
+        playtest: {
+          resolveLauncher: async () => '/fake/renpy.exe',
+          spawn: async (_launcher, _root, options) => {
+            await new Promise((resolve) => setTimeout(resolve, options?.timeoutMs ?? 0))
+            return { code: -1, log: 'timeout', timedOut: true, aborted: false, elapsedMs: options?.timeoutMs ?? 0 }
+          },
+        },
+      })
+      tools = register()
+      await seedScene()
+      const out = JSON.parse(await find('galfree_playtest').execute({ project: 'flow', timeout_seconds: 1 })) as {
+        ok: boolean
+        exitCode: number
+        timedOut: boolean
+        waitedSeconds: number
+        next: string
+      }
+      expect(out.timedOut).toBe(true)
+      expect(out.ok).toBe(false)
+      expect(out.exitCode).toBe(-1)
+      // "等到多久、为什么停"是可断言的字段,不是一句没法核的话。
+      expect(out.waitedSeconds).toBeGreaterThanOrEqual(1)
+      expect(out.next).toMatch(/窗口|关/)
+    })
+
+    it('默认等待是**有界的**(不是 15 分钟),而且工具描述如实写明"要人关窗口"', async () => {
+      const tool = find('galfree_playtest')
+      // 描述里那两句话是**契约**(用户报的"卡住"就出在没人知道它会等):一条说"它在等谁",
+      // 一条说"等多久算久"。措辞不锁死,锁的是"这两件事写没写"。同一个信号:人话里的
+      // 分钟数与常量同源(`PLAYTEST_DEFAULT_WAIT_MINUTES`),所以这里断言的是它真的写了。
+      expect(tool.description).toMatch(/等/)
+      expect(tool.description).toMatch(/关/)
+      expect(tool.description).toMatch(/窗口/)
+      expect(tool.description).toContain(`${PLAYTEST_DEFAULT_WAIT_MINUTES} 分钟`)
+      expect(tool.parameters.properties.timeout_seconds).toBeDefined()
     })
   })
 

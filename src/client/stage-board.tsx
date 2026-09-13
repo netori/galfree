@@ -73,15 +73,20 @@ function NextActions({ actions, onJump }: { actions: NextActionView[]; onJump: (
   )
 }
 
-export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, onPlaytestFrom, onRelocate, onOpenScene, onJump, hasProject }: {
+export function StageBoard({ progress, busyKey, playing, running, cancelling, onStamp, onPlaytest, onPlaytestFrom, onPlaytestCancel, onRelocate, onOpenScene, onJump, hasProject }: {
   progress: ProgressView | null
   /** 正在盖戳的目标 key(stampKey 的产物);null = 空闲。 */
   busyKey: string | null
   playing: boolean
+  /** 服务端此刻有没有一次试玩在跑(agent 起的那一次也算 —— 取消按钮不能只看 `playing`)。 */
+  running: boolean
+  cancelling: boolean
   onStamp: (target: StampTarget) => void
   onPlaytest: () => void
   /** 从这一场开始试玩(T13)。 */
   onPlaytestFrom: (label: string) => void
+  /** 中止正在跑的那一次试玩(T24 / #32)。 */
+  onPlaytestCancel: () => void
   /** 把手写文件里的段搬进生成目录(T10):搬完这一场才能被重生成。 */
   onRelocate: (label: string) => void
   /** 打开场景编辑器定位到这一场(T11)。 */
@@ -122,6 +127,8 @@ export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, on
                     : progress.playtest.state === 'pass' ? `技术通过 · ${relativeTime(progress.playtest.at)}`
                     : progress.playtest.state === 'fail' ? `有报错 · 退出码 ${progress.playtest.exitCode}`
                     : `已过期 · ${relativeTime(progress.playtest.at)}`}
+                  {/* "为什么停"要看得见(T24):等满上限那一次与"游戏自己崩了"不是一回事。 */}
+                  {progress.playtest?.timedOut === true ? ` · 等满 ${Math.round(progress.playtest.elapsedMs / 1000)} 秒没关窗口` : ''}
                   {progress.playtest !== null && progress.playtest.from !== null ? ` · 从 ${progress.playtest.from}` : ''}
                 </Chip>
               ) : null}
@@ -136,9 +143,20 @@ export function StageBoard({ progress, busyKey, playing, onStamp, onPlaytest, on
                 </Chip>
               ) : null}
               <button type="button" className={s.button} id="gf-playtest-button" disabled={playing} onClick={onPlaytest}
-                title="用钉版 SDK 启动本项目;SDK 未就绪时先下载">
+                title="用钉版 SDK 启动本项目;SDK 未就绪时先下载。它会等人去关掉那个游戏窗口才回来(默认最多等 3 分钟)">
                 {playing ? <><Spinner /> 运行中…</> : '启动试玩'}
               </button>
+              {/*
+                取消(T24 / #32):`playing` 是**这个面板**等着;`running` 是**服务端**有没有在跑。
+                后者才兜得住"agent 起的试玩"(AI 那一轮挂在那儿,人只能干看着 —— 那就是用户报的卡住)。
+              */}
+              {playing || running ? (
+                <button type="button" className={s.button} id="gf-playtest-cancel" disabled={cancelling}
+                  onClick={onPlaytestCancel}
+                  title="中止正在跑的那一次试玩(杀掉游戏进程)。这一次不会被记进账本 —— 它不是一个结果">
+                  {cancelling ? <><Spinner /> 取消中…</> : '取消试玩'}
+                </button>
+              ) : null}
             </>
           )}
         </span>

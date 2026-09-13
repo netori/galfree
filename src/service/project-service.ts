@@ -208,6 +208,10 @@ export class ProjectService {
   #taskQueue: Promise<unknown> = Promise.resolve()
   /** 发布的串行:构建很重,同时跑两个没有意义(而且会互相踩输出目录)。 */
   #publishQueue: Promise<unknown> = Promise.resolve()
+  /** 试玩的串行:同时开两个游戏窗口没有意义(而且面板那颗"取消"要能指名道姓)。 */
+  #playtestQueue: Promise<unknown> = Promise.resolve()
+  /** 正在跑的那一次试玩的中止器;**null = 此刻没有在跑**。 */
+  #playtestAbort: AbortController | null = null
 
   constructor(options: ProjectServiceOptions) {
     this.#registry = new ProjectRegistry(join(options.dataDir, 'registry.json'))
@@ -438,6 +442,8 @@ export class ProjectService {
         outlineRef: bible.outline === null ? null : { fingerprint: bible.outline.fingerprint },
       },
       playtest: { last: playtest?.last ?? null, currentFingerprint: contentFingerprint(graph) },
+      // 运行时事实(不是从磁盘推的):面板那颗"取消"按钮据此显示。
+      playtestRunning: this.playtestRunning(),
     })
   }
 
@@ -470,19 +476,69 @@ export class ProjectService {
    *
    * `fromLabel` 给了就**从这一场开始**(T13):在副本里覆写 start 跳过去 —— 用户项目一个
    * 字节都不动。目标场不存在会在启动时崩出 traceback,所以"落对了"这件事有可红的信号。
+   *
+   * **取消(T24 / #32)**:`options.signal` 是宿主那一轮的取消信号(协作式取消:谁等谁就得
+   * 自己观察)。取消时子进程被中止,并如实抛 `aborted` —— 账本**不记**这一条(被取消的
+   * 试玩不是一次试玩,记了板上就会多一条假事实)。面板那条路走 `cancelPlaytest()`,
+   * 它中止的是**同一个**信号。
+   *
+   * `options.timeoutMs` 是这一次愿意等多久(有界;缺省 `PLAYTEST_TIMEOUT_MS`)。
+   * 一次只跑一个:第二个调用排在后面(同时开两个游戏窗口没有意义)。
    */
-  async playtestStart(projectRef: string, fromLabel: string | null = null): Promise<PlaytestRun> {
-    const graph = await this.branchGraph(projectRef)
-    const entry = await this.#resolve(projectRef)
-    if (fromLabel !== null && !graph.scenes.some((scene) => scene.label === fromLabel)) {
-      throw new GalfreeError('unknown-scene', `场景 ${fromLabel} 不存在,无法从它开始试玩`)
+  async playtestStart(
+    projectRef: string,
+    fromLabel: string | null = null,
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<PlaytestRun> {
+    const previous = this.#playtestQueue
+    let release!: () => void
+    this.#playtestQueue = new Promise<void>((resolve) => { release = resolve })
+    await previous
+    const controller = new AbortController()
+    this.#playtestAbort = controller
+    const onCallerAbort = (): void => controller.abort()
+    options.signal?.addEventListener('abort', onCallerAbort, { once: true })
+    if (options.signal?.aborted === true) controller.abort()
+    try {
+      const graph = await this.branchGraph(projectRef)
+      const entry = await this.#resolve(projectRef)
+      if (fromLabel !== null && !graph.scenes.some((scene) => scene.label === fromLabel)) {
+        throw new GalfreeError('unknown-scene', `场景 ${fromLabel} 不存在,无法从它开始试玩`)
+      }
+      const gateway = await this.#gatewayFor(projectRef)
+      const run = await launchPlaytest(this.#playtestPorts, entry.path, contentFingerprint(graph), fromLabel, {
+        signal: controller.signal,
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      })
+      const ledger = (await readPlaytest(entry.path)) ?? { schemaVersion: 1 as const, last: null, history: [] }
+      const next = { schemaVersion: 1 as const, last: run, history: [...ledger.history, run] }
+      await this.#recordLedger(entry.id, PLAYTEST_FILE, playtestDocument(next), 'playtest')
+      return run
+    } finally {
+      options.signal?.removeEventListener('abort', onCallerAbort)
+      // 谁先来谁占位:只有**自己**还是那个在跑的,才清掉(否则会把后来者抹掉)。
+      if (this.#playtestAbort === controller) this.#playtestAbort = null
+      release()
     }
-    const gateway = await this.#gatewayFor(projectRef)
-    const run = await launchPlaytest(this.#playtestPorts, entry.path, contentFingerprint(graph), fromLabel)
-    const ledger = (await readPlaytest(entry.path)) ?? { schemaVersion: 1 as const, last: null, history: [] }
-    const next = { schemaVersion: 1 as const, last: run, history: [...ledger.history, run] }
-    await this.#recordLedger(entry.id, PLAYTEST_FILE, playtestDocument(next), 'playtest')
-    return run
+  }
+
+  /** 此刻有没有一次试玩在跑(面板的"取消"按钮据此显示;不是推导,是运行时事实)。 */
+  playtestRunning(): boolean {
+    return this.#playtestAbort !== null
+  }
+
+  /**
+   * 中止正在跑的那一次试玩(T24 / #32;面板那颗"取消"按钮的后端)。
+   *
+   * 走的是**同一个**中止信号(宿主取消与面板取消不是两条路):子进程被杀掉,
+   * `playtestStart` 如实抛 `aborted`,账本不记。**没有在跑就返回 false** ——
+   * 面板据此说"现在没有在跑的试玩",而不是假装杀掉了一个进程。
+   */
+  cancelPlaytest(): boolean {
+    const controller = this.#playtestAbort
+    if (controller === null) return false
+    controller.abort()
+    return true
   }
 
   /**

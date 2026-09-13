@@ -51,6 +51,9 @@ export function WorkbenchPanel() {
 
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
+  /** 面板自己起的那次试玩的 fetch(T24):断掉它 = 取消。 */
+  const playtestAbort = useRef<AbortController | null>(null)
   const [ensuring, setEnsuring] = useState(false)
   /** 点舞台板场景 → 打开场景编辑器定位到它(T11/T12 的联动)。 */
   const [focusScene, setFocusScene] = useState<string | null>(null)
@@ -144,11 +147,14 @@ export function WorkbenchPanel() {
   }, [refresh, loadSdk, state?.activeId])
 
   // 试玩进行中:进度是推导的,跑完要重新读一次(能推就推,不靠人点刷新)。
+  // **两端都看**(T24):`playing` = 面板自己在等;`running` = 服务端真在跑(agent 起的也算)。
+  // 后者只有在轮询发现之后才为真,所以起手那几秒的发现延迟是 8s 那条兜底轮询的事。
+  const playtestRunning = progress?.playtestRunning ?? false
   useEffect(() => {
-    if (!playing) return
+    if (!playing && !playtestRunning) return
     const timer = window.setInterval(() => void refresh({ quiet: true }), 2500)
     return () => window.clearInterval(timer)
-  }, [playing, refresh])
+  }, [playing, playtestRunning, refresh])
 
   // 默认父目录首帧带出一次(之后不再覆盖人的输入 —— 人改过就以人的为准)。
   const prefilledRoot = useRef(false)
@@ -218,15 +224,51 @@ export function WorkbenchPanel() {
     }
   }
 
+  /**
+   * 试玩(T13)。
+   *
+   * **这一条会等很久**(T24 / #32):它等的是**人去把游戏窗口关掉** —— 所以面板必须
+   * 同时给出"运行中"和一颗"取消",而不是让人对着一个 disabled 的按钮干等
+   * (用户报的"卡住"就是这个形状)。这里留着那次 fetch 的中止器:断掉它 = 取消。
+   */
   const runPlaytest = async (from?: string): Promise<void> => {
+    const controller = new AbortController()
+    playtestAbort.current = controller
     setPlaying(true)
     try {
-      await api.playtest(from)
+      await api.playtest(from, { signal: controller.signal })
       await refresh()
     } catch (error) {
-      pushNotice('bad', `试玩失败:${describeError(error)}`)
+      // 取消不是失败:面板自己断的这次 fetch 会走到这里 —— 别报成"试玩失败"。
+      if (controller.signal.aborted) pushNotice('warn', '已取消这次试玩:游戏进程已中止,账本没有记它 —— 被取消不是一个结果。')
+      else pushNotice('bad', `试玩失败:${describeError(error)}`)
     } finally {
+      if (playtestAbort.current === controller) playtestAbort.current = null
       setPlaying(false)
+      await refresh({ quiet: true })
+    }
+  }
+
+  /**
+   * 取消正在跑的那一次试玩:断掉面板手里那次 fetch,**再**打一趟 `/playtest/cancel`。
+   *
+   * 两下都要:前者管"面板自己起的"，后者管"**agent 起的**"(那次 fetch 从来不在面板手里,
+   * 而 AI 那一轮正因为它在等着而挂着 —— 人在这里就能把它停掉)。
+   * 服务端那条路是**同一个**中止信号,所以不存在"面板停了但游戏还开着"。
+   */
+  const cancelPlaytest = async (): Promise<void> => {
+    setCancelling(true)
+    playtestAbort.current?.abort()
+    try {
+      await api.playtestCancel()
+      // 与 `runPlaytest` 里那句**同一条**(同一个动作:取消就是取消,不管是谁发起的);
+      // pushNotice 按文本去重,所以两条路一起走到这里也只显示一条。
+      pushNotice('warn', '已取消这次试玩:游戏进程已中止,账本没有记它 —— 被取消不是一个结果。')
+    } catch (error) {
+      // 409 = 此刻没有在跑的(可能刚好自己退了):如实说,不假装我们杀掉了什么。
+      pushNotice('warn', `没有可取消的试玩:${describeError(error)}`)
+    } finally {
+      setCancelling(false)
       await refresh({ quiet: true })
     }
   }
@@ -355,9 +397,13 @@ export function WorkbenchPanel() {
           progress={progress}
           busyKey={busyKey}
           playing={playing}
+          // 服务端那条事实兜住"agent 起的试玩"(面板自己没在等,但那一次真的在跑)。
+          running={progress?.playtestRunning ?? false}
+          cancelling={cancelling}
           onStamp={(target) => void stamp(target)}
           onPlaytest={() => void runPlaytest()}
           onPlaytestFrom={(label) => void runPlaytest(label)}
+          onPlaytestCancel={() => void cancelPlaytest()}
           onRelocate={(label) => void relocate(label)}
           onOpenScene={(label) => setFocusScene(label)}
           onJump={(target) => jumpTo(target)}

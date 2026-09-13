@@ -130,4 +130,168 @@ describe('试玩控制(T7,假 spawn)', () => {
   it('真 spawn:启动器不存在时如实抛错(不静默)', async () => {
     await expect(realSpawn('/definitely/not/here/renpy.exe', 'x', { timeoutMs: 2000 })).rejects.toBeTruthy()
   })
+
+  it('真 spawn:**已经取消过就一个进程都不起**(不是"起了再杀")', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const started = Date.now()
+    const result = await realSpawn(process.execPath, '', { omitProjectArg: true, timeoutMs: 10_000, signal: controller.signal })
+    expect(result.aborted).toBe(true)
+    expect(Date.now() - started).toBeLessThan(2_000)
+  })
+
+  it('真 spawn:**取消要立刻杀掉子进程并回传"被取消"**(不是等它自己退出)', async () => {
+    process.env.GALFREE_TEST_SRC = 'setTimeout(() => {}, 60000)'
+    const controller = new AbortController()
+    const started = Date.now()
+    const pending = realSpawn(process.execPath, '', { omitProjectArg: true, timeoutMs: 600_000, signal: controller.signal })
+    setTimeout(() => controller.abort(), 150)
+    const result = await pending
+    delete process.env.GALFREE_TEST_SRC
+    expect(result.aborted).toBe(true)
+    expect(result.timedOut).toBe(false)
+    // 关键:不是"等到 10 分钟超时才回来"。
+    expect(Date.now() - started).toBeLessThan(10_000)
+  })
+
+  // ─── 一次试玩"停了多久 / 为什么停"要能断言(T24)──────────────────────
+
+  it('超时回报带**等了多久 / 为什么停**(可断言,不是一句没法核的话)', async () => {
+    process.env.GALFREE_TEST_SRC = 'setTimeout(() => {}, 60000)'
+    const result = await realSpawn(process.execPath, '', { omitProjectArg: true, timeoutMs: 600 })
+    delete process.env.GALFREE_TEST_SRC
+    expect(result.timedOut).toBe(true)
+    expect(result.aborted).toBe(false)
+    expect(result.elapsedMs).toBeGreaterThanOrEqual(400)
+    expect(result.elapsedMs).toBeLessThan(10_000)
+  })
+
+  it('正常退出时 elapsedMs 照旧有(好让面板与账本说得出"跑了多久")', async () => {
+    process.env.GALFREE_TEST_SRC = 'console.log("done")'
+    const result = await realSpawn(process.execPath, '', { omitProjectArg: true, timeoutMs: 10_000 })
+    delete process.env.GALFREE_TEST_SRC
+    expect(result.timedOut).toBe(false)
+    expect(result.aborted).toBe(false)
+    expect(result.elapsedMs).toBeGreaterThanOrEqual(0)
+  })
+
+  // ─── 接缝:取消是**协作式**的,试玩这条必须自己观察信号(T24 / #32)───
+
+  describe('取消契约(协作式取消:谁等谁就得自己观察信号)', () => {
+    it('已经取消过 → 起步前就停:不 spawn、记账本里不留一条"假试玩"', async () => {
+      let spawned = 0
+      service = createProjectService({
+        dataDir: dataDir + '-aborted',
+        uiTemplate: fakeUiTemplate(sdkDir),
+        playtest: {
+          resolveLauncher: async () => '/fake/renpy.exe',
+          spawn: async () => {
+            spawned += 1
+            return { code: 0, log: '' }
+          },
+        },
+      })
+      await service.createProject({ projectsRoot, name: 'aborted', title: undefined })
+      const controller = new AbortController()
+      controller.abort()
+      await expect(service.playtestStart('aborted', null, { signal: controller.signal })).rejects.toMatchObject({ code: 'aborted' })
+      expect(spawned).toBe(0)
+      // "被取消"是一次没发生的试玩:板上照旧"试玩未跑"(不留下一条技术通过/失败)。
+      const progress = await service.progress('aborted')
+      expect(progress.playtest).toBeNull()
+      expect(progress.summary.playtestNotRun).toBe(1)
+    })
+
+    it('跑起来之后取消 → 子进程收到中止,接缝如实报被取消', async () => {
+      let sawAbort = false
+      const controller = new AbortController()
+      service = createProjectService({
+        dataDir: dataDir + '-during',
+        uiTemplate: fakeUiTemplate(sdkDir),
+        playtest: {
+          resolveLauncher: async () => '/fake/renpy.exe',
+          spawn: async (_launcher, _root, options) => await new Promise<SpawnResult>((resolve) => {
+            options?.signal?.addEventListener('abort', () => {
+              sawAbort = true
+              resolve({ code: -1, log: 'killed', aborted: true, timedOut: false, elapsedMs: 5 })
+            })
+            setTimeout(() => controller.abort(), 20)
+          }),
+        },
+      })
+      await service.createProject({ projectsRoot, name: 'during', title: undefined })
+      await expect(service.playtestStart('during', null, { signal: controller.signal })).rejects.toMatchObject({ code: 'aborted' })
+      expect(sawAbort).toBe(true)
+      expect((await service.progress('during')).playtest).toBeNull()
+    })
+
+    it('面板那条路:运行中能取消(cancelPlaytest → 工具体当场回来,不等到 15 分钟)', async () => {
+      service = createProjectService({
+        dataDir: dataDir + '-cancel',
+        uiTemplate: fakeUiTemplate(sdkDir),
+        playtest: {
+          resolveLauncher: async () => '/fake/renpy.exe',
+          spawn: async (_launcher, _root, options) => await new Promise<SpawnResult>((resolve) => {
+            options?.signal?.addEventListener('abort', () => resolve({ code: -1, log: 'killed', aborted: true, timedOut: false, elapsedMs: 1 }))
+          }),
+        },
+      })
+      await service.createProject({ projectsRoot, name: 'cancel', title: undefined })
+      const running = service.playtestStart('cancel')
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      const stopped = await service.cancelPlaytest()
+      expect(stopped).toBe(true)
+      await expect(running).rejects.toMatchObject({ code: 'aborted' })
+      // 没有在跑 → 取消本身如实说"没有可取消的"(不假装杀掉了一个进程)。
+      expect(await service.cancelPlaytest()).toBe(false)
+    })
+
+    it('一次只跑一个:第二个调用排在后面(同时开两个游戏窗口没有意义)', async () => {
+      let concurrent = 0
+      let peak = 0
+      service = createProjectService({
+        dataDir: dataDir + '-serial',
+        uiTemplate: fakeUiTemplate(sdkDir),
+        playtest: {
+          resolveLauncher: async () => '/fake/renpy.exe',
+          spawn: async () => {
+            concurrent += 1
+            peak = Math.max(peak, concurrent)
+            await new Promise((resolve) => setTimeout(resolve, 60))
+            concurrent -= 1
+            return { code: 0, log: "Ren'Py 8.5.3 starting\n", timedOut: false, aborted: false, elapsedMs: 60 }
+          },
+        },
+      })
+      await service.createProject({ projectsRoot, name: 'serial', title: undefined })
+      const [first, second] = await Promise.all([service.playtestStart('serial'), service.playtestStart('serial')])
+      expect(peak).toBe(1)
+      expect(first.technicalPass).toBe(true)
+      expect(second.technicalPass).toBe(true)
+      // 两条都落了账本(排队,不是丢掉一条)。
+      expect((await service.progress('serial')).playtest?.at).toBe(second.at)
+    })
+
+    it('超时不再默认静默等 15 分钟:有界、且回报里带"等了多久 / 为什么停"', async () => {
+      service = createProjectService({
+        dataDir: dataDir + '-timeout',
+        uiTemplate: fakeUiTemplate(sdkDir),
+        playtest: {
+          resolveLauncher: async () => '/fake/renpy.exe',
+          spawn: async (_launcher, _root, options) => {
+            options?.signal?.addEventListener('abort', () => { /* 只是别让监听器泄漏 */ })
+            await new Promise((resolve) => setTimeout(resolve, options?.timeoutMs ?? 0))
+            return { code: -1, log: 'timeout', timedOut: true, aborted: false, elapsedMs: options?.timeoutMs ?? 0 }
+          },
+        },
+      })
+      await service.createProject({ projectsRoot, name: 'slow', title: undefined })
+      const run = await service.playtestStart('slow', null, { timeoutMs: 40 })
+      expect(run.timedOut).toBe(true)
+      expect(run.elapsedMs).toBe(40)
+      expect(run.exitCode).toBe(-1)
+      // 超时是一次**没跑成**的试玩:记进账本,但不冒充技术通过。
+      expect((await service.progress('slow')).playtest?.state).toBe('fail')
+    })
+  })
 })
