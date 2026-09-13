@@ -1022,6 +1022,22 @@ describe('路由适配层(/api/galfree)', () => {
     expect(badSample.status).toBe(400)
     expect(badSample.body.code).toBe('character-invalid')
 
+    // **三态规矩**:只给 `voiceProfile`、别的键一个不给 → 那些字段**一个字都不动**
+    // (名字 / 剧本绑定 / 外观 / 参考链都还在)。
+    expect((await postJson('/api/galfree/cast/characters/upsert', {
+      id: 'xiao_tang', voiceProfile: { sample: 'xiao_tang.wav' },
+    })).status).toBe(200)
+    const partial = await req('/api/galfree/cast')
+    const kept = (partial.body.characters as Array<{ id: string; name: string; voice?: string; references: unknown[] }>)
+      .find((entry) => entry.id === 'xiao_tang')!
+    expect(kept.name).toBe('小棠')
+    expect(kept.voice).toBe('xiao_tang')
+    expect(kept.references).toHaveLength(1)
+    // 给了一个**空名字** → 400(明确给了就得能用;想保留就别给这个键)。
+    const emptyName = await postJson('/api/galfree/cast/characters/upsert', { id: 'xiao_tang', name: '   ' })
+    expect(emptyName.status).toBe(400)
+    expect(emptyName.body.code).toBe('character-invalid')
+
     // 这个夹具没装配音频端口 → 读音色库如实拒(不是 500,也不是一个空库)。
     const library = await postJson('/api/galfree/audio/voice/library', {})
     expect(library.status).toBe(503)
