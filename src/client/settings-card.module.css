@@ -169,3 +169,18 @@
   color: var(--dsw-alias-label-secondary);
   cursor: pointer;
 }
+
+/* 音频渠道那一段(T27)与图像那段之间的分隔与标题 —— 两条渠道是两个块,要有看得见的分界。
+   颜色走宿主令牌(与本文件其他部分同一口径);不新造颜色名。 */
+.divider {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--dsw-alias-border-l3);
+}
+
+.groupTitle {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
