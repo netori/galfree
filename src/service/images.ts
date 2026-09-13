@@ -148,8 +148,16 @@ export type ImageSize = string
 export interface GenerationTask extends GenerationTaskBase {
   /** 产物类型(账本里显式写出来;老账本没有这一字段 → 读成 'image')。 */
   kind: ImageTaskKind
-  /** 目标槽(槽名,与 `.rpy` 图像引用派生的槽 id 同一口径)。 */
+  /**
+   * 目标槽(槽名,与 `.rpy` 图像引用派生的槽 id 同一口径)。
+   * **封面类任务**(T30)没有槽 —— 它的身份是 `target`,这里为空串。
+   */
   slot: string
+  /**
+   * 封面类任务的目标(T30 / #38):`main_menu` / `game_menu` / `window_icon`。
+   * 槽类任务没有这一字段(老账本也没有)。
+   */
+  target?: string
   /** 登记簿上下文:这个槽要求哪些角色出场(引用登记簿 id,不复制设定)。 */
   requiresCharacters: string[]
   /** 画风锚(来自槽账本或角色登记簿)。 */

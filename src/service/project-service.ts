@@ -15,7 +15,8 @@ import { GATE } from './gates.ts'
 import { runGit } from './git.ts'
 import { ProjectRegistry, type RegistryEntry } from './registry.ts'
 import { commitSnapshot, fileDiff, fileHistory, rollbackFile, type SnapshotEntry } from './snapshot.ts'
-import { PROJECT_NAME_RE, TEMPLATE_CJK_FONT, TEMPLATE_UI_FILES, TEMPLATE_UI_IMAGE_DIR, renderTemplateFiles, renderUiPatch, templateKeepFiles } from './template.ts'
+import { PROJECT_NAME_RE, TEMPLATE_CJK_FONT, TEMPLATE_UI_FILES, TEMPLATE_UI_IMAGE_DIR, TEMPLATE_WINDOW_ICON, renderTemplateFiles, renderUiPatch, templateKeepFiles } from './template.ts'
+import { COVER_TARGETS, coverTargetOf, coverTargetIds } from './covers.ts'
 import { FakeValidator } from './validation/template-validator.ts'
 import { deriveGraph, parseRpy } from './rpy/parse.ts'
 import { readRpyFiles } from './rpy/files.ts'
@@ -1767,6 +1768,65 @@ export class ProjectService {
   }
 
   /**
+   * 建一个**封面类**图像任务(T30 / #38):主菜单背景 / 游戏内菜单背景 / 窗口图标。
+   *
+   * 与素材槽那条**同一个任务模型、同一个队列、同一道门**(没配渠道 / 模型不在目录里都拒),
+   * 只有一点不同:**目标路径来自规格表**(`COVER_TARGETS`),不由调用方随便给 ——
+   * 这三张是生成器**不覆盖**的那三张,路径写错就等于白出一张图(引擎根本不读它)。
+   *
+   * 尺寸规格(项目分辨率 / 正方形)也来自那张表:菜单背景要项目分辨率的宽高比,
+   * 图标要正方形 —— 出错了引擎不报错、只是画面歪,所以规格要在这里就说清楚。
+   */
+  async createCoverTask(
+    projectRef: string,
+    input: { target: string; model: string; prompt: string; size?: string; run?: boolean },
+  ): Promise<GenerationTask> {
+    const target = coverTargetOf(input.target)
+    if (target === null) {
+      throw new GalfreeError('unknown-cover-target', `认不出的封面目标:${input.target}(只有:${coverTargetIds().join(' / ')})`, {
+        known: coverTargetIds(),
+      })
+    }
+    const created = await this.#mutateTasks(projectRef, async (document, writers) => {
+      const entry = await this.#resolve(projectRef)
+      await this.#assertPresent(entry)
+      const { channel, model } = this.#requireModel(input.model)
+      const prompt = input.prompt.trim()
+      if (prompt === '') throw new GalfreeError('empty-prompt', '提示词是空的:给一句能用的制作指令(风格/情绪/画面)')
+      const degraded = degradeInput(model, {
+        ...(input.size === undefined ? {} : { size: input.size }),
+        referenceImages: [],
+      })
+      const at = new Date().toISOString()
+      const task: GenerationTask = {
+        schemaVersion: 1,
+        kind: 'image',
+        id: randomUUID(),
+        // 封面没有"槽":目标是**规格表里那三张之一**,`target` 就是它的身份。
+        slot: '',
+        target: target.id,
+        outputPath: target.path,
+        state: 'queued',
+        ...(channel.name === undefined ? {} : { channel: channel.name }),
+        model: model.id,
+        prompt,
+        requiresCharacters: [],
+        ...(degraded.effective.size === undefined ? {} : { size: degraded.effective.size }),
+        referenceImages: [],
+        ...(degraded.degradation === undefined ? {} : { degradation: degraded.degradation }),
+        attempts: [],
+        rejections: [],
+        createdAt: at,
+        updatedAt: at,
+      }
+      writers.push(task)
+      return task
+    })
+    if (input.run !== true) return created
+    return (await this.runGenerationTask(projectRef, created.id)) ?? created
+  }
+
+  /**
    * 音频渠道的**读法**(T27):配没配、有哪些模型、每个模型声明了什么。
    *
    * 与 `imageChannel()` 同一个态度:**不含密钥** —— `apiKeyConfigured` 只说配没配,
@@ -2213,6 +2273,24 @@ export class ProjectService {
         })
       }
     } catch { /* 图片缺失不阻断建项目:界面图本来就还有一条"首次运行时生成"的路 */ }
+
+    // **窗口图标的默认值**(T30 / #38):模板的 `options.rpy` 设了 `config.window_icon`,
+    // 而那个文件**必须已经存在** —— 缺了是**启动期崩**(`set_icon` 不兜底,见 covers.ts 的说明)。
+    // 所以这一份不能"缺了就算了":缺了就得把 config 那行也去掉,否则项目建出来就是坏的。
+    // 顺序上它排在界面图片之后:同名时以这份为准(生成器那套图标本来就是程序画的)。
+    try {
+      binaryFiles.push({
+        path: `game/${TEMPLATE_WINDOW_ICON.target}`,
+        content: await readFile(join(sdkDir, ...TEMPLATE_WINDOW_ICON.source.split('/'))),
+      })
+    } catch (error) {
+      throw new GalfreeError(
+        'sdk-ui-missing',
+        `SDK 里缺默认窗口图标(${join(sdkDir, ...TEMPLATE_WINDOW_ICON.source.split('/'))} 读不到:${String(error)})。`
+        + '模板的 options.rpy 设了 `config.window_icon`,而那个文件**不存在会让游戏启动即崩** —— '
+        + '所以这里如实拒绝建项目(请检查 SDK 是否完整)。',
+      )
+    }
 
     return { files, binaryFiles }
   }

@@ -8,7 +8,7 @@
  */
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { TEMPLATE_CJK_FONT, TEMPLATE_UI_FILES } from '../service/template.ts'
+import { TEMPLATE_CJK_FONT, TEMPLATE_UI_FILES, TEMPLATE_WINDOW_ICON } from '../service/template.ts'
 import { GalfreeError } from '../service/error.ts'
 import { makeTempDir } from './tmp.ts'
 
@@ -42,8 +42,24 @@ export async function makeFakeSdk(overrides: Record<string, string> = {}): Promi
   for (const name of ['textbox.png', 'main_menu.png', 'bubble.png']) {
     await writeFile(join(dir, 'gui', 'game', 'gui', name), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
   }
+  // 窗口图标的**默认来源**(T30 / #38):真 SDK 在 `launcher/game/gui7/icon.png`。
+  // 夹具给一张**真的最小 PNG** —— 那个文件缺了会让游戏**启动即崩**,
+  // 所以假 SDK 得像真 SDK 一样"有它",否则这条路在快带里测的就不是产品行为。
+  await mkdir(join(dir, 'launcher', 'game', 'gui7'), { recursive: true })
+  await writeFile(join(dir, 'launcher', 'game', 'gui7', 'icon.png'), MINIMAL_PNG)
   return dir
 }
+
+/**
+ * 一张**真的最小 PNG**(1×1 透明)。
+ *
+ * 为什么不是随便几个字节:这个文件要过"是不是 PNG"这关,而且真实路径上它会被引擎读,
+ * 夹具里留着假字节就会掩盖"拷过去的根本不是图"这种错。
+ */
+export const MINIMAL_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
+  'base64',
+)
 
 /**
  * 快带用的**界面文件来源**(接缝的 `uiTemplate` 端口)。
@@ -80,6 +96,12 @@ export function fakeUiTemplate(sdkDir: string): (requested: string | undefined) 
         content: await readFile(join(dir, 'gui', 'game', 'gui', name)),
       })
     }
+    // 窗口图标的默认值(T30 / #38):生产实现**缺它就不让建项目**(因为 config 已经指向它,
+    // 缺了是启动期崩)—— 夹具照做,否则快带里的项目"能建起来"是假的。
+    binaryFiles.push({
+      path: `game/${TEMPLATE_WINDOW_ICON.target}`,
+      content: await readFile(join(dir, ...TEMPLATE_WINDOW_ICON.source.split('/'))),
+    })
     return { files, binaryFiles }
   }
 }

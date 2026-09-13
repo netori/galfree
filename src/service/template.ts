@@ -107,6 +107,8 @@ export const TEMPLATE_UI_PATCH = 'zz_galfree_ui.rpy'
  */
 export const TEMPLATE_CJK_FONT = { source: 'SourceHanSansLite.ttf', target: 'fonts/SourceHanSansLite.ttf' } as const
 
+export { TEMPLATE_WINDOW_ICON } from './covers.ts'
+
 /**
  * 中文字体与界面变量补丁。
  *
@@ -231,6 +233,13 @@ export function renderTemplateFiles(project: TemplateProject): TemplateFile[] {
         // 而本产品逐场重生成是常规动作。id 由生成侧盖(dialogue-id.ts 的 stampDialogueIds)。
         // 文件不存在时引擎静默跳过(`renpy/loadable` 那一步),所以还没配音的项目照旧能跑。
         'define config.auto_voice = "voice/{id}.ogg"',
+        // 窗口图标(T30 / #38)。**这一行与 `game/gui/window_icon.png` 是一对,顺序不能反**:
+        // `config.window_icon` 指向的文件不存在时引擎**不兜底**
+        // (`set_icon` 只 `except DownloadNeeded`;`renpy.loader.load` 抛 FileNotFoundError)
+        // → **启动期直接崩**。所以建项目时**先**落一个默认图标(从钉版 SDK 的
+        // `launcher/game/gui7/icon.png` 拷,见 covers.ts 的 TEMPLATE_WINDOW_ICON),这一行才敢写。
+        // 人/AI 出的新图标只是把那个文件换掉 —— 永远不会出现"先设 config、文件还没落"。
+        'define config.window_icon = "gui/window_icon.png"',
         // screens.rpy 的主菜单读这两个;缺了会 AttributeError(实测崩在 gui.show_name)。
         'define gui.show_name = True',
         'define gui.about = _p("")',
