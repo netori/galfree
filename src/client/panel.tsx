@@ -15,6 +15,7 @@ import { stampKey } from './types.ts'
 import { Chip, Notice, Spinner, relativeTime } from './ui.tsx'
 import { StageBoard } from './stage-board.tsx'
 import { AssetBoard } from './asset-board.tsx'
+import { AudioCard } from './audio-card.tsx'
 import { BibleCard } from './bible-card.tsx'
 import { SceneWorkbench } from './scene-workbench.tsx'
 import { PublishCard } from './publish-card.tsx'
@@ -447,6 +448,10 @@ export function WorkbenchPanel() {
           onChanged={() => refresh()}
           onNotice={pushNotice}
         />
+
+        {/* 音频生成(T27 / ADR-0012):渠道处境 + 任务队列。**跑之前看得见要花几条请求** ——
+            音乐按次、TTS 按台词行计费,不看清就点很危险。 */}
+        <AudioCard api={api} hasProject={hasProject} onNotice={pushNotice} />
 
         <SceneWorkbench
           api={api}

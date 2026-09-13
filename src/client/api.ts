@@ -85,6 +85,46 @@ export interface CharacterUpsertPayload {
   references?: Array<{ path: string; slot?: string; note?: string }>
 }
 
+/** 音频渠道处境(T27):**不含密钥** —— 只说配没配。 */
+export interface AudioChannelView {
+  configured: boolean
+  name?: string
+  baseUrl?: string
+  apiKeyConfigured: boolean
+  models: Array<{
+    id: string
+    label?: string
+    note?: string
+    purpose: 'music' | 'voice'
+    adapter: string
+    capabilities: Record<string, boolean>
+    paths?: { formats?: string[]; sampleRates?: number[] }
+  }>
+}
+
+/** 音频任务(面板读的那一份;与账本同源)。 */
+export interface AudioTaskView {
+  id: string
+  kind: 'music' | 'voice'
+  purpose: 'music' | 'voice'
+  outputPath: string
+  state: 'queued' | 'running' | 'awaiting-review' | 'failed'
+  model: string
+  channel?: string
+  prompt: string
+  dialogueId: string | null
+  format?: string
+  loop?: boolean
+  voiceId?: string
+  referenceAudio: Array<{ path: string; note?: string }>
+  degradation?: { code: string; message: string; notes: string[] }
+  attempts: Array<{ n: number; startedAt: string; finishedAt: string; outcome: 'ok' | 'failed'; error?: string; bytes?: number; replacedFingerprint?: string }>
+  rejections: Array<{ attempt: number; note: string; via: 'human' | 'agent'; at: string }>
+  createdAt: string
+  updatedAt: string
+  lastError?: string
+}
+
 export class GalfreeApiError extends Error {
   constructor(message: string, readonly code?: string) {
     super(message)
@@ -730,6 +770,57 @@ export class GalfreeApi {
   /** 音频文件池与引用处境(T17,纯读):池是派生的,没有任何手工登记。 */
   async audioPool(): Promise<AudioPoolView> {
     return readJson(await fetch('/api/galfree/audio'))
+  }
+
+  // ─── 音频生成通道与任务队列(T27 / ADR-0012)──────────────────────────
+  //
+  // **注意与上面的池分开**:池是"项目里现在有哪些音频文件"(T17,派生的);
+  // 这一组是"要去上游生成什么"(渠道 + 任务账本)。两者不是一件事。
+
+  /** 音频渠道处境(配没配、有哪些模型、各自声明了什么;**不含密钥**)。 */
+  async audioChannel(): Promise<AudioChannelView> {
+    return readJson<AudioChannelView>(await fetch('/api/galfree/audio/channel'))
+  }
+
+  /** 音频任务账本(最新的在前)。 */
+  async audioTasks(): Promise<AudioTaskView[]> {
+    const body = await readJson<{ tasks: AudioTaskView[] }>(await fetch('/api/galfree/audio/tasks'))
+    return body.tasks
+  }
+
+  async createAudioTask(input: {
+    outputPath: string
+    model: string
+    prompt: string
+    purpose?: 'music' | 'voice'
+    dialogueId?: string
+    format?: string
+    loop?: boolean
+    voiceId?: string
+    run?: boolean
+  }): Promise<AudioTaskView> {
+    const body = await readJson<{ task: AudioTaskView }>(await fetch('/api/galfree/audio/tasks/create', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    }))
+    return body.task
+  }
+
+  /** 推进队列(串行);返回跑过的那几个任务的状态。 */
+  async runAudioQueue(): Promise<AudioTaskView[]> {
+    const body = await readJson<{ tasks: AudioTaskView[] }>(await fetch('/api/galfree/audio/tasks/run', { method: 'POST' }))
+    return body.tasks
+  }
+
+  /** 重 roll / 拒收注记(`note` 给了就由**人**记 —— 谁说的也是历史的一部分)。 */
+  async retryAudioTask(input: { id: string; run?: boolean; prompt?: string; note?: string }): Promise<AudioTaskView | null> {
+    const body = await readJson<{ task: AudioTaskView | null }>(await fetch('/api/galfree/audio/tasks/retry', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    }))
+    return body.task
   }
 
   /** 发布前置检查(T18,纯读):能不能发、缺什么、会用到哪个输出目录。 */

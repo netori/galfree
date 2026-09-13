@@ -23,6 +23,8 @@ export const GATE = {
   stampForbidden: 'stamp-forbidden',
   /** 出图要有图像渠道(端点 + 密钥 + 模型目录)。 */
   noImageChannel: 'no-image-channel',
+  /** 出**音乐/语音**要有音频渠道(T27 / ADR-0012;与图像那条分开配)。 */
+  noAudioChannel: 'no-audio-channel',
   /** 试玩与发布都要钉版 SDK 就绪。 */
   sdkNotReady: 'sdk-not-ready',
 } as const

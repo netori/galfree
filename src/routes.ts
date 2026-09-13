@@ -145,6 +145,13 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['/picker/inspect', ['GET']],
   ['/playtest', ['POST']],
   ['/playtest/cancel', ['POST']],
+  // 音频生成(T27):渠道处境 / 任务账本 / 建任务 / 跑队列 / 重 roll。
+  // **注意 `/audio` 不在这里** —— 那是音频池(T17)的 `/audio`,两者是两件事。
+  ['/audio/channel', ['GET']],
+  ['/audio/tasks', ['GET']],
+  ['/audio/tasks/create', ['POST']],
+  ['/audio/tasks/run', ['POST']],
+  ['/audio/tasks/retry', ['POST']],
   ['/publish', ['GET', 'POST']],
   ['/sdk', ['GET']],
   ['/sdk/ensure', ['POST']],
@@ -787,6 +794,81 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     return
   }
 
+  // ─── 音频生成(T27 / ADR-0012:音乐与语音共用这一条)──────────────────
+  //
+  // 与图像那几条**同形**:渠道(读)/ 任务账本(读)/ 建任务 / 跑队列 / 重 roll。
+  // 三道门(没配渠道 / 模型不在目录 / 路径形状)都在**接缝上**拦 —— 路由只搬运,
+  // 不在这一层各判一遍(与 T20 那条适配器纪律同一个道理)。
+
+  // 渠道处境:配没配、有哪些模型、每个模型声明了什么(**不含密钥**)。
+  //
+  // 路径是 `/audio/channel` 而**不是** `/audio` —— 后者是**音频池**(T17)那条读法,
+  // 已经有主人了。同名路由会让两条完全不同的读法互相顶掉(写这段时差点真撞上)。
+  if (method === 'GET' && path === '/audio/channel') {
+    writeJson(res, 200, await service.audioChannel())
+    return
+  }
+
+  // 音频任务账本(读)。
+  if (method === 'GET' && path === '/audio/tasks') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    writeJson(res, 200, { tasks: await service.audioTasks(active.id) })
+    return
+  }
+
+  // 建一个音频生成任务(不跑:`run` 给了才跑,与图像那条同一口径)。
+  if (method === 'POST' && path === '/audio/tasks/create') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const outputPath = String(body.outputPath ?? '')
+    if (outputPath === '') throw new GalfreeError('invalid-audio-path', '需要 `outputPath`(项目内相对路径,如 game/audio/bgm/rain.ogg)')
+    const task = await service.createAudioTask(active.id, {
+      outputPath,
+      model: String(body.model ?? ''),
+      prompt: String(body.prompt ?? ''),
+      ...(body.purpose === 'music' || body.purpose === 'voice' ? { purpose: body.purpose } : {}),
+      ...(typeof body.dialogueId === 'string' && body.dialogueId !== '' ? { dialogueId: body.dialogueId } : {}),
+      ...(typeof body.format === 'string' && body.format !== '' ? { format: body.format } : {}),
+      ...(typeof body.sampleRate === 'number' ? { sampleRate: body.sampleRate } : {}),
+      ...(typeof body.loop === 'boolean' ? { loop: body.loop } : {}),
+      ...(typeof body.voiceId === 'string' && body.voiceId !== '' ? { voiceId: body.voiceId } : {}),
+    })
+    if (body.run === true) {
+      // 建完立刻跑:同一个动作,不另开一条路(与图像那条 `run` 同口径)。
+      writeJson(res, 200, { task: await service.runAudioTask(active.id, task.id) })
+      return
+    }
+    writeJson(res, 201, { task })
+    return
+  }
+
+  // 推进音频队列(串行;失败留在 failed,等人的重试)。
+  if (method === 'POST' && path === '/audio/tasks/run') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    writeJson(res, 200, { tasks: await service.runAudioQueue(active.id) })
+    return
+  }
+
+  // 跑一个音频任务 + 重 roll(改词/拒收注记;与图像那条同一语义)。
+  if (method === 'POST' && path === '/audio/tasks/retry') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const id = String(body.id ?? '')
+    if (id === '') throw new GalfreeError('invalid-request', '需要 id')
+    const task = await service.retryAudioTask(active.id, id, {
+      ...(typeof body.run === 'boolean' ? { run: body.run } : {}),
+      ...(typeof body.prompt === 'string' && body.prompt !== '' ? { prompt: body.prompt } : {}),
+      // 拒收注记:面板带 `note` 时由**人**记(`via:'human'`)—— "谁说的"是历史的一部分。
+      ...(typeof body.note === 'string' && body.note !== '' ? { note: body.note, via: 'human' as const } : {}),
+    })
+    writeJson(res, 200, { task })
+    return
+  }
+
   // 一键试玩(T7/T13):接缝同一控制器,无第二管线。
   // `from` 给了就**从这一场开始**(副本里覆写 start;用户项目不动)。
   //
@@ -939,13 +1021,14 @@ export function makeRoutes(deps: RouteDeps): GalfreeRoute[] {
         } else if (error instanceof GalfreeError) {
           // 404 = 目标不存在(含"项目目录已被挪走"),与 5xx 的"服务端故障"严格区分。
           const status = error.code === 'no-active-project' || error.code === 'unknown-project' || error.code === 'unknown-scene' || error.code === 'project-missing' || error.code === 'unknown-task' ? 404
-            : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' || error.code === 'character-invalid' || error.code === 'slot-invalid' || error.code === 'bible-invalid' || error.code === 'invalid-slot' || error.code === 'unknown-slot' || error.code === 'unknown-image-model' || error.code === 'unknown-character' || error.code === 'empty-prompt' || error.code === 'empty-note' || error.code === 'note-too-long' || error.code === 'invalid-audio' || error.code === 'invalid-edit' || error.code === 'destination-in-project' || error.code === 'invalid-packages' ? 400
+            : error.code === 'project-exists' || error.code === 'invalid-name' || error.code === 'no-projects-root' || error.code === 'bad-json' || error.code === 'character-invalid' || error.code === 'slot-invalid' || error.code === 'bible-invalid' || error.code === 'invalid-slot' || error.code === 'unknown-slot' || error.code === 'unknown-image-model' || error.code === 'character-invalid' || error.code === 'empty-prompt' || error.code === 'empty-note' || error.code === 'note-too-long' || error.code === 'invalid-audio' || error.code === 'invalid-edit' || error.code === 'destination-in-project' || error.code === 'invalid-packages' || error.code === 'unknown-character' || error.code === 'unknown-audio-model' || error.code === 'invalid-audio-path' || error.code === 'invalid-request' ? 400
             : error.code === 'body-too-large' ? 413
             : error.code === 'picker-unsupported' ? 501
             : error.code === 'picker-timeout' ? 504
             : error.code === GATE.bibleNotFinal ? 409
-            // 没配图像渠道 = 能力未就绪(与 SDK 未就绪同性质),不是服务端故障。
-            : error.code === GATE.noImageChannel ? 503
+            // 没配渠道 = 能力未就绪(与 SDK 未就绪同性质),不是服务端故障。
+            // 图像与音频各有一条(ADR-0012:三条生成线各自一条渠道)。
+            : error.code === GATE.noImageChannel || error.code === GATE.noAudioChannel ? 503
             : error.code === 'version-drift' || error.code === 'expect-required' || error.code === 'path-escape' || error.code === GATE.stampForbidden || error.code === 'slot-not-filled' || error.code === GATE.sdkNotReady
               || error.code === 'scene-not-editable' || error.code === 'scene-read-only' || error.code === 'scene-label-elsewhere'
               || error.code === 'scene-target-exists' || error.code === 'scene-already-canonical' ? 409

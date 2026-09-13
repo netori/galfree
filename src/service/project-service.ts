@@ -1852,7 +1852,7 @@ export class ProjectService {
   #requireAudioModel(modelId: string): { channel: AudioChannelSettings; model: AudioModelDescriptor } {
     const channel = this.#audioPorts?.channel() ?? null
     if (channel === null) {
-      throw new GalfreeError('no-audio-channel', '还没有配置音频生成渠道(设置 → 插件 → GALFree):先填端点、密钥与模型目录')
+      throw new GalfreeError(GATE.noAudioChannel, '还没有配置音频生成渠道(设置 → 插件 → GALFree):先填端点、密钥与模型目录')
     }
     const model = channel.models.find((candidate) => candidate.id === modelId)
     if (model === undefined) {

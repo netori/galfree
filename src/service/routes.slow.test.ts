@@ -905,6 +905,48 @@ describe('路由适配层(/api/galfree)', () => {
     expect(entries.every((entry) => entry.author === 'GALFree')).toBe(true)
   })
 
+  it('音频生成路由(T27):渠道处境与池**分开**、任务账本可读、三道门如实回码', async () => {
+    // 这一条挡两类错:① `/audio`(池)与 `/audio/channel`(渠道)撞名 —— 那会让其中一条
+    // 完全读不到(写这段时差点真撞上);② 三道门在**接缝上**拦,路由只如实搬状态码。
+    await freshProject()
+
+    // 池与渠道是**两条不同的读法**,各有各的形状。
+    const pool = await req('/api/galfree/audio')
+    expect(pool.status).toBe(200)
+    expect(Array.isArray(pool.body.files)).toBe(true)
+
+    const channel = await req('/api/galfree/audio/channel')
+    expect(channel.status).toBe(200)
+    // 这个夹具没装配音频端口 → 如实说"没配"(不是 500、也不是一个假渠道)。
+    expect(channel.body).toEqual({ configured: false, apiKeyConfigured: false, models: [] })
+
+    const tasks = await req('/api/galfree/audio/tasks')
+    expect(tasks.status).toBe(200)
+    expect(tasks.body.tasks).toEqual([])
+
+    // 三道门:没配渠道 → 建任务拒;空路径 → 拒(都在接缝上判)。
+    const noChannel = await postJson('/api/galfree/audio/tasks/create', {
+      outputPath: 'game/audio/bgm/rain.ogg', model: 'music-3.0', prompt: '雨天',
+    })
+    // 503 = 能力未就绪(与图像那条 `no-image-channel` 同一个态度:**不是**服务端故障)。
+    expect(noChannel.status).toBe(503)
+    expect(noChannel.body.code).toBe('no-audio-channel')
+
+    const emptyPath = await postJson('/api/galfree/audio/tasks/create', { model: 'music-3.0', prompt: 'x' })
+    expect(emptyPath.status).toBe(400)
+    expect(emptyPath.body.code).toBe('invalid-audio-path')
+
+    // 跑队列 / 重 roll 都在(空队列跑一次返回空数组,不是报错)。
+    const ran = await postJson('/api/galfree/audio/tasks/run', {})
+    expect(ran.status).toBe(200)
+    expect(ran.body.tasks).toEqual([])
+    // 缺 id 是**请求的错**(400),不是"任务不存在"(404)—— 两者混起来会让人以为
+    // "任务被删了",而其实只是没传参数。
+    expect((await postJson('/api/galfree/audio/tasks/retry', {})).status).toBe(400)
+    // 方法守卫:渠道那条只允许 GET。
+    expect((await req('/api/galfree/audio/channel', { method: 'POST' })).status).toBe(405)
+  })
+
   it('停用开关:仅 /state 可读,其余 503', async () => {
     const offline = createProjectService({ dataDir: join(dataDir, 'disabled'), uiTemplate: fakeUiTemplate(sdkDir) })
     const routes = makeRoutes({ service: offline, config: () => ({ enabled: false, defaultProjectsRoot: '' }) })
