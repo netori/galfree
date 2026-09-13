@@ -67,7 +67,8 @@ import { makeTaskLedger } from './tasks.ts'
 import {
   adapterFor as audioAdapterFor,
   AUDIO_POLL_INTERVAL_MS, AUDIO_POLL_TIMEOUT_MS,
-  AUDIO_TASK_KIND_DESCRIPTOR, AUDIO_TASKS_FILE, assertAudioOutputPath, audioModels, decodeBase64OrRaw, purposeOfPath,
+  AUDIO_TASK_KIND_DESCRIPTOR, AUDIO_TASKS_FILE, assertAudioOutputPath, audioExtensionOf, audioFormatOfBytes,
+  audioModels, decodeBase64OrRaw, purposeOfPath, withAudioExtension,
   type AudioChannelSettings, type AudioModelDescriptor, type AudioPorts, type AudioPurpose, type AudioTask, type CreateAudioTaskInput,
 } from './audio-generation.ts'
 import type { GenerationDegradation } from './tasks.ts'
@@ -2522,6 +2523,8 @@ export class ProjectService {
     const { channel, model } = this.#requireAudioModel(task.model, task.purpose)
 
     let bytes: Uint8Array
+    /** 上游给的字节的 content-type(落盘前要核对真实格式;很多上游只给 octet-stream)。 */
+    let landedContentType: string | undefined
     // 异步制:提交那一步拿到的上游任务 id(T34)。产物还在上游时靠它补救(见 catch 里那句)。
     let upstreamTaskId: string | undefined
     try {
@@ -2550,6 +2553,7 @@ export class ProjectService {
       if (submission.kind === 'failed') throw new Error(submission.error)
       if (submission.kind === 'bytes') {
         bytes = submission.bytes
+        landedContentType = submission.contentType
       } else {
         // 异步制:轮询到终态。**没实现 poll 的适配器如实拒绝**,不空转。
         if (adapter.poll === undefined || adapter.buildPollRequest === undefined) {
@@ -2558,7 +2562,9 @@ export class ProjectService {
         // **把上游那个 id 记下来**(T34):它是"产物还在上游"时唯一的补救线索
         // (那家网关的文档:任务完成后 48 小时内可取)。认不出产物地址 / 下载失败时要有它。
         upstreamTaskId = submission.taskId
-        bytes = await this.#awaitAudioResult({ adapter, model, channel, task, taskId: submission.taskId })
+        const awaited = await this.#awaitAudioResult({ adapter, model, channel, task, taskId: submission.taskId })
+        bytes = awaited.bytes
+        landedContentType = awaited.contentType
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -2582,14 +2588,9 @@ export class ProjectService {
     }
 
     // 产物经写网关落盘(自动快照)。CAS 用现读的版本戳:外部刚动过就如实报漂移,不盖掉。
-    const gateway = await this.#gatewayFor(projectRef)
-    const current = await gateway.read(task.outputPath)
-    const replacedFingerprint = current.missing ? undefined : current.version
-    const result = await gateway.writeBatch(
-      [{ path: task.outputPath, content: bytes, expectVersion: current.version }],
-      { origin: 'agent', reason: 'queue' },
-    )
-    const written = result.versions[task.outputPath] ?? fingerprint(bytes)
+    // **格式核对在这一段里**(上游给什么格式 ≠ 目标路径的后缀时,换后缀 + 记一笔,T34)。
+    const landed = await this.#landAudioBytes(projectRef, task, bytes, landedContentType)
+    const written = landed.fingerprint
 
     return await this.#audioLedger.mutate(projectRef, (document, writers) => {
       const found = document.tasks.find((candidate) => candidate.id === id)!
@@ -2600,9 +2601,19 @@ export class ProjectService {
         attempts: [...found.attempts, this.#audioAttempt(found.attempts.length + 1, started, 'ok', {
           fingerprint: written,
           bytes: bytes.byteLength,
-          ...(replacedFingerprint === undefined ? {} : { replacedFingerprint }),
+          ...(landed.replacedFingerprint === undefined ? {} : { replacedFingerprint: landed.replacedFingerprint }),
         })],
         updatedAt: new Date().toISOString(),
+      }
+      if (landed.note !== undefined) {
+        // 落盘路径/格式与要求不一致:**如实记在任务上**(与"降级"同一个态度 ——
+        // 有它 = 结果与要求的不一样,没有 = 一模一样)。
+        done.degradation = {
+          code: 'audio-format-mismatch',
+          message: landed.note,
+          droppedReferenceImages: [],
+          notes: [`产物落盘路径:${landed.path}(任务的目标路径写的是 ${task.outputPath})`],
+        }
       }
       writers.push(done)
       return Promise.resolve(done)
@@ -2616,7 +2627,7 @@ export class ProjectService {
     channel: AudioChannelSettings
     task: AudioTask
     taskId: string
-  }): Promise<Uint8Array> {
+  }): Promise<{ bytes: Uint8Array; contentType?: string }> {
     const http = this.#audioPorts!.http
     const poll = input.adapter.poll!
     const deadline = Date.now() + AUDIO_POLL_TIMEOUT_MS
@@ -2639,7 +2650,7 @@ export class ProjectService {
       const step = poll(response, input.taskId)
       if (step.kind === 'failed') throw new Error(step.error)
       if (step.kind === 'done') {
-        if (step.bytes !== undefined) return step.bytes
+        if (step.bytes !== undefined) return { bytes: step.bytes, ...(step.contentType === undefined ? {} : { contentType: step.contentType }) }
         if (step.url === undefined) throw new Error('上游说完成了,但既没给字节也没给 URL')
         // 产物是一个**音频 URL**(Suno 类就是这样):下载口没装配就如实拒绝 ——
         // 不假装"任务成功但没有产物"(那是"以为配齐了、玩的时候没声音"的另一种形状)。
@@ -2652,10 +2663,56 @@ export class ProjectService {
           throw new Error(`下载音频失败(HTTP ${fetched.status}):${step.url}`)
         }
         if (fetched.bytes.byteLength === 0) throw new Error(`下载回来的音频是空文件:${step.url}`)
-        return fetched.bytes
+        return { bytes: fetched.bytes, ...(fetched.contentType === '' ? {} : { contentType: fetched.contentType }) }
       }
     }
     throw new Error(`等了 ${Math.round(AUDIO_POLL_TIMEOUT_MS / 1000)} 秒还没等到音频(上游一直在跑)—— 这次不算成功`)
+  }
+
+  /**
+   * **产物的字节经写网关落盘**(跑任务与 collect 共用这一段;T34 抽出来)。
+   *
+   * 两件事在这里定死:
+   *  1. **不许写出一个"扩展名撒谎"的文件**:Ren'Py 按扩展名选解码器,而上游给的格式
+   *     未必等于调用方写进目标路径的那个后缀(2026-09-13 真机踩到:上游给 mp3、路径写 `.ogg`
+   *     —— 那个文件在游戏里读不出来)。所以落盘前**看魔数**:不一致就把后缀换成真实格式,
+   *     并在任务上记一笔说明(路径与要求的不一样,以及为什么);
+   *  2. 认不出真实格式时**照原路径写**(不猜一个后缀),同样记一笔说明让人知道。
+   */
+  async #landAudioBytes(
+    projectRef: string,
+    task: AudioTask,
+    bytes: Uint8Array,
+    contentType: string | undefined,
+  ): Promise<{ path: string; fingerprint: string; replacedFingerprint?: string; note?: string }> {
+    const actual = audioFormatOfBytes(bytes, contentType)
+    const expected = audioExtensionOf(task.outputPath)
+    const mismatch = actual !== null && actual !== expected
+    const path = mismatch ? withAudioExtension(task.outputPath, actual) : task.outputPath
+    const gateway = await this.#gatewayFor(projectRef)
+    const current = await gateway.read(path)
+    const replacedFingerprint = current.missing ? undefined : current.version
+    const result = await gateway.writeBatch(
+      [{ path, content: bytes, expectVersion: current.version }],
+      { origin: 'agent', reason: 'queue' },
+    )
+    const note = mismatch
+      ? `上游给的是 **${actual}**,而目标路径写的是 .${expected} —— 产物落在 \`${path}\``
+        + '(Ren\'Py **按扩展名选解码器**,扩展名对不上就是"有文件但没声音")。'
+        + `要 .${expected} 得先转格式(本插件不做转码);`
+        + (task.purpose === 'voice'
+          ? '而语音还要对上 `config.auto_voice` 的模板后缀,否则引擎根本找不到它。'
+          : '或者把模型目录里声明的输出格式与目标路径写成一致。')
+      : actual === null
+        ? `上游给的字节**认不出容器格式**(content-type:${contentType ?? '(没给)'})—— 已按目标路径原样落盘;`
+          + '要是游戏里读不出来,先看它真实格式与后缀是否一致。'
+        : undefined
+    return {
+      path,
+      fingerprint: result.versions[path] ?? fingerprint(bytes),
+      ...(replacedFingerprint === undefined ? {} : { replacedFingerprint }),
+      ...(note === undefined ? {} : { note }),
+    }
   }
 
   /**
@@ -2731,14 +2788,9 @@ export class ProjectService {
       throw new GalfreeError('invalid-request', `下载音频失败(HTTP ${fetched.status}):${step.url}`)
     }
     if (fetched.bytes.byteLength === 0) throw new GalfreeError('invalid-request', `下载回来的音频是空文件:${step.url}`)
-    const gateway = await this.#gatewayFor(projectRef)
-    const current = await gateway.read(task.outputPath)
-    const replacedFingerprint = current.missing ? undefined : current.version
-    const result = await gateway.writeBatch(
-      [{ path: task.outputPath, content: fetched.bytes, expectVersion: current.version }],
-      { origin: 'agent', reason: 'queue' },
-    )
-    const written = result.versions[task.outputPath] ?? fingerprint(fetched.bytes)
+    // 落盘走**同一段**(格式核对也在里面:T34)。
+    const landed = await this.#landAudioBytes(projectRef, task, fetched.bytes, fetched.contentType)
+    const written = landed.fingerprint
     const at = new Date().toISOString()
     const done = await this.#audioLedger.mutate(projectRef, (document, writers) => {
       const found = document.tasks.find((candidate) => candidate.id === id)!
@@ -2749,16 +2801,28 @@ export class ProjectService {
         attempts: [...found.attempts, this.#audioAttempt(found.attempts.length + 1, at, 'ok', {
           fingerprint: written,
           bytes: fetched.bytes.byteLength,
-          ...(replacedFingerprint === undefined ? {} : { replacedFingerprint }),
+          ...(landed.replacedFingerprint === undefined ? {} : { replacedFingerprint: landed.replacedFingerprint }),
         })],
         updatedAt: at,
       }
       // 取回来了 ⇒ 上次那条"没拿到"的失败原因**不再成立**,删掉它(留着就是过期的话)。
       delete next.lastError
+      if (landed.note !== undefined) {
+        next.degradation = {
+          code: 'audio-format-mismatch',
+          message: landed.note,
+          droppedReferenceImages: [],
+          notes: [`产物落盘路径:${landed.path}(任务的目标路径写的是 ${task.outputPath})`],
+        }
+      }
       writers.push(next)
       return Promise.resolve(next)
     })
-    return { state: 'awaiting-review', note: `取回来了:${task.outputPath}(经写网关落盘 → 进了快照)`, task: done }
+    return {
+      state: 'awaiting-review',
+      note: `取回来了:${landed.path}(经写网关落盘 → 进了快照)${landed.note === undefined ? '' : `;注意:${landed.note}`}`,
+      task: done,
+    }
   }
 
   /**

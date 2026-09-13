@@ -224,7 +224,7 @@ describe('资源式 REST 适配器:端到端(注入假上游)', () => {
 
   it('建任务 → 跑:提交到文档那条路径、轮询把 id 放在路径里、产物经网关落盘', async () => {
     const task = await service.createAudioTask('rest', {
-      outputPath: 'game/audio/bgm/rain_theme.ogg',
+      outputPath: 'game/audio/bgm/rain_theme.mp3',
       model: 'suno-generation',
       prompt: '雨前的教室,钢琴与弦乐,慢速',
       run: true,
@@ -248,7 +248,7 @@ describe('资源式 REST 适配器:端到端(注入假上游)', () => {
     expect(downloaded).toEqual(['https://cdn.example/rain.mp3'])
 
     const pool = await service.audioPool('rest')
-    expect(pool.files.map((file) => file.path)).toEqual(['audio/bgm/rain_theme.ogg'])
+    expect(pool.files.map((file) => file.path)).toEqual(['audio/bgm/rain_theme.mp3'])
   })
 
   it('未注册的协议如实拒绝(注册是显式的,不做隐式兜底)', async () => {
@@ -342,7 +342,7 @@ describe('资源式 REST 适配器:端到端(注入假上游)', () => {
     })
     await service.createProject({ projectsRoot, name: 'blind3', title: undefined })
     const parked = await service.createAudioTask('blind3', {
-      outputPath: 'game/audio/bgm/x.ogg', model: 'suno-generation', prompt: 'x', run: false,
+      outputPath: 'game/audio/bgm/x.mp3', model: 'suno-generation', prompt: 'x', run: false,
     })
     // 从这一刻起只记 collect 发出的请求(前面那条失败任务也用过同一个记录器)。
     sent.length = 0
@@ -353,7 +353,7 @@ describe('资源式 REST 适配器:端到端(注入假上游)', () => {
     expect(sent[0]!.method).toBe('GET')
     expect(sent[0]!.url).toBe('https://api.seedance.nz/v1/music/tasks/t-blind')
     expect(downloaded).toEqual(['https://cdn.example/late.mp3'])
-    expect((await service.audioPool('blind3')).files.map((file) => file.path)).toEqual(['audio/bgm/x.ogg'])
+    expect((await service.audioPool('blind3')).files.map((file) => file.path)).toEqual(['audio/bgm/x.mp3'])
     // 取回来了 ⇒ 上次那条"没拿到"的失败原因不再成立(不留过期的话)。
     expect(collected.task.lastError).toBeUndefined()
     expect(collected.task.upstreamTaskId).toBe('t-blind')

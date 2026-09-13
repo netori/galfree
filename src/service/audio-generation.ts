@@ -464,6 +464,50 @@ export function audioFormatOf(contentType: string | undefined, url: string): str
   return fromUrl === undefined ? 'ogg' : fromUrl.toLowerCase()
 }
 
+/** 认得的音频容器(**后缀就是 Ren'Py 选解码器的依据**)。 */
+export const AUDIO_CONTAINER_FORMATS = ['mp3', 'ogg', 'wav', 'flac', 'm4a'] as const
+
+/**
+ * **字节的真实格式**(看魔数,不看扩展名;内容类型只在魔数认不出时兜底)。
+ *
+ * 为什么必须有它(2026-09-13 真机踩到):上游给的是 **mp3**,而我们按调用方给的目标路径
+ * 落成了 `.ogg` —— Ren'Py **按扩展名选解码器**,那个文件在游戏里就是读不出来
+ * ("看着生成了、玩的时候没声音"的又一变体)。而很多上游的 content-type 是
+ * `application/octet-stream`,所以**魔数才是判据**;认不出来返回 `null`
+ * (由调用方决定:如实说明,而不是猜一个后缀写下去)。
+ */
+export function audioFormatOfBytes(bytes: Uint8Array, contentType?: string): string | null {
+  const magic = (offset: number, text: string): boolean =>
+    bytes.byteLength >= offset + text.length
+    && text.split('').every((char, index) => bytes[offset + index] === char.charCodeAt(0))
+  if (magic(0, 'ID3')) return 'mp3'
+  // 无 ID3 的裸 mp3:帧同步字 `FF Ex/Fx`。
+  if (bytes.byteLength >= 2 && bytes[0] === 0xff && (bytes[1]! & 0xe0) === 0xe0) return 'mp3'
+  if (magic(0, 'OggS')) return 'ogg'
+  if (magic(0, 'RIFF')) return 'wav'
+  if (magic(0, 'fLaC')) return 'flac'
+  if (magic(4, 'ftyp')) return 'm4a'
+  const type = (contentType ?? '').toLowerCase()
+  if (type.includes('mpeg') || type.includes('mp3')) return 'mp3'
+  if (type.includes('ogg') || type.includes('opus')) return 'ogg'
+  if (type.includes('wav') || type.includes('wave')) return 'wav'
+  if (type.includes('flac')) return 'flac'
+  if (type.includes('m4a') || type.includes('mp4')) return 'm4a'
+  return null
+}
+
+/** 路径的后缀(小写;没有后缀返回空串)。 */
+export function audioExtensionOf(path: string): string {
+  const base = path.replace(/\\/g, '/').split('/').pop() ?? ''
+  const dot = base.lastIndexOf('.')
+  return dot <= 0 ? '' : base.slice(dot + 1).toLowerCase()
+}
+
+/** 把路径的后缀换成给定格式(其余部分一字不动)。 */
+export function withAudioExtension(path: string, format: string): string {
+  return `${path.replace(/\.[A-Za-z0-9]+$/, '')}.${format}`
+}
+
 /**
  * 响应体 → 音频字节。
  *

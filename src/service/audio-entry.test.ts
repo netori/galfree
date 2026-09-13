@@ -148,7 +148,9 @@ describe('建音频任务的入口(T33)', () => {
   it('一句话建音乐任务并立刻跑:提交 → 轮询 → 下载 → 经网关落盘 → 池里立刻有它', async () => {
     const out = JSON.parse(await find('galfree_generate_audio').execute({
       project: 'entry',
-      output_path: 'game/audio/bgm/rain.ogg',
+      // 目标后缀与上游给的格式一致(`.mp3`);格式不一致时插件会换后缀 + 记一笔
+      // (T34,见 `audio-format.test.ts`)—— 这里测的是正常回路。
+      output_path: 'game/audio/bgm/rain.mp3',
       model: 'suno-generation',
       prompt: '雨夜的天台,钢琴与弦乐,慢速,忧郁',
     })) as { ok: boolean; purpose: string; state: string; outputPath: string; attempts: number; cost: { attempted: number; pending: { music: number; voice: number }; note: string } }
@@ -156,7 +158,7 @@ describe('建音频任务的入口(T33)', () => {
     expect(out.ok).toBe(true)
     expect(out.purpose).toBe('music')
     expect(out.state).toBe('awaiting-review')
-    expect(out.outputPath).toBe('game/audio/bgm/rain.ogg')
+    expect(out.outputPath).toBe('game/audio/bgm/rain.mp3')
     expect(out.attempts).toBe(1)
     // **成本在 run:true 这条路上也要如实**:这一下真跑过 1 次,而排队里已经没有它了
     // (此前这里报的是"跑队列会真发 0 条" —— 一句空话)。
@@ -172,7 +174,7 @@ describe('建音频任务的入口(T33)', () => {
 
     // 产物落进项目,池里立刻有它(池是派生的)。
     const pool = await service.audioPool('entry')
-    expect(pool.files.map((file) => file.path)).toEqual(['audio/bgm/rain.ogg'])
+    expect(pool.files.map((file) => file.path)).toEqual(['audio/bgm/rain.mp3'])
   })
 
   it('**不跑**那一下:建完就入队,而且报出"这一跑会真发几条"', async () => {
