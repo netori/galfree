@@ -27,6 +27,7 @@
  */
 import { readFile } from 'node:fs/promises'
 import type { AudioAdapter, AudioAdapterId } from './audio-generation.ts'
+import type { VoiceEmotion, VoiceEmotionMode } from './characters.ts'
 
 /** 缺省说话人(服务端 `/speakers` 里常有的那个;人可以在模型目录里改)。 */
 export const INDEXTTS_DEFAULT_SPEAKER = 'default'
@@ -39,6 +40,9 @@ export const INDEXTTS_DEFAULT_LANG = 'ZH'
  *
  * 为什么放在 `note` 而不是给模型条目加新字段:`speaker` / `audio` 是**这一家服务**的参数,
  * 不是音频生成的通用概念 —— 塞进通用条目会让别家适配器看到一个自己用不上的字段。
+ *
+ * **T32 起它只是"模型级缺省"**:真正的音色锚是**登记簿的音色档案**(每个角色一份参考样本),
+ * 由任务带着进来(`task.voiceSample` / `voiceSpeaker` / `voiceLang`)。任务优先于它。
  */
 export function parseIndexttsNote(note: string | undefined): Record<string, string> {
   const out: Record<string, string> = {}
@@ -50,6 +54,32 @@ export function parseIndexttsNote(note: string | undefined): Record<string, stri
     out[trimmed.slice(0, eq).trim().toLowerCase()] = trimmed.slice(eq + 1).trim()
   }
   return out
+}
+
+/**
+ * 情感四档 → 服务端的 `emo_control_method` 整数值(`app_api.py:478` / `:388-399`)。
+ *
+ * 名字按语义起(`follow` / `reference` / `vector` / `text`),数值只在这**一处**映射 ——
+ * 别处再写一遍数字,加一档时就会漏。
+ */
+const EMO_METHOD: Record<VoiceEmotionMode, number> = { follow: 0, reference: 1, vector: 2, text: 3 }
+
+/**
+ * 情感 → 请求体那几个键。
+ *
+ * **没配就一个键都不发**(不替人编一个 0):服务端缺省本来就是 `follow`(情绪跟着音色参考音频走),
+ * 把它显式发出去只是复述缺省;而"面板上能调情绪"这件事靠的是**配了就真的发**。
+ */
+function emotionFields(emotion: VoiceEmotion | undefined): Record<string, unknown> {
+  if (emotion === undefined) return {}
+  const method = EMO_METHOD[emotion.mode]
+  return {
+    emo_control_method: method,
+    ...(emotion.mode === 'reference' && emotion.refSample !== undefined ? { emo_ref_audio: emotion.refSample } : {}),
+    ...(emotion.mode === 'vector' && emotion.vector !== undefined ? { emo_vector: emotion.vector } : {}),
+    ...(emotion.mode === 'text' && emotion.text !== undefined ? { emo_text: emotion.text } : {}),
+    ...(emotion.weight === undefined ? {} : { emo_weight: emotion.weight }),
+  }
 }
 
 interface IndexttsTtsResponse {
@@ -67,15 +97,22 @@ export function createIndexttsAdapter(): AudioAdapter {
     id,
     buildRequest: (input) => {
       const options = parseIndexttsNote(input.model.note)
-      // `voiceId` 优先(面板/工具能按角色给),否则模型目录里写死的,最后才是缺省。
-      const speaker = input.task.voiceId ?? options.speaker ?? INDEXTTS_DEFAULT_SPEAKER
-      // 参考音频**必传**(这就是音色的来源)。给不出就如实拒绝 ——
-      // 拿空字符串去撞 400 只会得到一句没有上下文的"合成失败"。
-      const audio = options.audio ?? input.task.referenceAudio[0]?.path
+      // **`speaker` 不是音色**(T32 修掉的错位):它只选 LoRA 适配器目录
+      // (`runs/exp1_<name>/`),而 `task.voiceId` 是"哪把嗓子"(登记簿 id)。
+      // 拿 voiceId 去当 speaker 发,只会得到一个必然 400 的值(本机 runs/ 是空的)。
+      // 于是来源只有两处:任务的音色档案 → 模型目录的缺省 → 底模。
+      const speaker = input.task.voiceSpeaker ?? options.speaker ?? INDEXTTS_DEFAULT_SPEAKER
+      // **参考样本必须是音色库里的文件名**(这就是音色的来源)。
+      // 刻意**不**兜底到 `task.referenceAudio[0].path`:那是**项目内相对路径**,
+      // 与服务端 `voices/` 是**两个命名空间**,送过去必然 400(反而把真正的病因藏起来)。
+      const audio = input.task.voiceSample ?? options.audio
       if (audio === undefined || audio === '') {
         throw new Error(
-          'IndexTTS 需要一个**参考音频**(音色来源):在模型目录的 note 里写 `speaker=<说话人>;audio=<音频库里的文件名.wav>`,'
-          + '或给这个任务挂一条 referenceAudio —— 两者都没有时它不知道该用谁的声音。',
+          'IndexTTS 需要一个**参考样本**(音色来源,服务端音色库里的文件名):'
+          + '到角色视图给这个角色记一条**音色档案**(`音色库里的文件名`,如 xiao_tang.wav),'
+          + '或在模型目录的 note 里写 `audio=xiao_tang.wav`。'
+          + '注意音色库是**服务端自己的 `voices/` 目录**(面板「读音色库」能看到它的绝对路径),'
+          + '项目里的 `game/voice/…` 与它不是一个命名空间 —— 把文件放进那个目录,再按文件名引用。',
         )
       }
       return {
@@ -94,9 +131,11 @@ export function createIndexttsAdapter(): AudioAdapter {
             audio,
             // TTS 要读的就是**台词原文**(不是"制作指令"—— 那是音乐那边的事)。
             text: input.task.prompt,
-            lang: options.lang ?? INDEXTTS_DEFAULT_LANG,
+            lang: input.task.voiceLang ?? options.lang ?? INDEXTTS_DEFAULT_LANG,
             // **必须是 json**:我们的出网端口只拿文本(见文件头第 1 条决定)。
             return_type: 'json',
+            // 情感(缺省不发:服务端自己的缺省就是"跟着参考样本走")。
+            ...emotionFields(input.task.voiceEmotion),
           }),
         },
       }

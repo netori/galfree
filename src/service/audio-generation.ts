@@ -25,6 +25,7 @@ import {
   type TaskDocument,
   type TaskKind,
 } from './tasks.ts'
+import type { VoiceEmotion } from './characters.ts'
 
 /** 上游协议适配器 id(按**协议**收,不按厂商收)。 */
 export type AudioAdapterId =
@@ -158,8 +159,27 @@ export interface AudioTask extends GenerationTaskBase {
   loop?: boolean
   /** 参考音频(改风格 / 音色克隆;模型不支持会被降级并说明)。 */
   referenceAudio: Array<{ path: string; note?: string }>
-  /** 音色档案 id(语音任务;来自登记簿)。 */
+  /**
+   * 音色档案 id(语音任务;来自登记簿)。
+   *
+   * **它不再是服务端的 `speaker`**(T32 修掉的那处语义错位):`speaker` 在 IndexTTS 那边
+   * 是 **LoRA 适配器名**,而这里是"**哪把嗓子**"(登记簿里的那个角色)。
+   * 拿它去当 `speaker` 发,只会得到一个必然 400 的值(本机 `runs/` 是空的)。
+   */
   voiceId?: string
+  /**
+   * **参考样本**(T32):服务端**音色库里的文件名**(如 `xiao_tang.wav`)—— 音色的真正来源。
+   *
+   * 与 `referenceAudio`(**项目内相对路径**)是两个命名空间,刻意分开:
+   * 服务端只在它自己的 `voices/` 目录里按名解析,一个项目路径送过去**必然**被拒。
+   */
+  voiceSample?: string
+  /** LoRA 适配器名(缺省 `default`)。**它不是音色**。 */
+  voiceSpeaker?: string
+  /** 语言(缺省由适配器给)。 */
+  voiceLang?: string
+  /** 情感输入(缺省 = 不给,用服务端自己的缺省)。 */
+  voiceEmotion?: VoiceEmotion
 }
 
 /** 音频任务账本(落 `.studio/audio-tasks.json`;只放制作信息,不复制叙述内容)。 */
@@ -222,7 +242,13 @@ export interface CreateAudioTaskInput {
   sampleRate?: number
   loop?: boolean
   referenceAudio?: Array<{ path: string; note?: string }>
+  /** 音色档案 id(登记簿 id;缺省 = 按 `dialogueId` 派生的说话人反查)。 */
   voiceId?: string
+  /** 参考样本(**服务端音色库里的文件名**;缺省 = 取该角色音色档案里的那一段)。 */
+  voiceSample?: string
+  voiceSpeaker?: string
+  voiceLang?: string
+  voiceEmotion?: VoiceEmotion
   /** 建完立刻跑。 */
   run?: boolean
 }
@@ -303,6 +329,11 @@ export interface AudioAdapterInput {
     loop?: boolean
     dialogueId: string | null
     voiceId?: string
+    /** 参考样本(服务端**音色库**里的文件名,不是项目内路径)。 */
+    voiceSample?: string
+    voiceSpeaker?: string
+    voiceLang?: string
+    voiceEmotion?: VoiceEmotion
     referenceAudio: Array<{ path: string; note?: string }>
   }
 }

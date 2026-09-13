@@ -30,11 +30,13 @@ import { readStamps, sceneTarget, slotTarget, stampsDocument, withStamp, type St
 import {
   CHARACTERS_FILE, SLOTS_FILE, charactersDocument, readCharacters, readSlots, removeCharacter,
   removeSlot, slotsDocument, upsertCharacter, upsertSlot,
-  type CharacterRecord, type SlotRecord,
+  type CharacterRecord, type SlotRecord, type VoiceEmotion,
 } from './characters.ts'
 import { deriveSlots } from './slots.ts'
 import { deriveAudio, poolViewOf, readAudioFiles, type AudioDerivation, type AudioPoolView } from './audio.ts'
 import { resolveReferenceChain, sortSlotsByReference, type ReferenceChainView } from './reference-chain.ts'
+import { buildVoiceAnchorBoard, resolveVoiceAnchor, type VoiceAnchorBoard, type VoiceAnchorView } from './voice-anchor.ts'
+import { readVoiceLibrary, type VoiceLibraryReading } from './audio-discovery.ts'
 import { buildDifferentialGrid, type DifferentialGrid } from './differentials.ts'
 import { deriveCompleteness, type CompletenessReport } from './completeness.ts'
 import {
@@ -68,6 +70,7 @@ import {
   AUDIO_TASK_KIND_DESCRIPTOR, AUDIO_TASKS_FILE, assertAudioOutputPath, audioModels, decodeBase64OrRaw, purposeOfPath,
   type AudioChannelSettings, type AudioModelDescriptor, type AudioPorts, type AudioPurpose, type AudioTask, type CreateAudioTaskInput,
 } from './audio-generation.ts'
+import type { GenerationDegradation } from './tasks.ts'
 import { ABSENT, fileFingerprint, fingerprint, pathExists } from './hash.ts'
 import {
   GUI_CODE_FILE, GUI_IMAGE_DIR, THEME_FILE, parseThemeRecord, parseThemeSpec, projectResolutionOf, themeLabel, themeViewOf,
@@ -284,6 +287,14 @@ export class ProjectService {
   #imageLedger: ReturnType<typeof makeTaskLedger<GenerationTask>>
   /** 音频任务账本(T27)。 */
   #audioLedger: ReturnType<typeof makeTaskLedger<AudioTask>>
+  /**
+   * **最近一次读到的音色库**(T32):`GET /voices` 的文件名 + 目录。
+   *
+   * 为什么记在内存里而不是落盘:它是**那台服务此刻的处境**,不是项目的制作信息 ——
+   * 写进 `.studio/` 就会变成"第二份真相",而服务端才是音色库的真相。
+   * 用途只有一个:建语音任务时标一句"档案要的样本此刻不在库里"(`at` 让人知道它有多新)。
+   */
+  #voiceLibrary: { files: string[]; dir?: string; at: string } | null = null
   #publishPorts: NonNullable<ProjectServiceOptions['publish']> | null
   /** 界面换皮端口(T31);缺省 = 没装配 → 换皮如实拒绝。 */
   #themePorts: ThemePorts | null
@@ -2175,6 +2186,11 @@ export class ProjectService {
       const { channel, model } = this.#requireAudioModel(input.model, purpose)
       const prompt = input.prompt.trim()
       if (prompt === '') throw new GalfreeError('empty-prompt', '提示词是空的:给一句能用的制作指令(风格/情绪/场景)')
+      // **声音锚(T32)**:语音任务按 `dialogueId` 派生的说话人反查登记簿,自动带上音色档案。
+      const voice = purpose === 'voice' ? await this.#resolveVoiceForTask(entry, projectRef, input) : null
+      // `voiceId` 记的是**登记簿 id**:显式给的就是它,否则是这次解析出来的那个角色
+      // (制作信息:这条是谁的嗓子;它**不进请求体** —— 服务端的 `speaker` 是另一件事)。
+      const voiceCharacter = input.voiceId ?? voice?.character
       const at = new Date().toISOString()
       const task: AudioTask = {
         schemaVersion: 1,
@@ -2190,7 +2206,12 @@ export class ProjectService {
         ...(input.format === undefined ? {} : { format: input.format }),
         ...(input.sampleRate === undefined ? {} : { sampleRate: input.sampleRate }),
         ...(input.loop === undefined ? {} : { loop: input.loop }),
-        ...(input.voiceId === undefined ? {} : { voiceId: input.voiceId }),
+        ...(voiceCharacter === undefined ? {} : { voiceId: voiceCharacter }),
+        ...(voice?.sample === undefined ? {} : { voiceSample: voice.sample }),
+        ...(voice?.speaker === undefined ? {} : { voiceSpeaker: voice.speaker }),
+        ...(voice?.lang === undefined ? {} : { voiceLang: voice.lang }),
+        ...(voice?.emotion === undefined ? {} : { voiceEmotion: voice.emotion }),
+        ...(voice?.degradation === undefined ? {} : { degradation: voice.degradation }),
         referenceAudio: input.referenceAudio ?? [],
         attempts: [],
         rejections: [],
@@ -2200,6 +2221,148 @@ export class ProjectService {
       writers.push(task)
       return task
     })
+  }
+
+  /**
+   * **这条语音用哪把嗓子**(T32)—— 声音锚的自动携链。
+   *
+   * 说话人的来源按优先级:
+   *  1. 显式给了 `voiceId` → 当**登记簿 id** 用(不是服务端的 `speaker`!);
+   *  2. 否则按 `dialogueId` 从 `.rpy` 派生的**说话人变量**反查登记簿的 `voice` 字段
+   *     (与 `voiceBatch` 那条清单**同一套 id 口径**,不然"清单里的这句"与"任务里的这句"会对不上);
+   *  3. 都没有 → 如实降级(说明写在任务上),而不是静默用服务端缺省。
+   *
+   * 返回的 `sample` 缺省时**不发**任何声音字段:`voiceId` 只进账本(制作信息),
+   * 绝不进请求体(那正是 T32 修掉的那处错位)。
+   */
+  async #resolveVoiceForTask(
+    entry: { path: string },
+    projectRef: string,
+    input: CreateAudioTaskInput,
+  ): Promise<{ character?: string; sample?: string; speaker?: string; lang?: string; emotion?: VoiceEmotion; degradation?: GenerationDegradation }> {
+    const characters = await readCharacters(entry.path)
+    // 说话人变量只在**没显式给登记簿 id** 时才需要从剧本反查(反查要走一遍剧本)。
+    const speakerVar = input.voiceId === undefined && input.dialogueId !== undefined
+      ? await this.#speakerOfDialogue(projectRef, input.dialogueId)
+      : undefined
+    const anchor = resolveVoiceAnchor({
+      ...(input.voiceId === undefined ? {} : { characterId: input.voiceId }),
+      ...(speakerVar === undefined ? {} : { speakerVar }),
+      characters,
+      // 没读过音色库就是 `null`(**不谎报"库里没有"**,见 `voice-anchor.ts` 的说明)。
+      library: this.#voiceLibrary?.files ?? null,
+    })
+    const explicitSample = input.voiceSample === undefined || input.voiceSample === '' ? undefined : input.voiceSample
+    const sample = explicitSample ?? anchor.sample ?? undefined
+    const speaker = input.voiceSpeaker ?? anchor.speaker
+    const character = input.voiceId ?? anchor.character ?? undefined
+    if (sample === undefined) {
+      // **如实降级**(不是拒绝):任务照建,但把"这条拿不到谁的嗓子"写在它身上 ——
+      // 面板与账本都能看见,而不是等人听出来"怎么每个人声音都一样"。
+      return {
+        ...(character === undefined ? {} : { character }),
+        degradation: {
+          code: 'voice-anchor-missing',
+          message: `${anchor.message}。没配到的这条会用模型目录里写死的那把嗓子(如果有);要"每个角色一把嗓子",请到角色视图给它记一条音色档案`,
+          droppedReferenceImages: [],
+          notes: ['音色 = 参考样本(服务端音色库里的文件名);登记簿的音色档案就是这条锚'],
+        },
+      }
+    }
+    // 显式给的优先于档案里的(临时换一段参考而不动登记簿)。
+    const lang = input.voiceLang ?? anchor.lang
+    const emotion = input.voiceEmotion ?? anchor.emotion
+    return {
+      ...(character === undefined ? {} : { character }),
+      sample,
+      ...(speaker === undefined || speaker === '' ? {} : { speaker }),
+      ...(lang === undefined ? {} : { lang }),
+      ...(emotion === undefined ? {} : { emotion }),
+    }
+  }
+
+  /**
+   * 对话 id → 剧本里的**说话人变量**(没有就 undefined)。
+   *
+   * 口径与 `voiceBatch` **同一套**:优先 `.rpy` 里显式写的 `id`,没有则按
+   * `dialogueIdFor(label, 序号)` 派生 —— 两处若各写一套,"清单里的第 3 句"与"账本里的第 3 句"
+   * 就会指向不同的人(而那种错只在听的时候才发现)。
+   */
+  async #speakerOfDialogue(projectRef: string, dialogueId: string): Promise<string | undefined> {
+    const graph = await this.branchGraph(projectRef)
+    for (const scene of graph.scenes) {
+      let seq = 0
+      for (const statement of scene.statements) {
+        if (statement.kind !== 'dialogue') continue
+        const id = statement.id ?? dialogueIdFor(scene.label, seq)
+        seq += 1
+        if (id !== dialogueId) continue
+        return statement.speaker ?? undefined
+      }
+    }
+    return undefined
+  }
+
+  /**
+   * **整部戏的嗓子清单**(T32,纯读):在册角色各一条音色档案 + 剧本里还没登记的说话人。
+   *
+   * 它回答的是"还差几个角色没有嗓子"(`withoutProfile`)与"这个角色用的是哪段参考"。
+   * 音色库清单来自**最近一次**「读音色库」(`null` = 还没核对过,不谎报"库里没有")。
+   */
+  async voiceAnchors(projectRef: string): Promise<VoiceAnchorBoard> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const [characters, graph] = await Promise.all([readCharacters(entry.path), this.branchGraph(projectRef)])
+    const speakers: string[] = []
+    for (const scene of graph.scenes) {
+      for (const statement of scene.statements) {
+        if (statement.kind === 'dialogue' && statement.speaker !== null) speakers.push(statement.speaker)
+      }
+    }
+    return buildVoiceAnchorBoard({
+      characters,
+      speakers,
+      library: this.#voiceLibrary?.files ?? null,      ...(this.#voiceLibrary?.dir === undefined ? {} : { libraryDir: this.#voiceLibrary.dir }),
+    })
+  }
+
+  /** 最近一次读到的音色库(`null` = 还没读过)与它读到的时刻。 */
+  voiceLibrary(): { files: string[]; dir?: string; at: string } | null {
+    return this.#voiceLibrary === null
+      ? null
+      : { files: [...this.#voiceLibrary.files], ...(this.#voiceLibrary.dir === undefined ? {} : { dir: this.#voiceLibrary.dir }), at: this.#voiceLibrary.at }
+  }
+
+  /**
+   * **读音色库**(T32):问那台语音服务"你有哪些嗓子"(`GET /health` `/speakers` `/voices`)。
+   *
+   * 三件事在这里定死:
+   *  - **走注入的出网端口**(生产 fetch / 快带假上游),协议形状不因测试而变;
+   *  - **逐端点如实报**:本机 TTS 服务各不相同,`/speakers` 有的没有 —— 那是"这条路在这台
+   *    服务上不存在",不是故障,所以没答上来的端点进 `problems`,不整体抛;
+   *  - 读到的结果**记在内存里**(`#voiceLibrary`):建任务时用它标"库里没有那个样本",
+   *    面板也用同一份 —— 但它是**某一刻的快照**,`at` 会一并回传给人看。
+   */
+  async readVoiceLibrary(projectRef: string): Promise<VoiceLibraryReading> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const ports = this.#audioPorts
+    if (ports === null) {
+      throw new GalfreeError('audio-unavailable', '这台宿主没有装配音频出网端口:读音色库发不出请求')
+    }
+    const channel = ports.channel('voice')
+    if (channel === null) {
+      throw new GalfreeError(GATE.noVoiceChannel, '还没有配置语音(TTS)渠道:读音色库要先有一个端点(设置 → 插件 → GALFree 的「语音生成渠道」那一段)')
+    }
+    const reading = await readVoiceLibrary(ports.http, { baseUrl: channel.baseUrl, ...(channel.apiKey === undefined ? {} : { apiKey: channel.apiKey }) })
+    if (reading.voices !== undefined) {
+      this.#voiceLibrary = {
+        files: reading.voices,
+        ...(reading.voiceDir === undefined ? {} : { dir: reading.voiceDir }),
+        at: new Date().toISOString(),
+      }
+    }
+    return reading
   }
 
   /**
@@ -2372,6 +2535,11 @@ export class ProjectService {
           ...(task.loop === undefined ? {} : { loop: task.loop }),
           dialogueId: task.dialogueId,
           ...(task.voiceId === undefined ? {} : { voiceId: task.voiceId }),
+          // 音色的那三样(T32):参考样本 / LoRA 名 / 语言,外加可选情感。
+          ...(task.voiceSample === undefined ? {} : { voiceSample: task.voiceSample }),
+          ...(task.voiceSpeaker === undefined ? {} : { voiceSpeaker: task.voiceSpeaker }),
+          ...(task.voiceLang === undefined ? {} : { voiceLang: task.voiceLang }),
+          ...(task.voiceEmotion === undefined ? {} : { voiceEmotion: task.voiceEmotion }),
           referenceAudio: task.referenceAudio,
         },
       })

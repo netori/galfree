@@ -289,3 +289,116 @@ function summarize(text: string, limit = 300): string {
   const flat = text.replace(/\s+/g, ' ').trim()
   return flat.length <= limit ? flat : `${flat.slice(0, limit)}…`
 }
+
+// ─── 音色库(T32):那台语音服务有哪些"嗓子"────────────────────────────
+
+/**
+ * 读音色库用的出网口。
+ *
+ * 为什么与上面那个 `AudioDiscoveryHttp` 分开写:那一个是**图像渠道**的口(`body` 可省),
+ * 而读音色库要问的是**语音渠道** —— 它的口就是音频子系统那一份(`body: string`,
+ * GET 时生产实现自己不带上它)。两处形状本来就不同,硬合成一个只会让某一侧要放宽类型。
+ */
+export interface VoiceLibraryHttp {
+  send: (request: { url: string; method: string; headers: Record<string, string>; body: string }) => Promise<{ status: number; text: string }>
+}
+
+/**
+ * 读音色库的结果。
+ *
+ * **每个端点各报各的**:本机 TTS 服务各不相同 —— IndexTTS 那类有 `/health` `/speakers`
+ * `/voices`,别家可能一个都没有。所以"没答上来的端点"进 `problems`(人话),不整体抛:
+ * 拉不到 `/speakers` 不等于这条路走不通(音色档案要的是 `/voices` 那份文件名清单)。
+ */
+export interface VoiceLibraryReading {
+  /** 服务活着吗(`GET /health` 答了吗)。 */
+  reachable: boolean
+  /** `GET /health` 的原话(有的服务会顺带回 `model_loaded` / `qwen_emo`)。 */
+  health?: { status?: string; modelLoaded?: boolean; qwenEmo?: boolean }
+  /** `GET /speakers`:**LoRA 适配器名**(恒含 `default`)。`undefined` = 这个端点没答上来。 */
+  speakers?: string[]
+  /** `GET /voices`:音色库里的文件名。`undefined` = 这个端点没答上来。 */
+  voices?: string[]
+  /** 音色库目录(服务端给的绝对路径)—— "把参考音频丢进这里"。 */
+  voiceDir?: string
+  /** 逐个端点的实情(没答上来的原因原话;人照着它决定下一步)。 */
+  problems: string[]
+  /** 实际请求过的端点(排障用;不含密钥)。 */
+  endpoints: string[]
+}
+
+/**
+ * 读音色库(`/health` + `/speakers` + `/voices`)—— **走注入的出网端口**。
+ *
+ * 三条来自实测的硬事实(调研 §2.4)决定了它的形状:
+ *  1. `/speakers` 是 **LoRA 名清单**、**不是音色清单**(本机 `runs/` 空 ⇒ 恒只有 `default`)
+ *     —— 所以它只作参考,不做"可选音色"渲染;
+ *  2. `/voices` 才是**音色**(参考样本文件名),`dir` 告诉你该把文件丢哪;
+ *  3. `/health` **不加载模型就立即返回**,所以拿它探活是安全的。
+ *
+ * 认领一个前提:**没有上传接口**(调研 §7.4)—— `voices/` 只能丢文件。所以这个读法的用处是
+ * "告诉你库在哪、里面有什么",不是"帮你把文件放进去"。
+ */
+export async function readVoiceLibrary(
+  http: VoiceLibraryHttp,
+  input: { baseUrl: string; apiKey?: string },
+): Promise<VoiceLibraryReading> {
+  const base = normalizeAudioBaseUrl(input.baseUrl)
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if (input.apiKey !== undefined && input.apiKey !== '') headers.authorization = `Bearer ${input.apiKey}`
+
+  const problems: string[] = []
+  const endpoints: string[] = []
+  const get = async (path: string): Promise<Record<string, unknown> | null> => {
+    const url = `${base}${path}`
+    endpoints.push(url)
+    let response: { status: number; text: string }
+    try {
+      // GET 不带 body:生产那份出网口按方法决定带不带(无脑 `body: ''` 会让 GET 整个失败)。
+      response = await http.send({ method: 'GET', url, headers, body: '' })
+    } catch (error) {
+      problems.push(`${path} 发不出去(${error instanceof Error ? error.message : String(error)})—— 端点填对了吗?服务在跑吗?`)
+      return null
+    }
+    if (response.status < 200 || response.status >= 300) {
+      problems.push(`${path} 返回 ${response.status} —— ${summarize(response.text)}`)
+      return null
+    }
+    try {
+      const parsed = JSON.parse(response.text) as unknown
+      return parsed !== null && typeof parsed === 'object' ? parsed as Record<string, unknown> : null
+    } catch {
+      problems.push(`${path} 回的不是 JSON —— ${summarize(response.text)}`)
+      return null
+    }
+  }
+
+  const healthRaw = await get('/health')
+  const reading: VoiceLibraryReading = { reachable: healthRaw !== null, problems, endpoints }
+  if (healthRaw !== null) {
+    reading.health = {
+      ...(typeof healthRaw.status === 'string' ? { status: healthRaw.status } : {}),
+      ...(typeof healthRaw.model_loaded === 'boolean' ? { modelLoaded: healthRaw.model_loaded } : {}),
+      ...(typeof healthRaw.qwen_emo === 'boolean' ? { qwenEmo: healthRaw.qwen_emo } : {}),
+    }
+  }
+
+  const speakersRaw = await get('/speakers')
+  if (speakersRaw !== null) {
+    const list = Array.isArray(speakersRaw.speakers) ? speakersRaw.speakers.filter((name): name is string => typeof name === 'string') : null
+    if (list === null) problems.push('/speakers 的响应里没有 speakers 数组(不是这台服务的形状?)')
+    else reading.speakers = list
+  }
+
+  const voicesRaw = await get('/voices')
+  if (voicesRaw !== null) {
+    const list = Array.isArray(voicesRaw.voices) ? voicesRaw.voices.filter((name): name is string => typeof name === 'string') : null
+    if (list === null) problems.push('/voices 的响应里没有 voices 数组(不是这台服务的形状?)')
+    else {
+      reading.voices = list
+      if (typeof voicesRaw.dir === 'string' && voicesRaw.dir !== '') reading.voiceDir = voicesRaw.dir
+    }
+  }
+
+  return reading
+}

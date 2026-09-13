@@ -144,7 +144,7 @@ describe('IndexTTS 适配器(T29)', () => {
     expect(pool.files.map((file) => file.path)).toEqual(['voice/scene_one_0000.wav'])
   })
 
-  it('`voiceId` 能覆盖模型目录里的说话人(按角色给不同的嗓子)', async () => {
+  it('`voiceId` 是**登记簿 id**,不会被当成 `speaker` 发出去(T32 修掉的错位)', async () => {
     const wav = join(dropDir, 'out.wav')
     await mkdir(dropDir, { recursive: true })
     await writeFile(wav, Buffer.from('RIFF'))
@@ -153,7 +153,9 @@ describe('IndexTTS 适配器(T29)', () => {
       outputPath: 'game/voice/x.wav', model: 'indextts-2.5', prompt: '台词', voiceId: 'xiao_tang_speaker',
     })
     await service.runAudioTask('tts', task.id)
-    expect(JSON.parse(upstream.requests[0]!.body).speaker).toBe('xiao_tang_speaker')
+    // 服务端的 `speaker` 只选 LoRA 适配器目录:`voiceId` 是"哪把嗓子"(登记簿 id),
+    // 拿它当 speaker 发只会得到一个必然 400 的值(本机 runs/ 是空的)。
+    expect(JSON.parse(upstream.requests[0]!.body).speaker).toBe('default')
   })
 
   it('上游拒绝(400/500)→ **原话**进历史(不吞成"失败了")', async () => {
@@ -189,7 +191,7 @@ describe('IndexTTS 适配器(T29)', () => {
     expect(run!.lastError).toMatch(/批量清单/)
   })
 
-  it('缺参考音频 → **建任务那一步就如实拒绝**(不拿空字符串去撞上游 400)', async () => {
+  it('缺参考样本 → **一个请求都不发**就如实拒绝(不拿空值/项目路径去撞上游 400)', async () => {
     await setup({})
     service = createProjectService({
       dataDir: dataDir + '-2',
@@ -216,6 +218,9 @@ describe('IndexTTS 适配器(T29)', () => {
     })
     const run = await service.runAudioTask('tts2', task.id)
     expect(run!.state).toBe('failed')
-    expect(run!.lastError).toMatch(/参考音频/)
+    // 说明里要能**照着做**:音色档案 / 音色库是两个关键词。
+    expect(run!.lastError).toMatch(/参考样本/)
+    expect(run!.lastError).toMatch(/音色档案/)
+    expect(run!.lastError).toMatch(/voices\//)
   })
 })
