@@ -485,11 +485,21 @@ export interface ProgressSnapshot {
 /** 槽名与约定素材路径的唯一出处在 slot-naming.ts;此处再导出以兼容既有引用。 */
 export { slotAssetPath, slotName } from './slot-naming.ts'
 import { slotAssetPath, slotName } from './slot-naming.ts'
+// 指纹要剔掉行尾的对话 id 子句(制作信息,不是叙述内容)—— 剔除规则只在那一处。
+import { sceneTextForFingerprint } from './dialogue-id.ts'
 
-/** 场景内容指纹:**原始文本块**哈希(任何改动都算改动,包括被解析器
- *  跳过的子集外内容 —— 否则新增 if/ATL 块不会使已有戳失效)。 */
+/**
+ * 场景内容指纹:**原始文本块**哈希(任何改动都算改动,包括被解析器
+ * 跳过的子集外内容 —— 否则新增 if/ATL 块不会使已有戳失效)。
+ *
+ * **一处例外(T26 / ADR-0013)**:行尾的 `id <name>` 子句先剔掉再算。
+ * 理由是 ADR-0003/0009 的铁律 —— id 是**制作信息**(语音文件名的那根锚),不是叙述内容;
+ * 不剔的话,每生成一次语音都会令这一场的审读戳失效,人得把整场重盖一遍。
+ * 剔除规则与解析器**同源**(`dialogue-id.ts` 的 `sceneTextForFingerprint`):
+ * 两处各写一遍,迟早一处改了另一处没改,而那正是"改了台词戳却不动"的隐患。
+ */
 export function sceneFingerprint(scene: Pick<SceneNode, 'text'>): string {
-  return fingerprint(scene.text)
+  return fingerprint(sceneTextForFingerprint(scene.text))
 }
 
 async function assetFingerprint(root: string, assetPath: string): Promise<string> {

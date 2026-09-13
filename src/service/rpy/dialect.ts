@@ -8,7 +8,20 @@
 
 /** 场景(label)内可识别的语句。 */
 export type Statement =
-  | { kind: 'dialogue'; speaker: string | null; text: string; /** 该句发生时的画面图像引用(舞台状态快照)。 */ showing: string[]; line: number }
+  | {
+      kind: 'dialogue'
+      speaker: string | null
+      text: string
+      /**
+       * 行尾 `id <name>` 子句(T26 / ADR-0013);没写 = null。
+       *
+       * 它是**语音文件名的锚**:Ren'Py 的 `config.auto_voice = "voice/{id}.ogg"` 就按它找文件。
+       * 不给 id 时引擎用的是**内容哈希** —— 改一个字就换名(所以别指望不写也能稳)。
+       */
+      id: string | null
+      /** 该句发生时的画面图像引用(舞台状态快照)。 */ showing: string[]
+      line: number
+    }
   | { kind: 'image'; role: 'show' | 'scene' | 'hide'; tag: string; attributes: string[]; line: number }
   | { kind: 'jump'; target: string; line: number }
   | { kind: 'return'; line: number }

@@ -77,8 +77,10 @@ describe('方言子集解析器(T4)', () => {
     expect(shows).toHaveLength(3)
     expect(shows[0]).toMatchObject({ role: 'scene', tag: 'bg', attributes: ['room'] })
     expect(shows[1]).toMatchObject({ role: 'show', tag: 'e', attributes: ['happy'] })
-    expect(start.statements).toContainEqual({ kind: 'dialogue', speaker: 'e', text: '你好呀。', showing: ['bg room', 'e happy'], line: 7 })
-    expect(start.statements).toContainEqual({ kind: 'dialogue', speaker: null, text: '旁白一句。', showing: ['bg room', 'e happy'], line: 8 })
+    // 对白语句多了 `id` 字段(T26 / ADR-0013):这里断言的是**没有** id 子句时它是 null
+    // (方言子集现在认得行尾的 `id <name>`,见 dialogue-id.test.ts)。
+    expect(start.statements).toContainEqual({ kind: 'dialogue', speaker: 'e', text: '你好呀。', id: null, showing: ['bg room', 'e happy'], line: 7 })
+    expect(start.statements).toContainEqual({ kind: 'dialogue', speaker: null, text: '旁白一句。', id: null, showing: ['bg room', 'e happy'], line: 8 })
     const edges = parsed.edges.filter((e) => e.from === 'start')
     expect(edges).toContainEqual(expect.objectContaining({ to: 'intro', via: 'call' }))
     expect(edges).toContainEqual(expect.objectContaining({ to: 'end', via: 'jump' }))

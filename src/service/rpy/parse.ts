@@ -6,6 +6,7 @@
  * warning 并把所在场景标记只读**,其后仍可解析的行继续产出(降级不罢工)。
  */
 import type { BranchEdge, BranchGraph, DialectProblem, MenuChoice, ParsedScript, SceneNode, Statement } from './dialect.ts'
+import { dialogueIdClauseOf, DIALOGUE_STATEMENT_RE, stripDialogueId } from '../dialogue-id.ts'
 
 export interface RpyFile {
   /** 文件名(不含目录)。 */
@@ -27,7 +28,13 @@ const SHOW_BLOCK_RE = /^(show|scene|hide)\s+[A-Za-z0-9_]+[^:]*:\s*$/
 const SHOW_RE = /^(show|scene|hide)\s+([A-Za-z0-9_]+)((?:\s+[A-Za-z0-9_]+)*)\s*$/
 const PLAY_RE = /^play\s+(music|sound|voice)\s+"([^"]*)"\s*(loop)?\s*$/
 const STOP_RE = /^stop\s+(music|sound|voice)\s*$/
-const DIALOGUE_RE = /^(?:(?!\d)([A-Za-z_][A-Za-z0-9_]*)\s+)?"((?:[^"\\]|\\.)*)"(?:\s+with\s+([A-Za-z0-9_]+))?\s*$/
+/**
+ * 对白行的**实体**部分。唯一出处在 `dialogue-id.ts` 的 `DIALOGUE_STATEMENT_RE`
+ * —— "什么算一条对白"有两个用户(解析与盖章),两处各写一遍迟早让"解析器认的句子盖不上章"。
+ * 行尾的 `id` 子句由 `dialogueIdClauseOf` 单独取(T26),因为子句可以在 `with` 前后
+ * (引擎 `finish_say` 是个循环,`parser.py:1479-1493`)。
+ */
+const DIALOGUE_RE = DIALOGUE_STATEMENT_RE
 const CHAR_DEFINE_RE = /^define\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*Character\(\s*"((?:[^"\\]|\\.)*)"/
 const IMAGE_DEFINE_RE = /^image\s+([A-Za-z0-9_ ]+?)\s*=\s*.+$/
 
@@ -215,9 +222,17 @@ export function parseRpy(files: RpyFile[]): ParsedScript {
         index += 1
         return { kind: 'audio', action: 'stop', channel: m[1] as 'music' | 'sound' | 'voice', file: null, loop: false, line: line.no }
       }
-      // 对白:字符串(可带说话人变量)+ 当时画面的图像引用快照。
+      // 对白:字符串(可带说话人变量)+ 可选的行尾 `id` 子句 + 当时画面的图像引用快照。
       const dialogue = parseDialogue(body, line.no, [...stage.values()])
-      if (dialogue !== null) { index += 1; return dialogue }
+      if (dialogue !== null) {
+        index += 1
+        // id 子句坏掉的两种形态(缺名字 / 名字不合规则)是**结构错**,不是"这行不认识":
+        // 引擎那边会直接报错,我们不能把它降级成一句 warning 就放过去。
+        if (dialogue.problem !== null) {
+          degrade({ ...dialogue.problem, file: file.name })
+        }
+        return dialogue.statement
+      }
       // 未知行:如实报告,不罢工。
       degrade({ severity: 'warning', file: file.name, line: line.no, code: 'unrecognized-line', message: `无法按方言子集解析(本场景降级只读)`, snippet: body })
       index += 1
@@ -310,6 +325,8 @@ export function parseRpy(files: RpyFile[]): ParsedScript {
 
   const labelSet = new Map<string, SceneNode>()
   for (const scene of scenes) {
+    // 对话 id 的跨语句检查要等**整场语句收齐**之后才能做(重名是场内的属性,T26)。
+    checkDialogueIds(scene)
     if (labelSet.has(scene.label)) {
       problems.push({ severity: 'error', file: scene.file, line: scene.line, code: 'duplicate-label', message: `label ${scene.label} 重复定义` })
     } else {
@@ -357,12 +374,59 @@ function collectEdges(
   }
 }
 
-function parseDialogue(body: string, lineNo: number, showing: string[]): Statement | null {
-  const match = DIALOGUE_RE.exec(body)
+/**
+ * 一行对白 → 语句。行尾的 `id` 子句先摘掉再匹配实体部分,id 单独取(T26)。
+ *
+ * `problem` 回传的两种是**结构错**(引擎也不认),由调用方记成 error:
+ * 行尾 `id` 后面缺名字、或名字不合 `l.name` 的规则。
+ */
+function parseDialogue(
+  body: string,
+  lineNo: number,
+  showing: string[],
+): { statement: Statement; problem: DialectProblem | null } | null {
+  const clause = dialogueIdClauseOf(body)
+  // 子句在 `with` 之前也要能认:摘掉之后再匹配实体部分。
+  const core = clause.present ? stripDialogueId(body) : body
+  const match = DIALOGUE_RE.exec(core)
   if (match === null) return null
   const speaker = match[1] ?? null
   const text = match[2]!
-  return { kind: 'dialogue', speaker, text, showing, line: lineNo }
+  const problem: DialectProblem | null = clause.present && clause.name === null
+    ? {
+        severity: 'error', line: lineNo, code: 'invalid-dialogue-id', file: '',
+        message: '对话 id 不合引擎的取名规则(要字母/下划线开头,其余是字母数字下划线)',
+        snippet: body,
+      }
+    : null
+  return {
+    statement: { kind: 'dialogue', speaker, text, id: clause.name, showing, line: lineNo },
+    problem,
+  }
+}
+
+/**
+ * 对白 id 子句的**跨语句检查**(T26 / ADR-0013):同一场里重名。
+ *
+ * 为什么是 error 而不是 warning:重名会让**两句抢同一个语音文件**(引擎按 id 找文件)
+ * —— 这不是"风格问题",是"这个 id 用不了"。与 `duplicate-label` / `dangling-jump` 同级
+ * (结构缺陷,进板、挡发布)。名字不合规则那条在 `parseDialogue` 里当场就报了。
+ */
+function checkDialogueIds(scene: SceneNode): void {
+  const seen = new Map<string, number>()
+  const visit = (statements: Statement[]): void => {
+    for (const statement of statements) {
+      if (statement.kind === 'menu') { visit(statement.choices.flatMap((choice) => choice.body)); continue }
+      if (statement.kind !== 'dialogue' || statement.id === null) continue
+      const first = seen.get(statement.id)
+      if (first === undefined) { seen.set(statement.id, statement.line); continue }
+      scene.problems.push({
+        severity: 'error', file: scene.file, line: statement.line, code: 'duplicate-dialogue-id',
+        message: `对话 id 重复:${statement.id}(第 ${first} 行已经用过)—— 重名会让这两句抢同一个语音文件`,
+      })
+    }
+  }
+  visit(scene.statements)
 }
 
 /** 分支骨架派生(可缓存、全量重算)。 */

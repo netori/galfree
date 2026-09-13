@@ -224,6 +224,13 @@ export function renderTemplateFiles(project: TemplateProject): TemplateFile[] {
         `define build.name = "${rpyEscape(name)}"`,
         'define config.has_sound = True',
         'define config.has_music = True',
+        // 语音(T26 / ADR-0013):**接线口径在这里定死** —— 不往剧本里写 voice 语句,
+        // 靠 auto_voice 按**对话 id** 找 `game/voice/<id>.ogg`。
+        // 为什么必须显式给 id:不给时 Ren'Py 用的标识符是**内容哈希**
+        //(`renpy/translation/__init__.py:337-357`),改一个字那句语音就找不到了,
+        // 而本产品逐场重生成是常规动作。id 由生成侧盖(dialogue-id.ts 的 stampDialogueIds)。
+        // 文件不存在时引擎静默跳过(`renpy/loadable` 那一步),所以还没配音的项目照旧能跑。
+        'define config.auto_voice = "voice/{id}.ogg"',
         // screens.rpy 的主菜单读这两个;缺了会 AttributeError(实测崩在 gui.show_name)。
         'define gui.show_name = True',
         'define gui.about = _p("")',
