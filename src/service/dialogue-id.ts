@@ -144,3 +144,66 @@ export function stampDialogueIds(source: string, label: string): string {
     })
     .join('\n')
 }
+
+// ─── 从解析出来的剧本**枚举对白行与它们的 id**(T32)──────────────────
+
+/** 枚举要用到的那点场景形状(只有这三个字段;`rpy/dialect.ts` 的 `SceneNode` 满足它)。 */
+export interface DialogueSceneLike {
+  label: string
+  file: string
+  statements: ReadonlyArray<DialogueStatementLike>
+}
+
+/** 枚举要用到的那点语句形状(只有对白那一种)。 */
+export type DialogueStatementLike =
+  | { kind: 'dialogue'; id?: string | null; speaker: string | null; text: string; line: number }
+  | { kind: string }
+
+export interface DialogueRow {
+  /** 场景 label。 */
+  scene: string
+  /** 场景文件(相对 `game/`)。 */
+  file: string
+  /** 行号(定位用;重生成会变,所以**不是**身份)。 */
+  line: number
+  /** 这一场里的第几句(从 0 起;派生 id 的输入)。 */
+  seq: number
+  /** 说话人变量(旁白 = null)。 */
+  speaker: string | null
+  /** 台词原文。 */
+  text: string
+  /** **对话 id**:`.rpy` 里显式写了的用它,否则按 `dialogueIdFor(label, seq)` 派生。 */
+  dialogueId: string
+}
+
+/**
+ * 剧本 → 全部对白行的清单(带各自的对话 id)。
+ *
+ * **为什么要有一个"唯一口径"的函数**:id 的派生有三处要用 —— 语音批量清单(`voiceBatch` 导出)、
+ * 建语音任务时按 `dialogueId` 反查说话人、以及嗓子清单里的说话人集合。
+ * 三处各写一遍那个 `statement.id ?? dialogueIdFor(label, seq)` 循环,迟早分叉;
+ * 而分叉的后果很具体:**清单里的第 3 句**与**账本里的第 3 句**会指向不同的人
+ * (只在听成品时才发现)。
+ */
+export function dialogueRowsOf(scenes: ReadonlyArray<DialogueSceneLike>): DialogueRow[] {
+  const rows: DialogueRow[] = []
+  for (const scene of scenes) {
+    let seq = 0
+    for (const statement of scene.statements) {
+      if (statement.kind !== 'dialogue') continue
+      const dialogue = statement as Extract<DialogueStatementLike, { kind: 'dialogue' }>
+      rows.push({
+        scene: scene.label,
+        file: scene.file,
+        line: dialogue.line,
+        seq,
+        speaker: dialogue.speaker,
+        text: dialogue.text,
+        // **显式 id 优先**:钉死文件名的那条路(ADR-0013);没有才按序号派生。
+        dialogueId: dialogue.id ?? dialogueIdFor(scene.label, seq),
+      })
+      seq += 1
+    }
+  }
+  return rows
+}

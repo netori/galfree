@@ -23,10 +23,11 @@
  *
  * `library: null` 表示**还没问过服务端**(没配语音渠道、没点「读音色库」、或那台服务
  * 压根没有 `/voices`)。这时 `inLibrary` 是 `null` 而不是 `false` —— 把"不知道"渲染成
- * "没有"会让人去修一个不存在的问题。
+ * "没有"会让人去修一个不存在的问题。(同一格里"这个角色还没有档案"也是 `null`:
+ * 那一格**无从核对**。要区分"没有档案"就看 `sample` 是不是 `null`。)
  */
 import { GalfreeError } from './error.ts'
-import type { CharacterRecord, VoiceEmotion, VoiceEmotionMode, VoiceProfile } from './characters.ts'
+import { isVoiceEmotionMode, VOICE_EMOTION_MODES, type CharacterRecord, type VoiceEmotion, type VoiceProfile } from './characters.ts'
 
 /** 为什么这把嗓子拿不到(拿到了 = `null`)。 */
 export type VoiceAnchorGap = 'no-character' | 'no-profile'
@@ -45,7 +46,7 @@ export interface VoiceAnchorView {
   lang?: string
   emotion?: VoiceEmotion
   note?: string
-  /** 音色库清单里有没有这个样本;`null` = **没核对过**。 */
+  /** 音色库清单里有没有这个样本;`null` = **无从核对**(还没读过库,或者这个角色还没有档案)。 */
   inLibrary: boolean | null
   /** 拿不到锚的原因(拿到了 = null)。 */
   missing: VoiceAnchorGap | null
@@ -170,13 +171,24 @@ export function voiceEmotionFromInput(raw: unknown): VoiceEmotion | undefined {
     throw new GalfreeError('character-invalid', `情感输入要是一个对象(mode + 它自己的那几项),给的是 ${typeof raw}`)
   }
   const record = raw as Record<string, unknown>
-  const mode = record.mode
-  if (mode !== 'follow' && mode !== 'reference' && mode !== 'vector' && mode !== 'text') {
-    throw new GalfreeError('character-invalid', `情感模式只有 follow / reference / vector / text:${String(mode ?? '(空)')}`)
+  if (!isVoiceEmotionMode(record.mode)) {
+    throw new GalfreeError('character-invalid', `情感模式只有 ${VOICE_EMOTION_MODES.join(' / ')}:${String(record.mode ?? '(空)')}`)
   }
-  const vector = Array.isArray(record.vector) ? record.vector.map((value) => Number(value)) : undefined
-  // `weight` 可能是字符串(模型的参数常常是字符串):**能转就转,转不了就抛** ——
-  // 静默丢掉一个参数正是"面板上配了、发出去没有"那种错。
+  // 模型的参数常常是字符串:**能转就转,转不了就抛** ——
+  // 静默丢掉 / 静默塞个 NaN 进去,都是"面板上配了、发出去没有"那种错。
+  let vector: number[] | undefined
+  if (record.vector !== undefined) {
+    if (!Array.isArray(record.vector)) {
+      throw new GalfreeError('character-invalid', `情感向量要是一个数组(8 个数),给的是 ${typeof record.vector}`)
+    }
+    vector = record.vector.map((value, index) => {
+      const parsed = Number(value)
+      if (!Number.isFinite(parsed)) {
+        throw new GalfreeError('character-invalid', `情感向量的第 ${index + 1} 个不是数:${JSON.stringify(value)}(只要 8 个数字)`)
+      }
+      return parsed
+    })
+  }
   let weight: number | undefined
   if (record.weight !== undefined) {
     weight = Number(record.weight)
@@ -185,7 +197,7 @@ export function voiceEmotionFromInput(raw: unknown): VoiceEmotion | undefined {
     }
   }
   return {
-    mode: mode as VoiceEmotionMode,
+    mode: record.mode,
     ...(typeof record.refSample === 'string' && record.refSample.trim() !== '' ? { refSample: record.refSample.trim() } : {}),
     ...(weight === undefined ? {} : { weight }),
     ...(vector === undefined ? {} : { vector }),

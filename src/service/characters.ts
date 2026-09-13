@@ -47,8 +47,19 @@ export interface ReferenceImage {
  *  - `reference`:另给一段**情感参考音频**(= 1);
  *  - `vector`:给一个 8 维情感向量(= 2);
  *  - `text`:给一句情感描述文本(= 3;那家服务没开 `qwen_emo` 时会拒,见调研 §2.4)。
+ *
+ * **这一串是唯一出处**:类型、校验、外部输入解析都从它派生 ——
+ * 抄第二份清单的代价是"加一档时漏掉一处",而漏掉的那处会在运行时才显形。
+ * (那家服务的**整数值**只在适配器里映射一次,不在这里。)
  */
-export type VoiceEmotionMode = 'follow' | 'reference' | 'vector' | 'text'
+export const VOICE_EMOTION_MODES = ['follow', 'reference', 'vector', 'text'] as const
+
+export type VoiceEmotionMode = (typeof VOICE_EMOTION_MODES)[number]
+
+/** 是不是一档合法的情感模式(外部输入校验用)。 */
+export function isVoiceEmotionMode(value: unknown): value is VoiceEmotionMode {
+  return typeof value === 'string' && (VOICE_EMOTION_MODES as readonly string[]).includes(value)
+}
 
 /** 情感输入(缺省 = 不给,用服务端自己的缺省)。 */
 export interface VoiceEmotion {
@@ -152,8 +163,8 @@ function assertVoiceProfile(profile: VoiceProfile): void {
   if (profile.speaker !== undefined && profile.speaker !== '') assertSampleName(profile.speaker, '音色档案的 speaker(LoRA 适配器名)')
   const emotion = profile.emotion
   if (emotion === undefined) return
-  if (!['follow', 'reference', 'vector', 'text'].includes(emotion.mode)) {
-    throw new GalfreeError('character-invalid', `情感模式只有 follow / reference / vector / text:${String(emotion.mode)}`)
+  if (!isVoiceEmotionMode(emotion.mode)) {
+    throw new GalfreeError('character-invalid', `情感模式只有 ${VOICE_EMOTION_MODES.join(' / ')}:${String(emotion.mode)}`)
   }
   if (emotion.mode === 'reference') {
     if (emotion.refSample === undefined || emotion.refSample.trim() === '') {

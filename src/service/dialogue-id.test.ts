@@ -12,7 +12,7 @@
 import { describe, expect, it } from 'vitest'
 import { parseRpy } from './rpy/parse.ts'
 import { sceneFingerprint } from './progress.ts'
-import { stampDialogueIds } from './dialogue-id.ts'
+import { stampDialogueIds, dialogueRowsOf } from './dialogue-id.ts'
 
 function parse(source: string) {
   return parseRpy([{ name: 'script.rpy', text: source }])
@@ -231,6 +231,50 @@ describe('对话 id 子句(T26)', () => {
       expect(out).toContain('e "能盖的盖。" id scene_two_0000')
       // 块里的那句**在块内**,不去动它(它本来就子集外、整场只读)。
       expect(out).toContain('        e "块里的不碰。"')
+    })
+  })
+
+  // ─── T32:枚举对白行与它们的 id(**唯一一处**派生口径)────────────────
+
+  describe('dialogueRowsOf:清单/任务/说话人三处读的同一份', () => {
+    it('显式 id 优先、没写的按序号派生,而且**序号只数对白行**(不是行号)', () => {
+      const source = [
+        'label start:',
+        '    scene bg school',
+        '    e "第一句。"',
+        '    e "第二句。" id pinned_line',
+        '    e "第三句。"',
+        '    return',
+        '',
+      ].join('\n')
+      const rows = dialogueRowsOf(parse(source).scenes)
+      expect(rows.map((row) => row.dialogueId)).toEqual(['start_0000', 'pinned_line', 'start_0002'])
+      expect(rows.map((row) => row.seq)).toEqual([0, 1, 2])
+      expect(rows[0]).toMatchObject({ scene: 'start', speaker: 'e', text: '第一句。' })
+    })
+
+    it('与**盖章后**的产物对得上:盖过章的 .rpy 枚举出来还是同一批 id', () => {
+      const source = [
+        'label scene_one:',
+        '    scene bg school',
+        '    e "第一句。"',
+        '    "旁白也算一句。"',
+        '    e "第三句。" with dissolve',
+        '    return',
+        '',
+      ].join('\n')
+      const stamped = stampDialogueIds(source, 'scene_one')
+      const rows = dialogueRowsOf(parse(stamped).scenes)
+      // 盖章写的是 scene_one_0000…;枚举读回来的必须**逐字相同**(否则语音文件没人找得到)。
+      expect(rows.map((row) => row.dialogueId)).toEqual(dialogues(stamped).map((statement) => statement.id))
+      expect(rows.map((row) => row.dialogueId)).toEqual(['scene_one_0000', 'scene_one_0001', 'scene_one_0002'])
+    })
+
+    it('旁白(speaker 为空)也进清单:它同样有一句台词要配音', () => {
+      const rows = dialogueRowsOf(parse('label start:\n    "（旁白）雨声很大。"\n    return\n').scenes)
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.speaker).toBeNull()
+      expect(rows[0]!.dialogueId).toBe('start_0000')
     })
   })
 })

@@ -17,7 +17,7 @@ import { ProjectRegistry, type RegistryEntry } from './registry.ts'
 import { commitSnapshot, fileDiff, fileHistory, rollbackFile, type SnapshotEntry } from './snapshot.ts'
 import { PROJECT_NAME_RE, TEMPLATE_CJK_FONT, TEMPLATE_UI_FILES, TEMPLATE_UI_IMAGE_DIR, TEMPLATE_WINDOW_ICON, renderTemplateFiles, renderUiPatch, templateKeepFiles } from './template.ts'
 import { COVER_TARGETS, coverTargetOf, coverTargetIds } from './covers.ts'
-import { dialogueIdFor } from './dialogue-id.ts'
+import { dialogueRowsOf } from './dialogue-id.ts'
 import { isVoiceAudioFile, matchVoiceFiles, voiceTargetPath, type VoiceBatch, type VoiceBatchRow } from './voice-batch.ts'
 import { FakeValidator } from './validation/template-validator.ts'
 import { deriveGraph, parseRpy } from './rpy/parse.ts'
@@ -2284,23 +2284,12 @@ export class ProjectService {
   /**
    * 对话 id → 剧本里的**说话人变量**(没有就 undefined)。
    *
-   * 口径与 `voiceBatch` **同一套**:优先 `.rpy` 里显式写的 `id`,没有则按
-   * `dialogueIdFor(label, 序号)` 派生 —— 两处若各写一套,"清单里的第 3 句"与"账本里的第 3 句"
-   * 就会指向不同的人(而那种错只在听的时候才发现)。
+   * 口径来自 `dialogueRowsOf`(**唯一一处**派生对话 id 的地方):显式 `id` 优先,
+   * 否则 `dialogueIdFor(label, 序号)` —— 与语音批量清单、嗓子清单同一套。
    */
   async #speakerOfDialogue(projectRef: string, dialogueId: string): Promise<string | undefined> {
     const graph = await this.branchGraph(projectRef)
-    for (const scene of graph.scenes) {
-      let seq = 0
-      for (const statement of scene.statements) {
-        if (statement.kind !== 'dialogue') continue
-        const id = statement.id ?? dialogueIdFor(scene.label, seq)
-        seq += 1
-        if (id !== dialogueId) continue
-        return statement.speaker ?? undefined
-      }
-    }
-    return undefined
+    return dialogueRowsOf(graph.scenes).find((row) => row.dialogueId === dialogueId)?.speaker ?? undefined
   }
 
   /**
@@ -2313,12 +2302,10 @@ export class ProjectService {
     const entry = await this.#resolve(projectRef)
     await this.#assertPresent(entry)
     const [characters, graph] = await Promise.all([readCharacters(entry.path), this.branchGraph(projectRef)])
-    const speakers: string[] = []
-    for (const scene of graph.scenes) {
-      for (const statement of scene.statements) {
-        if (statement.kind === 'dialogue' && statement.speaker !== null) speakers.push(statement.speaker)
-      }
-    }
+    // 说话人 = **剧本里真的有台词的人**(与语音批量清单同一个枚举口径)。
+    const speakers = dialogueRowsOf(graph.scenes)
+      .map((row) => row.speaker)
+      .filter((speaker): speaker is string => speaker !== null)
     return buildVoiceAnchorBoard({
       characters,
       speakers,
@@ -2402,25 +2389,20 @@ export class ProjectService {
     const pool = await this.audioPool(projectRef)
     // 池里的路径是**相对 game/** 的(`audio/voice/x.ogg`),清单里是相对项目根的。
     const existing = new Set(pool.files.map((file) => file.path))
-    const rows: VoiceBatchRow[] = []
-    for (const scene of graph.scenes) {
-      let seq = 0
-      for (const statement of scene.statements) {
-        if (statement.kind !== 'dialogue') continue
-        const dialogueId = statement.id ?? dialogueIdFor(scene.label, seq)
-        seq += 1
-        const targetPath = voiceTargetPath(dialogueId)
-        rows.push({
-          scene: scene.label,
-          line: statement.line,
-          speaker: statement.speaker,
-          text: statement.text,
-          dialogueId,
-          targetPath,
-          missing: !existing.has(targetPath.replace(/^game\//, '')),
-        })
+    // id 的派生走**唯一那一处**(`dialogueRowsOf`):显式 `id` 优先,否则按序号 ——
+    // 与建任务时反查说话人、与嗓子清单的说话人集合是同一套口径。
+    const rows: VoiceBatchRow[] = dialogueRowsOf(graph.scenes).map((row) => {
+      const targetPath = voiceTargetPath(row.dialogueId)
+      return {
+        scene: row.scene,
+        line: row.line,
+        speaker: row.speaker,
+        text: row.text,
+        dialogueId: row.dialogueId,
+        targetPath,
+        missing: !existing.has(targetPath.replace(/^game\//, '')),
       }
-    }
+    })
     return { rows, missingVoiceFiles: rows.filter((row) => row.missing).length, extension: 'ogg' }
   }
 

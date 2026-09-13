@@ -145,9 +145,11 @@ export function summarizeVoiceAnchors(board: VoiceAnchorFacts | null): VoiceAnch
   }
   const nameOf = (id: string): string => board.rows.find((row) => row.character === id)?.name ?? id
   const missing = board.withoutProfile.map(nameOf)
-  const notInLibrary = board.rows
-    .filter((row) => row.sample !== null && row.inLibrary === false)
-    .map((row) => ({ name: row.name, sample: row.sample! }))
+  // 不许用非空断言糊过去:这里是一条普通循环,类型自己就是准的。
+  const notInLibrary: Array<{ name: string; sample: string }> = []
+  for (const row of board.rows) {
+    if (row.sample !== null && row.inLibrary === false) notInLibrary.push({ name: row.name, sample: row.sample })
+  }
   const libraryKnown = board.library.files !== null
   const parts: string[] = []
   if (missing.length > 0) parts.push(`${missing.length} 个角色还没有音色档案(${missing.slice(0, 3).join('、')}${missing.length > 3 ? '…' : ''})—— 那几句会用服务端缺省,听起来跟别人一样`)

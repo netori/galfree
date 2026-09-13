@@ -521,7 +521,12 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     const voice = 'voice' in body
       ? (typeof body.voice === 'string' && body.voice !== '' ? { voice: body.voice } : {})
       : (existing?.voice === undefined ? {} : { voice: existing.voice })
-    const name = typeof body.name === 'string' && body.name !== '' ? body.name : (existing?.name ?? '')
+    // `name` 同一条三态规矩:**给了键就得是个能用的名字**(给空 = 400,不静默忽略);
+    // 没给键 = 保留原来那个。上一条规矩若只对一半字段生效,那就是"键的语义看运气"。
+    if ('name' in body && (typeof body.name !== 'string' || body.name.trim() === '')) {
+      throw new GalfreeError('character-invalid', `name 给了但不是个能用的显示名(${JSON.stringify(body.name ?? null)})—— 想保留原来的就别给这个键`)
+    }
+    const name = 'name' in body ? body.name as string : (existing?.name ?? '')
     const appearance = typeof body.appearance === 'object' && body.appearance !== null
       ? body.appearance as Record<string, string>
       : (existing?.appearance ?? {})

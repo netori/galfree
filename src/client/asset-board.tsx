@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { CharacterBoardEntry, ImageChannelView, SlotBoardEntry } from './types.ts'
-import type { CharacterDraft, GalfreeApi, GenerationTaskView, VoiceEmotionModeView, VoiceLibraryView } from './api.ts'
+import type { CharacterDraft, GalfreeApi, GenerationTaskView, VoiceAnchorBoardView, VoiceEmotionModeView, VoiceLibraryView } from './api.ts'
 import { ArtToolbar, SlotArtActions, StateChip } from './art-actions.tsx'
 import { DifferentialBoard } from './differential-board.tsx'
 import { Chip, Notice, Spinner } from './ui.tsx'
@@ -425,6 +425,8 @@ function CharacterView({ characters, api, busy, onBusy, onError, onChanged }: {
   /** 音色库(点「读音色库」才有;没读过就是 null —— **不谎报"库里没有"**)。 */
   const [library, setLibrary] = useState<VoiceLibraryView | null>(null)
   const [libraryNote, setLibraryNote] = useState<string | null>(null)
+  /** 嗓子清单(整部戏):面板据此说"这个角色要的那段参考在不在库里"。 */
+  const [anchors, setAnchors] = useState<VoiceAnchorBoardView | null>(null)
 
   const save = async (): Promise<void> => {
     onBusy(true)
@@ -495,12 +497,26 @@ function CharacterView({ characters, api, busy, onBusy, onError, onChanged }: {
       if (reading.voices === undefined) {
         setLibraryNote('这台服务没给出 /voices 清单 —— 参考样本的文件名要自己知道(服务端的音色库目录见上)')
       }
+      // 库清单变了 → 嗓子清单里"库里有它吗"那一栏也要跟着刷新(面板与工具读同一份)。
+      await loadAnchors()
     } catch (error) {
       setLibraryNote(error instanceof Error ? error.message : String(error))
     } finally {
       onBusy(false)
     }
   }
+
+  /** 嗓子清单(**面板自己也会说"库里有没有它"**,不只在语音卡上):一次读,按角色取。 */
+  const loadAnchors = async (): Promise<void> => {
+    try {
+      setAnchors(await api.voiceAnchors())
+    } catch {
+      // 读不到就如实降级:不显示"库里有没有",而不是显示成"没有"。
+      setAnchors(null)
+    }
+  }
+
+  useEffect(() => { void loadAnchors() }, [characters, api])
 
   /** 保存音色档案(或清掉:样本留空 = 清)。 */
   const saveVoice = async (character: CharacterBoardEntry, clear: boolean): Promise<void> => {
@@ -669,6 +685,16 @@ function CharacterView({ characters, api, busy, onBusy, onError, onChanged }: {
                 <button type="button" className={s.button} disabled={busy} onClick={() => void loadLibrary()}>
                   {busy ? <Spinner /> : '读音色库'}
                 </button>
+                {/* **这个角色要的那段参考在不在库里**(T32 的 AC):没核对过就说没核对过。 */}
+                {(() => {
+                  const row = anchors?.rows.find((candidate) => candidate.character === character.id)
+                  if (row === undefined || row.sample === null) return null
+                  if (row.inLibrary === true) return <Chip tone="ok" title={row.sample}>库里 ✓</Chip>
+                  if (row.inLibrary === false) {
+                    return <Chip tone="warn" title={`音色库此刻没有 ${row.sample}:照发,上游多半会拒并回它有的那几个`}>库里没有它</Chip>
+                  }
+                  return <Chip tone="quiet" title="还没核对过:点左边的按钮问那台服务">库里?没核对</Chip>
+                })()}
                 <span className={s.emptyHint} style={{ flex: 1 }}>
                   {library === null
                     ? '还没核对过:点左边的按钮问那台服务有哪些嗓子(不花额度)'
@@ -683,6 +709,12 @@ function CharacterView({ characters, api, busy, onBusy, onError, onChanged }: {
                 <div className={s.formHint}>
                   `speaker` 那些({library.speakers.join('、')})是 **LoRA 适配器名、不是音色** ——
                   只有 `default` 就说明没训过说话人模型,多角色**只能靠多份参考样本**区分。
+                </div>
+              ) : null}
+              {library?.health?.qwenEmo === false ? (
+                <div className={s.formHint} style={{ color: 'var(--gf-warn, #a80)' }}>
+                  这台服务的 `qwen_emo` 是 **false**:「情感描述文本」那一档会被它拒(400)——
+                  要那一档就在启动参数里加 `--qwen_emo`,否则用情感参考音频或向量。
                 </div>
               ) : null}
               {library !== null && library.voices !== undefined && library.voices.length > 0 ? (
@@ -723,7 +755,10 @@ function CharacterView({ characters, api, busy, onBusy, onError, onChanged }: {
                   <select className={s.input} value={voiceDraft.mode}
                     onChange={(e) => setVoiceDraft({ ...voiceDraft, mode: e.target.value as VoiceEmotionModeView })}>
                     {(Object.keys(EMOTION_LABEL) as VoiceEmotionModeView[]).map((mode) => (
-                      <option key={mode} value={mode}>{EMOTION_LABEL[mode]}</option>
+                      <option key={mode} value={mode}
+                        disabled={mode === 'text' && library?.health?.qwenEmo === false}>
+                        {EMOTION_LABEL[mode]}{mode === 'text' && library?.health?.qwenEmo === false ? '(这台服务没开,会被拒)' : ''}
+                      </option>
                     ))}
                   </select>
                 </label>

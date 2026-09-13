@@ -16,7 +16,7 @@ import { GalfreeError } from './error.ts'
 import { PLAYTEST_DEFAULT_WAIT_MINUTES, PLAYTEST_MAX_WAIT_MS, PLAYTEST_TIMEOUT_MS } from './playtest.ts'
 import { COVER_TARGETS, expectedCoverSize } from './covers.ts'
 import { renderVoiceBatchCsv, renderVoiceBatchJson } from './voice-batch.ts'
-import { voiceEmotionFromInput } from './voice-anchor.ts'
+import { voiceProfileFromInput } from './voice-anchor.ts'
 import type { ProjectService } from './project-service.ts'
 import type { BibleChapter } from './bible.ts'
 import type { SceneEdit } from './scene-form.ts'
@@ -1351,25 +1351,28 @@ export function registerGalfreeTools(
           if (action === 'clear') {
             await service.upsertCharacter(active, { ...record, voiceProfile: undefined })
           } else {
-            const mode = (args.emotion as { mode?: unknown } | undefined)?.mode
-            const emotion = mode === undefined
-              ? undefined
-              : voiceEmotionFromInput({
-                  mode,
-                  refSample: (args.emotion as { ref_sample?: unknown }).ref_sample,
-                  weight: (args.emotion as { weight?: unknown }).weight,
-                  vector: (args.emotion as { vector?: unknown }).vector,
-                  text: (args.emotion as { text?: unknown }).text,
-                })
+            const emotion = args.emotion as Record<string, unknown> | undefined
             await service.upsertCharacter(active, {
               ...record,
-              voiceProfile: {
-                sample: String(args.sample ?? ''),
-                ...(typeof args.speaker === 'string' && args.speaker !== '' ? { speaker: args.speaker } : {}),
-                ...(typeof args.lang === 'string' && args.lang !== '' ? { lang: args.lang } : {}),
-                ...(emotion === undefined ? {} : { emotion }),
-                ...(typeof args.note === 'string' && args.note !== '' ? { note: args.note } : {}),
-              },
+              // **解析走同一个函数**(路由与工具是同一份形状判断):自己手工拼一遍
+              // 会让两条入口的规矩分叉(trim 与否、哪些字段能空),而那种分叉只在真合成时才显形。
+              voiceProfile: voiceProfileFromInput({
+                sample: args.sample,
+                ...(typeof args.speaker === 'string' ? { speaker: args.speaker } : {}),
+                ...(typeof args.lang === 'string' ? { lang: args.lang } : {}),
+                ...(emotion === undefined
+                  ? {}
+                  : {
+                      emotion: {
+                        mode: emotion.mode,
+                        refSample: emotion.ref_sample,
+                        weight: emotion.weight,
+                        vector: emotion.vector,
+                        text: emotion.text,
+                      },
+                    }),
+                ...(typeof args.note === 'string' ? { note: args.note } : {}),
+              }),
             })
           }
         } else if (action !== 'read' && action !== 'library') {
