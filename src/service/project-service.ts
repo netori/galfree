@@ -2522,6 +2522,8 @@ export class ProjectService {
     const { channel, model } = this.#requireAudioModel(task.model, task.purpose)
 
     let bytes: Uint8Array
+    // 异步制:提交那一步拿到的上游任务 id(T34)。产物还在上游时靠它补救(见 catch 里那句)。
+    let upstreamTaskId: string | undefined
     try {
       const adapter = audioAdapterFor(model.adapter)
       const plan = adapter.buildRequest({
@@ -2553,17 +2555,25 @@ export class ProjectService {
         if (adapter.poll === undefined || adapter.buildPollRequest === undefined) {
           throw new Error(`协议「${model.adapter}」返回了一个任务 id(${submission.taskId}),但这个适配器没有实现轮询 —— 拿不到产物`)
         }
+        // **把上游那个 id 记下来**(T34):它是"产物还在上游"时唯一的补救线索
+        // (那家网关的文档:任务完成后 48 小时内可取)。认不出产物地址 / 下载失败时要有它。
+        upstreamTaskId = submission.taskId
         bytes = await this.#awaitAudioResult({ adapter, model, channel, task, taskId: submission.taskId })
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
+      // 失败原因里带上上游 id:一次真生成很贵,不能因为"我们没认出响应"就让它彻底找不回来。
+      const withUpstream = upstreamTaskId === undefined
+        ? message
+        : `${message}(上游那一次的任务 id:${upstreamTaskId} —— 产物在它那边放 48 小时,按文档可取回)`
       return await this.#audioLedger.mutate(projectRef, (document, writers) => {
         const found = document.tasks.find((candidate) => candidate.id === id)!
         const failed: AudioTask = {
           ...found,
           state: 'failed',
-          lastError: message,
-          attempts: [...found.attempts, this.#audioAttempt(found.attempts.length + 1, started, 'failed', { error: message })],
+          lastError: withUpstream,
+          ...(upstreamTaskId === undefined ? {} : { upstreamTaskId }),
+          attempts: [...found.attempts, this.#audioAttempt(found.attempts.length + 1, started, 'failed', { error: withUpstream })],
           updatedAt: new Date().toISOString(),
         }
         writers.push(failed)
@@ -2586,6 +2596,7 @@ export class ProjectService {
       const done: AudioTask = {
         ...found,
         state: 'awaiting-review',
+        ...(upstreamTaskId === undefined ? {} : { upstreamTaskId }),
         attempts: [...found.attempts, this.#audioAttempt(found.attempts.length + 1, started, 'ok', {
           fingerprint: written,
           bytes: bytes.byteLength,

@@ -225,6 +225,12 @@ export interface AudioTask extends GenerationTaskBase {
   voiceLang?: string
   /** 情感输入(缺省 = 不给,用服务端自己的缺省)。 */
   voiceEmotion?: VoiceEmotion
+  /**
+   * **上游那一次的 id**(异步任务制;T34)。纯制作信息 —— 但它救得了"产物还在上游"那种局面:
+   * 轮询到了终态却认不出产物地址(或下载失败)时,那个 id 就是**唯一的补救线索**
+   * (那家网关的文档写着"任务完成后 48 小时内可取")。失败原因里也会带上它。
+   */
+  upstreamTaskId?: string
 }
 
 /** 音频任务账本(落 `.studio/audio-tasks.json`;只放制作信息,不复制叙述内容)。 */

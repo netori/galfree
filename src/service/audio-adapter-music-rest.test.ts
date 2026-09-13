@@ -216,4 +216,52 @@ describe('资源式 REST 适配器:端到端(注入假上游)', () => {
     expect(task.state).toBe('failed')
     expect(task.lastError).toMatch(/适配器还没实现/)
   })
+
+  it('**认不出产物地址也要保住那条线索**:失败原因里带上上游任务 id(产物在它那边放 48 小时)', async () => {
+    // 把上游做成"说 completed 但响应里没有任何音频字段" —— 这正是文档被截断那一处的风险。
+    service = createProjectService({
+      dataDir: `${dataDir}-blind`,
+      uiTemplate: fakeUiTemplate(sdkDir),
+      audio: {
+        http: {
+          send: async (request: AudioHttpRequest) => {
+            sent.push({ url: request.url, method: request.method, body: request.body })
+            if (request.url.includes('/music/tasks/')) {
+              return { status: 200, text: JSON.stringify({ code: 200, data: { status: 'completed', usage: { amount: 8.75 } } }) }
+            }
+            return { status: 200, text: JSON.stringify({ code: 200, data: { id: 't-blind' } }) }
+          },
+          download: async (url: string) => {
+            downloaded.push(url)
+            return { status: 200, bytes: new Uint8Array(), contentType: '' }
+          },
+        },
+        channel: (purpose) => purpose === 'music'
+          ? {
+              name: 'seedance-music',
+              baseUrl: 'https://api.seedance.nz/v1',
+              models: [{
+                id: 'suno-generation', purpose: 'music', adapter: 'async-task-rest',
+                capabilities: {
+                  textToMusic: true, instrumental: true, lyrics: false, audioReference: false,
+                  textToSpeech: false, voiceCloning: false, voiceId: false, urlResult: true,
+                },
+              }],
+            }
+          : null,
+      },
+    })
+    await service.createProject({ projectsRoot, name: 'blind', title: undefined })
+    const task = await service.createAudioTask('blind', {
+      outputPath: 'game/audio/bgm/x.ogg', model: 'suno-generation', prompt: 'x', run: true,
+    })
+    expect(task.state).toBe('failed')
+    // 这是**真花过钱**的一次生成:线索必须留在账本上(不是一句"失败了")。
+    expect(task.upstreamTaskId).toBe('t-blind')
+    expect(task.lastError).toMatch(/t-blind/)
+    expect(task.lastError).toMatch(/48 小时/)
+    // 产物没落盘(不写空文件).
+    expect((await service.audioPool('blind')).files).toEqual([])
+    expect(downloaded).toEqual([])
+  })
 })
