@@ -19,6 +19,7 @@ import type { AudioChannelSettings, AudioModelDescriptor, AudioPurpose } from '.
 import { registerAudioAdapter } from './service/audio-generation.ts'
 import { createIndexttsAdapter } from './service/audio-adapter-indextts.ts'
 import { createSunoAdapter } from './service/audio-adapter-suno-register.ts'
+import { createMusicRestAdapter } from './service/audio-adapter-music-rest.ts'
 import { discoverModels } from './service/discovery.ts'
 import { discoverAudioModels } from './service/audio-discovery.ts'
 import { makeRoutes } from './routes.ts'
@@ -241,7 +242,7 @@ export function parseAudioModelCatalog(text: string): AudioModelDescriptor[] {
     // **认不出的用途/协议一律跳过该条**:猜一个默认值就等于"配置看着生效了、
     // 实际按错的协议发请求"(图像那条 catalog 也是这个态度)。
     if (candidate.purpose !== 'music' && candidate.purpose !== 'voice') continue
-    if (candidate.adapter !== 'sync-http' && candidate.adapter !== 'async-task') continue
+    if (candidate.adapter !== 'sync-http' && candidate.adapter !== 'async-task' && candidate.adapter !== 'async-task-rest') continue
     // 能力缺省 = **全 false**(没声明就是不能干,不靠默认值许诺)。
     const caps = candidate.capabilities ?? {}
     const on = (key: string): boolean => caps[key] === true
@@ -435,6 +436,10 @@ export function apply(ctx: Context, config?: Config): void {
   // Suno 类聚合站(音乐):提交 → taskId → 轮询 → 音频 URL → 下载。
   // 协议事实与出处见 `audio-adapter-suno.ts` 的表格;路径与模型版本可在模型目录的 note 里覆盖。
   registerAudioAdapter(createSunoAdapter())
+  // **资源式 REST 的异步任务**(音乐):提交 → `GET .../tasks/{id}` 轮询。
+  // 2026-09-13 的真机验收打出来的第二个音乐协议(同一家网关的图像走 OpenAI 兼容,
+  // 音乐却是这套)—— 与 sunoapi 那套只是长得像,详见 `audio-adapter-music-rest.ts` 文件头。
+  registerAudioAdapter(createMusicRestAdapter())
 
   /**
    * 音频生成子系统的出网端口(T27)。

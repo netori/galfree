@@ -1096,6 +1096,34 @@ agent 能读渠道、能接线,但没有手去按下"生成这首曲子"。
    (`capabilities.instrumental` 直接进提交体);
 3. **真机验收不在本票**:第一次真打那家音乐上游仍归 #36 —— 能建 ≠ 上游认。
 
+## 第二个音乐协议:`async-task-rest`(T34,真机验收打出来的)
+
+**它为什么存在**:2026-09-13 的真机验收里,按 sunoapi.org 那套拼出来的提交路径被那家网关回了 404
+(`Invalid URL (POST /v1/api/v1/generate)`,原话见 #36 的评论)。服务商文档(`suno-generation` 那一页)
+说清它的音乐是**自己的一套资源式 REST**:
+
+| | `async-task`(sunoapi 那套) | `async-task-rest`(这一套) |
+|---|---|---|
+| 提交 | `POST /api/v1/generate`,体 `{customMode, instrumental, model, callBackUrl, prompt}` | `POST /music/generations`,体 `{model:"suno", custom:false, version:"v6", prompt, instrumental, audio_format}` |
+| 轮询 | `GET /api/v1/generate/record-info?**taskId=**…` | `GET /music/tasks/**{id}**`(**id 在路径里**) |
+| 完成 | `data.status:"SUCCESS"` + `data.response.sunoData[0].audio_url` | `{code:200, data:{status:"completed", …}}` |
+
+**差别不是路径字符串** ⇒ `note` 覆盖补不上它(那条路只能改路径字符串,补不了"id 在路径里"与体字段名)。
+于是照 ADR-0012 那句"**适配器按协议收,不按厂商收**"加了第二个适配器
+(`src/service/audio-adapter-music-rest.ts`);路径/模型/版本/格式仍可在 `note` 里覆盖
+(`submit=…;poll=…;model=…;version=…;format=…`)。
+
+**两条如实标注的不确定**(文档那一页被截断,拿到完整示例后收窄):提交响应里任务 id 的字段名
+(按 `data.id` → `task_id` → `taskId` → `task.id` 顺次取)与完成响应里音频地址的字段名
+(按"名字像音频 → 值像 http(s) 音频链接"找)。**两者都取不到就把响应原话当失败原因贴出来** ——
+不假装成功、也不写一个空文件进项目(那会变成"以为生成了、玩的时候没声音")。
+
+**顺带修正的一条推断纪律**:`/suno|chirp/` 这个家族现在标 `needsConfirmation: true` ——
+**同一个模型名对应两种协议形状**,光看 id 分不出来。能力表照旧给(能力是准的),
+但**协议必须人照文档定**;面板的模型目录里现在有那一档可选(`async-task` / `async-task-rest`)。
+另:`audioRowsFromCatalog` 曾经把"不是 `sync-http` 的"一律当成 `async-task` ——
+那会把目录里声明的 `async-task-rest` **在面板打开一次后静默改掉**,现在认得的值一律原样保留。
+
 ## 界面图:三张是**给人/给工具换的**(T24 之后再追加,为 #38 备料)
 
 `game/gui/` 下那一整套界面图是 Ren'Py **首次运行时程序生成**的(生成器在 SDK 的

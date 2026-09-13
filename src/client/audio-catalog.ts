@@ -33,6 +33,16 @@ export interface AudioModelRow {
 /** 面板上能选的协议(按协议收,不按厂商收)。 */
 export type AudioAdapterChoice = AudioAdapterId
 
+/**
+ * 这个值是不是**认得的**协议 id(目录文本是外部输入,可能是手写的字符串)。
+ *
+ * 为什么要有它:面板把目录文本读成清单行时会挑一个协议类型 —— 认不出的必须退回缺省,
+ * 而**认得的必须原样保留**(否则"面板打开一次就把声明改掉"这种静默改写迟早发生)。
+ */
+export function isAudioAdapterId(value: unknown): value is AudioAdapterId {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(AUDIO_ADAPTER_INFO, value)
+}
+
 export interface AudioCapabilityField {
   key: AudioCapabilityKey
   label: string
@@ -73,6 +83,11 @@ export const AUDIO_ADAPTER_INFO: Record<AudioAdapterChoice, { label: string; hin
   'async-task': {
     label: '异步任务制(提交后轮询)',
     hint: 'Suno 类聚合站:提交 → 拿到任务 id → 轮询到终态 → 再下载音频 URL。',
+  },
+  'async-task-rest': {
+    label: '异步任务制 · 资源式(任务 id 在路径里)',
+    hint: '提交 → 任务 id → `GET …/tasks/{id}` 轮询(与上一条**不是**同一套形状:'
+      + '体字段名与轮询 URL 都不同)。拿不准就翻服务商文档那一页,或先按上一条试一次看它回什么。',
   },
 }
 
@@ -122,7 +137,10 @@ export function audioRowsFromCatalog(purpose: AudioPurpose, text: string): Audio
         needsConfirmation: false,
         basis: '目录里已有的条目',
         likely: true,
-        adapter: entry.adapter === 'sync-http' ? 'sync-http' as const : 'async-task' as const,
+        // **认得的协议原样带回来**(T34):这里曾经写成"不是 sync-http 就当 async-task",
+        // 于是目录里声明 `async-task-rest` 的条目在面板上被**静默改回** async-task ——
+        // 而两者形状不同,改了就等于下次按错的协议发请求。认不出的才退回那条缺省。
+        adapter: isAudioAdapterId(entry.adapter) ? entry.adapter : 'async-task',
       }))
   } catch {
     return []

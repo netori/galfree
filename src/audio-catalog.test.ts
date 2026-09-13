@@ -85,4 +85,18 @@ describe('音频模型目录的纯函数(T27 续)', () => {
     expect(sameAudioRows(a, [{ ...b[0]!, adapter: 'sync-http' }])).toBe(false)
     expect(sameAudioRows(a, [])).toBe(false)
   })
+
+  it('目录里声明的协议**原样带回来**(T34:面板打开一次不许把它改掉)', () => {
+    const rows = audioRowsFromCatalog('music', JSON.stringify([
+      { id: 'a', purpose: 'music', adapter: 'async-task-rest', capabilities: {} },
+      { id: 'b', purpose: 'music', adapter: 'async-task', capabilities: {} },
+      { id: 'c', purpose: 'music', adapter: 'sync-http', capabilities: {} },
+      // 认不出的值才退回缺省(那一条本来就是手写进来的错东西)。
+      { id: 'd', purpose: 'music', adapter: 'whatever', capabilities: {} },
+    ]))
+    expect(rows.map((row) => row.adapter)).toEqual(['async-task-rest', 'async-task', 'sync-http', 'async-task'])
+    // 而且**写回去还是它**(来回一趟不丢信息)。
+    const written = JSON.parse(audioCatalogFromRows('music', rows)) as Array<{ id: string; adapter: string }>
+    expect(written.find((entry) => entry.id === 'a')!.adapter).toBe('async-task-rest')
+  })
 })

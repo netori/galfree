@@ -207,14 +207,16 @@ describe('插件入口装配(T19)', () => {
    * 写了但没注册,跑任务只会得到一句"这个协议的适配器还没实现",
    * 而单测(自己注册一个假适配器)照样全绿。也就是说:**这条缺了,整条生成链路可能静默哑火**。
    */
-  it('真入口注册了音频适配器:两个协议(本地 TTS 与 Suno 类音乐)都在', () => {
+  it('真入口注册了音频适配器:三个协议(本地 TTS + 两种音乐异步形状)都在', () => {
     const host = fakeHost(seats(true))
     clearAudioAdapters()
     try {
       expect(registeredAudioAdapters()).toEqual([])
       apply(host.ctx)
-      // `sync-http` 是 IndexTTS(本地 TTS 服务);`async-task` 是 Suno 类聚合站(音乐)。
-      expect(registeredAudioAdapters().sort()).toEqual(['async-task', 'sync-http'])
+      // `sync-http` = IndexTTS(本地 TTS 服务);
+      // `async-task` = sunoapi 那套(查询串轮询);`async-task-rest` = 网关自己的资源式 REST
+      // (路径里带任务 id,T34)—— 后两条**不是同一个协议**,少注册一个就会在有人的机器上哑火。
+      expect(registeredAudioAdapters().sort()).toEqual(['async-task', 'async-task-rest', 'sync-http'])
     } finally {
       // 注册表是**模块级**的:这条测完得清掉,否则污染别的用例(它们假设自己从零注册)。
       clearAudioAdapters()

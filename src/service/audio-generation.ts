@@ -32,8 +32,19 @@ import type { GenerationTaskState } from './tasks.ts'
 export type AudioAdapterId =
   /** 同步返回:一次 POST 直接拿回音频(或它的 URL)。MiniMax `music_generation` 是这种。 */
   | 'sync-http'
-  /** 异步任务:提交拿任务 id,轮询到终态再取音频。Suno 类聚合多为此。 */
+  /** 异步任务:提交拿任务 id,轮询到终态再取音频。Suno 类聚合多为此(**id 走查询串**)。 */
   | 'async-task'
+  /**
+   * 异步任务(**资源式 REST**):同样"提交 → 拿 id → 轮询",但两处形状不同 ——
+   * **id 放进路径**(`/music/tasks/{id}`),提交体是那家网关自己的字段名
+   * (`model` + `version` / `custom` / `instrumental`)。
+   *
+   * 为什么不并进 `async-task`:那一条写的是 sunoapi.org 的整套形状(查询串 + `sunoData[].audio_url`)。
+   * 混成一个适配器就得在里面分叉两套"长得像但处处不同"的东西 —— 而 ADR-0012 的原话是
+   * "**适配器按协议收,不按厂商收**"。这个协议是 2026-09-13 的真机验收打出来的
+   * (同一家网关的图像走 OpenAI 兼容,音乐却是这套;详见 `audio-adapter-music-rest.ts` 文件头)。
+   */
+  | 'async-task-rest'
 
 /**
  * 用途:**音乐**还是**语音**。

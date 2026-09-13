@@ -23,10 +23,14 @@ describe('音频渠道的自动发现(T27 续)', () => {
 
   it('音乐:Suno 类聚合站 = **异步任务制** + 支持纯音乐与带唱(所以能力里有 urlResult)', () => {
     const got = inferAudioCapabilities('chirp-v3-5', 'music')
-    expect(got).toMatchObject({ adapter: 'async-task', family: 'suno', needsConfirmation: false })
+    // 能力认得准,但**协议那半要人确认**(T34 真机验收打出来的):同一个 "suno" 底下
+    // 有两套形状(sunoapi 那套 / 网关自己的资源式 REST),光看 id 分不出来。
+    expect(got).toMatchObject({ adapter: 'async-task', family: 'suno', needsConfirmation: true })
     expect(got.capabilities).toMatchObject({ textToMusic: true, instrumental: true, lyrics: true, urlResult: true })
     // 音乐模型不该被许诺 TTS 那一族能力。
     expect(got.capabilities.textToSpeech).toBe(false)
+    // 那句"两种形状同名"要在依据里 —— 面板直接显示给人看。
+    expect(got.basis).toContain('两种协议形状同名')
   })
 
   it('音乐:MusicGen 一类 = **同步** + 以纯音乐为主(不收歌词)', () => {

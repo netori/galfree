@@ -59,6 +59,14 @@ interface Family {
   adapter: AudioAdapterId
   capabilities: AudioModelCapabilities
   basis: string
+  /**
+   * 这条家族**要不要人再确认**(缺省 false = 认得准的家族)。
+   *
+   * 有它是因为 2026-09-13 的真机验收:同一个模型名**可以对应两种协议形状**
+   * (Suno 类就是 —— sunoapi 那套 vs 网关自己的资源式 REST),光看 id 分不出来。
+   * 那种家族照样给能力表(能力是准的),但**协议**必须由人照文档定。
+   */
+  needsConfirmation?: boolean
 }
 
 /**
@@ -76,7 +84,14 @@ const FAMILIES: Family[] = [
     purpose: 'music',
     adapter: 'async-task',
     capabilities: { ...NO_AUDIO_CAPS, textToMusic: true, instrumental: true, lyrics: true, urlResult: true },
-    basis: 'Suno 类聚合站:**提交 → 轮询 → 拿音频 URL**,支持纯音乐与带唱(所以是异步任务制)',
+    // **两种形状都叫 suno(2026-09-13 真机验收打出来的)**:sunoapi.org 那套是
+    // "查询串轮询 + `customMode` 体",而网关自己那套是"**路径里带任务 id** +
+    // `model`+`version`+`custom` 体"(`async-task-rest`)。光看模型 id 分不出来,
+    // 所以这里**不替人拍板**:标"待确认",由人照服务商文档选
+    // (选错的代价是第一次真跑拿 404 —— 那也算如实,但没必要白跑)。
+    needsConfirmation: true,
+    basis: 'Suno 类:**两种协议形状同名** —— sunoapi 那套(查询串轮询 `/generate` + `record-info?taskId=`)'
+      + '与网关自己的资源式 REST(路径里带 id,`/music/generations` + `/music/tasks/{id}`)。照服务商文档选',
   },
   {
     match: /(musicgen|music-gen|audiocraft|stable-audio|ace-?step)/,
@@ -148,7 +163,15 @@ export function inferAudioCapabilities(modelId: string, purpose: AudioPurpose): 
           + `而这条渠道是${purpose === 'music' ? '音乐' : '语音'} —— 不按另一条的能力填,请人确认它到底支持什么`,
       }
     }
-    return { capabilities: { ...family.capabilities }, adapter: family.adapter, family: family.name, basis: family.basis, needsConfirmation: false }
+    return {
+      capabilities: { ...family.capabilities },
+      adapter: family.adapter,
+      family: family.name,
+      basis: family.basis,
+      // 家族自己说"协议这半要人确认"就照办 —— 不再一律 false(那会把
+      // "两种形状同名"这类家族伪装成已确认)。
+      needsConfirmation: family.needsConfirmation ?? false,
+    }
   }
   return conservative(purpose)
 }
