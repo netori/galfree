@@ -175,10 +175,19 @@ export function voiceEmotionFromInput(raw: unknown): VoiceEmotion | undefined {
     throw new GalfreeError('character-invalid', `情感模式只有 follow / reference / vector / text:${String(mode ?? '(空)')}`)
   }
   const vector = Array.isArray(record.vector) ? record.vector.map((value) => Number(value)) : undefined
+  // `weight` 可能是字符串(模型的参数常常是字符串):**能转就转,转不了就抛** ——
+  // 静默丢掉一个参数正是"面板上配了、发出去没有"那种错。
+  let weight: number | undefined
+  if (record.weight !== undefined) {
+    weight = Number(record.weight)
+    if (!Number.isFinite(weight)) {
+      throw new GalfreeError('character-invalid', `情感强度要是一个数(0–1),给的是 ${JSON.stringify(record.weight)}`)
+    }
+  }
   return {
     mode: mode as VoiceEmotionMode,
     ...(typeof record.refSample === 'string' && record.refSample.trim() !== '' ? { refSample: record.refSample.trim() } : {}),
-    ...(typeof record.weight === 'number' ? { weight: record.weight } : {}),
+    ...(weight === undefined ? {} : { weight }),
     ...(vector === undefined ? {} : { vector }),
     ...(typeof record.text === 'string' && record.text !== '' ? { text: record.text } : {}),
   }

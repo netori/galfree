@@ -163,8 +163,13 @@ function assertVoiceProfile(profile: VoiceProfile): void {
   }
   if (emotion.mode === 'vector') {
     const vector = emotion.vector ?? []
-    if (vector.length !== 8 || vector.some((value) => !Number.isFinite(value))) {
+    if (vector.length !== 8) {
       throw new GalfreeError('character-invalid', `情感向量要**恰好 8 个数**(喜/怒/哀/惧/厌恶/低落/惊喜/平静),给的是 ${vector.length} 个`)
+    }
+    // 长度对了但里面混了非数(JSON 里写了个字符串 / NaN)—— 分开报,不然上面那句会自相矛盾。
+    const bad = vector.findIndex((value) => !Number.isFinite(value))
+    if (bad >= 0) {
+      throw new GalfreeError('character-invalid', `情感向量的第 ${bad + 1} 个不是数:${JSON.stringify(vector[bad])}(只要 8 个数字)`)
     }
   }
   if (emotion.mode === 'text' && (emotion.text === undefined || emotion.text.trim() === '')) {

@@ -13,7 +13,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { assertCharacterValid, upsertCharacter, type CharacterRecord } from './characters.ts'
-import { buildVoiceAnchorBoard, resolveVoiceAnchor } from './voice-anchor.ts'
+import { buildVoiceAnchorBoard, resolveVoiceAnchor, voiceProfileFromInput } from './voice-anchor.ts'
 
 function character(over: Partial<CharacterRecord> = {}): CharacterRecord {
   return {
@@ -55,10 +55,27 @@ describe('音色档案:登记簿里的形状(T32)', () => {
   it('情感向量必须**恰好 8 个数**(服务端就是这么收的)', () => {
     const good = character({ voiceProfile: { sample: 'x.wav', emotion: { mode: 'vector', vector: [0, 0, 0, 0, 0, 0, 0, 1] } } })
     expect(() => assertCharacterValid(good)).not.toThrow()
-    for (const vector of [[0, 0, 0], [0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 1, 1], [0, 0, 0, 0, 0, 0, 0, Number.NaN]]) {
+    for (const vector of [[0, 0, 0], [0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 1, 1]]) {
       expect(() => assertCharacterValid(character({ voiceProfile: { sample: 'x.wav', emotion: { mode: 'vector', vector } } })))
         .toThrow(/8 个数/)
     }
+    // 长度对了但里面混了非数:分开报(不然"给的是 8 个"那句话会自相矛盾)。
+    expect(() => assertCharacterValid(character({ voiceProfile: { sample: 'x.wav', emotion: { mode: 'vector', vector: [0, 0, 0, 0, 0, 0, 0, Number.NaN] } } })))
+      .toThrow(/第 8 个不是数/)
+  })
+
+  it('外部输入(路由 / 工具)解析:该转的转、转不了就抛(**不静默丢参数**)', () => {
+    // 模型的参数常常是字符串 —— 能转就转。
+    expect(voiceProfileFromInput({ sample: 'x.wav', emotion: { mode: 'follow', weight: '0.5' } }))
+      .toMatchObject({ emotion: { mode: 'follow', weight: 0.5 } })
+    expect(() => voiceProfileFromInput({ sample: 'x.wav', emotion: { mode: 'follow', weight: '半年' } }))
+      .toThrow(/情感强度/)
+    expect(() => voiceProfileFromInput({ sample: 'x.wav' })).not.toThrow()
+    // `null` / 不给 = 没有这一条(调用方据此"别动它"或"清掉")。
+    expect(voiceProfileFromInput(null)).toBeUndefined()
+    expect(voiceProfileFromInput(undefined)).toBeUndefined()
+    // 有对象但没 sample = 形状不对,如实抛。
+    expect(() => voiceProfileFromInput({ speaker: 'default' })).toThrow(/sample/)
   })
 
   it('情感模式与它的参数要对得上:`reference` 要参考音频、`text` 要文本、强度只在 0–1', () => {
