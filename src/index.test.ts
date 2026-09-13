@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { apply, channelFromSettings, parseModelCatalog, type Config } from './index.ts'
+import { clearAudioAdapters, registeredAudioAdapters } from './service/audio-generation.ts'
 import { WORKFLOW_SECTION, type SystemPromptSeat } from './service/playbook.ts'
 import { cleanupTempDirs, makeTempDir } from './testing/tmp.ts'
 import { collectPromptSections, type CollectedSection } from './testing/prompt-seat.ts'
@@ -192,5 +193,26 @@ describe('插件入口装配(T19)', () => {
     // "照常工作"的可观察形态:路由装配了、agent 工具一个不少。
     expect(host.routes.length).toBeGreaterThan(0)
     expect(host.tools.map((tool) => tool.name)).toContain('galfree_project_status')
+  })
+
+  /**
+   * 适配器**在真入口里注册了没有**。
+   *
+   * 为什么必须有这一条:适配器是"注册了才认"的(T27 起的显式设计)——
+   * 写了但没注册,跑任务只会得到一句"这个协议的适配器还没实现",
+   * 而单测(自己注册一个假适配器)照样全绿。也就是说:**这条缺了,整条生成链路可能静默哑火**。
+   */
+  it('真入口注册了音频适配器:两个协议(本地 TTS 与 Suno 类音乐)都在', () => {
+    const host = fakeHost(seats(true))
+    clearAudioAdapters()
+    try {
+      expect(registeredAudioAdapters()).toEqual([])
+      apply(host.ctx)
+      // `sync-http` 是 IndexTTS(本地 TTS 服务);`async-task` 是 Suno 类聚合站(音乐)。
+      expect(registeredAudioAdapters().sort()).toEqual(['async-task', 'sync-http'])
+    } finally {
+      // 注册表是**模块级**的:这条测完得清掉,否则污染别的用例(它们假设自己从零注册)。
+      clearAudioAdapters()
+    }
   })
 })

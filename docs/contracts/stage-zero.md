@@ -840,8 +840,29 @@ Ren'Py Script` —— **第一列就是语音文件名要用的那个标识符**
   路径必须落 `game/` 下且相对(引擎 searchpath 只有 `game/`);
 - **产物经写网关落盘**(ADR-0004)→ 音频池立刻派生得到它(T17 的池口径不变);
 - **适配器按协议收**:`AudioAdapter`(`buildRequest` / `onSubmit` / 可选 `poll`),
-  注册表此刻**是空的**且如实:没有适配器 → 任务记 `failed` 并指名道姓,不假装成功。
-  适配器是 #36(音乐)/ #37(TTS)的活。
+  注册表**初始为空**且如实:没有适配器 → 任务记 `failed` 并指名道姓,不假装成功。
+  真入口(`src/index.ts`)注册了**两个**(有守卫盯着"写了就得注册"这件事):
+  - **`sync-http` = 本地 TTS 服务**(IndexTTS 2.5 的 `app_api.py`):契约从它源码读出
+    (`POST /tts`,必传 `speaker`/`audio`/`text`,`return_type:"json"` 回服务端路径再由适配器读文件)。
+    **要求服务与插件同机**;跨机请走下面的批量清单那条路;
+  - **`async-task` = Suno 类聚合站**(音乐,发起人指定的 `suno-generation`):
+    提交 → `taskId` → 轮询到 `SUCCESS` → **下载音频 URL** → 落盘。
+    协议事实与出处见 `audio-adapter-suno.ts` 的表;路径与模型版本可在模型目录的 `note` 里覆盖
+    (`submit=…;record=…;model=V6`)—— 那家聚合商的路径未必与公开文档逐字相同。
+
+### 音频产物是 **URL** 时的那一口(T29 续)
+
+Suno 类上游给的是**音频 URL** 而不是字节,而"文本口"读不了二进制 ——
+所以 `AudioPorts.http` 多了可选的 `download(url)`。**没装配而产物是 URL 时如实拒绝**,
+不假装"任务成功但没产物"(那是"以为配齐了、玩的时候没声音"的另一种形状)。
+
+### 本地 TTS 批量清单(T29 / #37,不花上游额度)
+
+**没有 TTS 渠道也能把语音做出来**的那条路:`voiceBatch(ref)` 导出清单
+(场景 / 行号 / 说话人 / 台词 / **id** / 目标文件名,CSV 与 JSON 两种),
+交给你自己的本地 TTS 批量跑,再 `importVoiceFiles(ref, {dropDir})` 按**文件名 = id** 收回来
+(经写网关落盘 → 池立刻有它)。四类结果**逐条报**:收进来的 / 缺的 / 重复的 / 对不上 id 的。
+路由:`GET /voice/batch`(`?format=json`)/ `POST /voice/import`;agent 工具 `galfree_voice_batch`。
 
 - **路由**:
   - `GET /audio/channel` → 渠道处境(**不含密钥**;`configured` / `models[]` 各自的能力声明);
