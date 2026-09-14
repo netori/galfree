@@ -190,14 +190,14 @@
 - 遗留:人工验收还欠"点一次试玩看窗口能否正常退出"(#32 的真机那一步);`alice` 还没进角色登记簿(warning);  **参考链在用户渠道上不可用**(上游只要公网 URL,建议关掉该模型的「参考链」);
   **老项目**(`hjm`,旧模板建的)缺 `build.name` 与界面补丁里那两行 `build.classify`,
   发布会被如实拦下。
-- **两处已知的测试缺陷已收口(2026-09-13,T35 那一票 · commit `7ca9dda`)**:
+- **两处已知的测试缺陷已收口(2026-09-14 · commit `7ca9dda`)**:
   1. **快带的偶发失败**(约 1/278)已查清并加守卫:`async-image.test.ts` 里"同步适配器遇到
      异步上游"那条,在机器忙时上游连接**根本没成**(`TypeError: fetch failed`),而此时
      适配器压根没从上游拿到任何东西 —— 断言却期望错误里出现"指向 async-task"那句提示。
      原来那条对"连接就没成"这种结局没有兜底。现在**两种失败分开**:传输层失败如实带回原话、
      且**不许**冒充协议错配(连接没成时说"该换协议"是把人指错方向);
      新守卫 `上游连不上(传输层失败)` 用**变异验证过**(把传输错伪装成协议提示 ⇒ 该条必红)。
-  2. **慢带 `EPERM: unlink …\renpy-pinned\renpy.exe`**(CONTEXT 此前记为"必红")已修:
+  2. **慢带 `EPERM: unlink …\renpy-pinned\renpy.exe`**(此前记为"必红")已修:
      断言里那两条本来都过,红的是 `afterEach` 的清理 —— 实测机制是
      **活着的进程只要 cwd 还落在那个目录里,`rm` 就抛 `EPERM`/`EBUSY`;进程一退立刻删得掉**。
      修法不是放宽断言:`cleanupTempDirs` 现在自己退避重试(约 1.9s,Node 的 `maxRetries`
@@ -206,3 +206,21 @@
      用**一个真子进程占住 cwd** 复现那个窗口,**变异验证过**(换回不重试的旧实现 ⇒ 两条新用例必红)。
      注:刻意**没有**用"文件句柄"去构造这个用例 —— 实测在读句柄下 `rm` 照样成功,
      那种写法是空的(写过一版,验证时发现它是假绿,已换掉)。
+- **宿主错误日志里那条反复出现的报错已修(2026-09-14 · commit `8a2f5d1`)**:
+  `Error: cannot get property "tools" without inject`(来自 `lib/index.js`)。
+  **机制**(真 cordis 上实测):`ctx` 是代理,读一个**没写进本插件 `inject`** 的服务会**抛**,
+  不是返回 `undefined` —— 而"可选席位"的定义恰恰是"不依赖它"。两处接缝以前写的是
+  `(ctx as { tools?: X }).tools`,类型上盖住了、运行时照抛:
+  `toolRegistrySeam`(流程指引的工具探针)与 `directoryPickerSeam`(四个目录选择入口)。
+  后果是 playbook 那段在真宿主上**根本装不进系统提示**。
+  修法:新增 `optionalService(ctx, name)`,走 cordis 的 **`ctx.get(name)`**(不要求 inject,
+  缺席返回 `undefined`),两处接缝都改走它。
+  **一条容易上当的边界**:在**非运行态** fiber 上属性读法**碰巧不抛**,
+  所以"随手一读没报错"不能当它对 —— 真宿主里这段跑在**嵌套 `inject` 回调**中,那里就是抛。
+  守卫在 `src/index.test.ts`(真 Context + 真嵌套 inject),变异验证过(改回属性读法 ⇒ 必红)。
+  **改完必须 `npm run build`**:宿主加载的是 `lib/index.js`,不重建就还是旧代码。
+- **workspace-registry 的 `session header is missing` 警告与 GALFree 无关**:它出自
+  `@deepseek-ai/dsh-workspace` 的 `reportFilteredCandidates()` —— 某条 workspace 记录
+  (`~/.dsh/storages/workspace.json` 的 `sessionIds`)引用的会话没被索引到(会话被删/归档),
+  于是那条会话被从成员里过滤并记一条 warn。**插件侧一行都不碰 workspace/session**
+  (`git grep -i workspace src/` 为空),所以别把它算在本插件头上。
