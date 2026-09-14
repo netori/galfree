@@ -170,6 +170,10 @@ describe('插件入口装配(T19)', () => {
         },
       }),
     }
+    // 真 cordis 的 `ctx.get(name)` 是**不要求 inject** 的取用口 —— 插件靠它读可选席位
+    // (`tools` / `directoryPicker`)。假宿主必须照实现:少了它,插件会走进"席位缺席"那条
+    // 兜底分支,于是测出来的是假象(实测:T35 加了这个口子,这条假 ctx 立刻暴露出来)。
+    ;(ctx as Record<string, unknown>).get = (name: string) => (ctx as Record<string, unknown>)[name]
     return { ctx: ctx as unknown as Context, routes, sections: collector.sections, tools }
   }
 
@@ -221,5 +225,122 @@ describe('插件入口装配(T19)', () => {
       // 注册表是**模块级**的:这条测完得清掉,否则污染别的用例(它们假设自己从零注册)。
       clearAudioAdapters()
     }
+  })
+})
+
+/**
+ * 可选席位的读法(T35 · 宿主错误日志里那条反复出现的报错)。
+ *
+ * **症状**:宿主日志反复出现 `Error: cannot get property "tools" without inject`
+ * (来自 `lib/index.js`)。它**不是**偶发 —— 是读法错了。
+ *
+ * **机制**(在真 cordis 上实测出来,不是推理):`ctx` 是代理,读一个**没写进本插件
+ * `inject`** 的服务会**抛**,不是返回 `undefined`。而"可选席位"的定义恰恰是"不依赖它"。
+ * 以前那两处接缝写的是 `(ctx as { tools?: X }).tools` —— 类型上盖住了,运行时照抛。
+ *
+ * **一条容易上当的边界**:在**非运行态** fiber 上随手读一下**碰巧不抛**(返回 undefined)。
+ * 所以"我试了一下没报错"不能当它对;真宿主里那段跑在**嵌套 `inject` 回调**中,那里就是抛。
+ * 这一组因此在**真 Context + 真嵌套 inject** 里复现,而不是拿假 ctx 糊过去。
+ *
+ * 席位用 `provide` 装(而不是 `ctx.plugin(Settings)`):`SettingsProvider` 是**抽象基类**,
+ * 直接当插件挂会抛 `this.load is not a function`(`load` 由具体 provider 实现)。
+ * 这里要验的是**读法**,席位给个形状对的最小实现即可。
+ */
+describe('可选席位的读法(T35 · 不能直接读 ctx.tools)', () => {
+  let home: string | undefined
+
+  beforeEach(async () => {
+    home = process.env.DSH_HOME
+    process.env.DSH_HOME = await makeTempDir('galfree-t35-home-')
+  })
+
+  afterEach(async () => {
+    if (home === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = home
+    await cleanupTempDirs()
+  })
+
+  /** 装齐插件**声明**的两个席位(settings / webServer),否则 fiber 不激活、apply 根本不跑。 */
+  function provideDeclaredSeats(ctx: {
+    provide: (name: string, value: unknown) => unknown
+  }): void {
+    ctx.provide('settings', {
+      register: () => ({ get: () => ({ enabled: true, defaultProjectsRoot: '', sdkPath: '', imageBaseUrl: '', imageApiKey: '', imageChannelName: '', imageModels: '', publishDir: '' }) }),
+    })
+    ctx.provide('webServer', { register: () => () => {} })
+  }
+
+  it('真 cordis:嵌套 inject 里直接读 ctx.tools **会抛**(把这条机制记成事实,别照感觉写)', async () => {
+    // 这条**不测插件**,测的是"为什么必须用 ctx.get"这条机制本身 ——
+    // 顺带钉住宿主日志里那句原话,以后有人想改回属性读法时,这条会告诉他代价。
+    const { Context } = await import('@deepseek-ai/cordis')
+    const root = new Context()
+    root.provide('settings', { register: () => ({ get: () => ({}) }) })
+    root.provide('systemPrompt', { assemble: async () => ({ sections: [] }), section: () => () => {} })
+
+    let thrown = ''
+    await root.plugin({
+      name: 'probe-direct-read',
+      inject: ['settings'],
+      apply(probeCtx: unknown) {
+        const c = probeCtx as Context
+        // 与 src/index.ts 同形:在**嵌套** inject 回调里读外层 ctx 的可选席位。
+        c.inject(['systemPrompt'], () => {
+          try { void (c as unknown as { tools?: unknown }).tools } catch (error) { thrown = (error as Error).message }
+        })
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // 宿主错误日志里那条原话(消息由 cordis 给出)。
+    expect(thrown).toContain('cannot get property "tools" without inject')
+    // 对照:`ctx.get` 是 cordis 给的正路 —— 同样的位置,缺席返回 undefined 而不是抛。
+    expect(root.get('tools')).toBeUndefined()
+  })
+
+  it('插件在**只有 systemPrompt、没有 tools** 的真宿主上照样起得来(可选席位真的可选)', async () => {
+    const { Context } = await import('@deepseek-ai/cordis')
+    const { default: SystemPrompt } = await import('@deepseek-ai/dsh-system-prompt')
+
+    const ctx = new Context()
+    provideDeclaredSeats(ctx as never)
+    await ctx.plugin(SystemPrompt)
+    // **故意不装 ToolRuntime**:这正是"宿主没有工具席位"的形态。
+
+    const plugin = await import('./index.ts')
+    // 传 `apply` 本身(cordis 支持函数式插件):`ctx.plugin(模块命名空间)` 不行 ——
+    // 这个模块没有 default export,命名空间对象不是合法 plugin。
+    // 以前这一步会因为读 ctx.tools 而抛 `cannot get property "tools" without inject`。
+    await ctx.plugin(Object.assign(plugin.apply, { inject: plugin.inject }))
+    // 指引段仍然进得了组装(工具探针缺席 → 保守地说"请人在工作台做",不是崩)。
+    const assembly = await ctx.systemPrompt.assemble()
+    expect(assembly.sections.map((section) => section.name)).toContain('galfree-workflow')
+    // 而且**如实**保守:没有工具席位时,不该点名一个调不通的工具。
+    // 真宿主的 `assemble()` 已经把 `text` 解析成字符串(注册时那个函数在这里被调用过),
+    // 所以这里直接读字符串,不要照假宿主那把 `text` 当函数用。
+    const section = assembly.sections.find((candidate) => candidate.name === 'galfree-workflow')!
+    expect(section.text).not.toContain('`galfree_publish`')
+  })
+
+  it('真宿主**有** tools 时,探针照样探得到(修完没把"有"读成"没有")', async () => {
+    const { Context } = await import('@deepseek-ai/cordis')
+    const { default: SystemPrompt } = await import('@deepseek-ai/dsh-system-prompt')
+    const { ToolRuntime } = await import('@deepseek-ai/dsh-tools')
+
+    const ctx = new Context()
+    provideDeclaredSeats(ctx as never)
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+
+    const plugin = await import('./index.ts')
+    await ctx.plugin(Object.assign(plugin.apply, { inject: plugin.inject }))
+    // 工具真的注册进去了。
+    expect(ctx.tools.get('galfree_project_status')).toBeDefined()
+    // 指引段里那条"这个入口在不在"的探测走的是 `ctx.get('tools')` ——
+    // 修成可选取用之后,它必须仍然**看得见**已注册的工具(否则指引会退化成"请人做")。
+    const assembly = await ctx.systemPrompt.assemble()
+    const section = assembly.sections.find((candidate) => candidate.name === 'galfree-workflow')
+    expect(section).toBeDefined()
+    expect(section!.text).toContain('galfree_publish')
   })
 })

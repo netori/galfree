@@ -66,16 +66,39 @@ interface DirectoryPickerSeam {
   }
 }
 
+/**
+ * 取一个**可选**服务席位,读不到就 `undefined`。
+ *
+ * **为什么不能用 `ctx.tools` 那种属性读法(T35 实测,别再犯)**:
+ * cordis 的 `ctx` 是代理,读一个**没写进本插件 `inject`** 的服务会当场抛
+ * `cannot get property "tools" without inject` —— 而"可选席位"的定义就是
+ * "本插件不依赖它、它可能不在"。属性读法一旦落在没声明的名字上,拿到的是异常而不是
+ * `undefined`。`ctx.get(name)` 是 cordis 给的正路:**不要求 inject**,缺席返回 `undefined`。
+ *
+ * 实测边界:在**非运行态** fiber 上属性读法碰巧返回 `undefined`(不抛),
+ * 所以"随手一读没报错"**不能**当作它对 —— 真宿主里这段跑在嵌套 `inject` 回调中,
+ * 那里就是抛。宿主错误日志里反复出现的那条报错即此。
+ */
+function optionalService<T>(ctx: Context, name: string): T | undefined {
+  try {
+    return ctx.get(name) as T | undefined
+  } catch {
+    // 取用本身出意外(不是"服务缺席")也当缺席:这些席位都是锦上添花,
+    // 不能因为读它而把插件整体搞崩。
+    return undefined
+  }
+}
+
 function directoryPickerSeam(ctx: Context): DirectoryPickerSeam | undefined {
-  return (ctx as unknown as { directoryPicker?: DirectoryPickerSeam }).directoryPicker
+  return optionalService<DirectoryPickerSeam>(ctx, 'directoryPicker')
 }
 
 /**
  * agent 工具注册表的席位(可选,只用到 `get`):流程指引靠它回答"这一步有没有 agent 入口"。
- * 与目录选择同一个态度 —— 按名取用、容忍缺席。
+ * 与目录选择同一个态度 —— 按名取用、容忍缺席(走 `optionalService`,理由见上)。
  */
 function toolRegistrySeam(ctx: Context): ToolRegistrySeat | undefined {
-  return (ctx as unknown as { tools?: ToolRegistrySeat }).tools
+  return optionalService<ToolRegistrySeat>(ctx, 'tools')
 }
 
 export interface Config {
