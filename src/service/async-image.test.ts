@@ -249,6 +249,45 @@ describe('异步任务制适配器(T14 续)', () => {
     }
   })
 
+  it('上游连不上(传输层失败):如实说"没连上",且**不**冒充协议错配', async () => {
+    // 出网端口直接抛传输错(生产上是 fetch 的 `TypeError: fetch failed`)。
+    // 这一条盯的是**别把两种失败说成一回事**:连接就没成时,我们根本没从上游
+    // 拿到任何东西,说"协议不对、该换 async-task"是把人往错方向指。
+    const offline = createProjectService({
+      dataDir,
+      uiTemplate: fakeUiTemplate(sdkDir),
+      images: {
+        http: {
+          send: () => Promise.reject(new TypeError('fetch failed')),
+          download: () => Promise.reject(new TypeError('fetch failed')),
+        },
+        channel: () => ({
+          baseUrl: upstream.baseUrl,
+          models: [{
+            id: 'm',
+            adapter: 'openai-compatible',
+            capabilities: { textToImage: true, imageToImage: false, referenceChain: false, aspectRatioParam: true, b64Json: true },
+            paths: { submit: '/images/generations' },
+          }],
+        }),
+      },
+    })
+    try {
+      await offline.createProject({ projectsRoot, name: 'offline', title: '断网' })
+      const snap = await offline.readProjectFile('offline', 'game/script.rpy')
+      await offline.writeProjectFiles('offline', [{ path: 'game/script.rpy', content: SCRIPT, expectVersion: snap.version }], { reason: 'scenario', origin: 'agent' })
+      const task = await offline.createGenerationTask('offline', { slot: 'bg rooftop', model: 'm', prompt: 'x', run: true })
+
+      expect(task.state).toBe('failed')
+      // 原话要带回(不吞成"失败了")。
+      expect(task.lastError).toContain('fetch failed')
+      // 但**不许**冒充协议错配:那是"上游答了、答的不是图片"才成立的说法。
+      expect(task.lastError).not.toContain('async-task')
+    } finally {
+      await offline.dispose()
+    }
+  })
+
   it('同步适配器撞上 404:错误信息直接提示"提交路径可能是单数 / 该换 async-task"', async () => {
     // 假上游只认单数路径 → 复数路径 404(这正是用户实际遇到的那个 404)。
     const misconfigured = createProjectService({
