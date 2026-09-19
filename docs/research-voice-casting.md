@@ -185,3 +185,65 @@
 7. **主角配不配**是设计决定,不是技术问题;上面把他列为"可选"。
 8. **开源那条(C)没有验证**:Qwen3-TTS 开源是官方博客说的,权重与显存要求我没实测;
    1.7B 在你那台跑 IndexTTS 的机器上应该没问题,但**没验**。
+
+---
+
+## 9. 真跑了一遍(2026-09-19):上面 §5/§6 的实测记录
+
+§8 里"没实测过"的几条,这一节替换成**事实**。
+
+### 9.1 实测到的接口事实(与文档的差异要注意)
+
+| 事实 | 说明 |
+|---|---|
+| **地域**:北京 vs 新加坡是两把不同的 key | 本机 `.credentials.yaml` 里的 `QWEN_API_KEY` 是**北京**的:北京 `qwen-voice-design` 通,新加坡同一把 key 回 **401 InvalidApiKey** |
+| 查列表:`POST …/audio/tts/customization` + `{"model":"qwen-voice-design","input":{"action":"list"}}` | **HTTP 200**,回 `output.voice_list` / `total_count`。零成本,适合先探 key 与配额 |
+| `voice-enrollment` 那个 model 名走 `action:list` 会 **400 invalid action** | 列表只有 `qwen-voice-design` 这一条路 |
+| 建音色用的 `preferred_name` **可以就是角色 id** | 建出来的 id 形如 `qwen-tts-vd-su_qing-voice-20260919104744548-beb5`(带时间戳) |
+| **预览音频偏短:实测只有 2.0–3.9 秒** | 低于 §6 建议的 5–15 秒。**这是这次最有用的一条教训** |
+| 合成接口的音频**不是内联 base64,而是一个 URL** | `output.audio.url`(带 `expires_at`),`output.audio.data` 是空串 ⇒ **要再下载一次**。文档示例没写这一层 |
+| 计费按字符 | 实测一段 78 字的样音 = `usage.characters: 78` |
+
+### 9.2 所以实际做法(与 §6 的差别:多了一步)
+
+预览只有 2–4 秒,直接当参考音频**偏短**。于是:
+
+```
+① 声音设计造音色      → 拿到 voice_id + 2~4 秒预览
+② 用那个 voice_id 再合成一段**更长、中性**的话 → 下载 → 存成 voices/<id>.wav
+        （中性很重要:IndexTTS 默认 emo_control_method=0,参考音频的情绪会渗进每一句）
+③ 预览留在 voices/previews/（服务端只 listdir 一层,看不见子目录,不会污染音色库）
+```
+
+### 9.3 这一跑的结果(可核对)
+
+`F:\creative_app\yzy-index-tts-2.5-260824\voices\`:
+
+| 角色 | 参考音频 | 时长 | voice_id |
+|---|---|---|---|
+| `su_qing` 苏晴 | `su_qing.wav` | 7.12s | `qwen-tts-vd-su_qing-voice-20260919104744548-beb5` |
+| `zhou_yang` 周洋 | `zhou_yang.wav` | 7.12s | `qwen-tts-vd-zhou_yang-voice-20260919104748704-4f5f` |
+| `su_yang` 苏阳 | `su_yang.wav` | 7.52s | `qwen-tts-vd-su_yang-voice-20260919104752293-495a` |
+| `chen_yu` 陈屿 | `chen_yu.wav` | 8.24s | `qwen-tts-vd-chen_yu-voice-20260919104755994-4641` |
+
+四条都落在 5–15 秒内。四个角色的音色档案已**经写网关**登记进
+`before_the_rain/.studio/characters.json`(`sample` + `speaker: default` + `lang: ZH`)。
+四人各一段 78 字的样音 ⇒ 计费 312 字符(约 ¥0.05);造音色 4 次(¥0.8,若前 10 次免费则为 ¥0)。
+
+### 9.4 一个**被实测证实**的缺口(§8 那条现在有证据了)
+
+跑完四人的档案,`galfree_voice_anchor` 的板子说 **"还差 1 个角色没嗓子"** ——
+那一个是 **夏晚**,而她是**设定上不该有语音**的(选择性失语,台词是笔记本上的字)。
+
+也就是说,现在板子把**"设计上不配音"**与**"还没配音色"**混成了一件事(都会显示成"没嗓子")。
+同类问题还有一处:`galfree_voice_batch` 的清单是**按"谁说了话"派生的,不区分"这句要不要出声"**,
+所以本作的 3,115 行**全在清单里** —— 其中 1,958 行是旁白、207 行是夏晚的"字"。
+把这份清单直接交给本地 TTS,它会**连旁白和夏晚一起念**。
+
+要表达的是两个不同的概念(建议做成一件事):
+
+- **非配音角色(unvoiced character)**:这个角色的台词**不出声**(夏晚);
+- **旁白要不要配音**:那是**整部的风格决定**(全配音 VN / 只配角色),不是某个角色的属性。
+
+这两条都是**创作决定**,得由人拍板 —— 本票没改代码。
+
