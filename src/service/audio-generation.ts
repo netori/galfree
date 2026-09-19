@@ -32,6 +32,17 @@ import type { GenerationTaskState } from './tasks.ts'
 export type AudioAdapterId =
   /** 同步返回:一次 POST 直接拿回音频(或它的 URL)。MiniMax `music_generation` 是这种。 */
   | 'sync-http'
+  /**
+   * **OpenAI 兼容的语音合成**(`POST {base}/audio/speech` → **直接回音频字节**)。
+   *
+   * 单列一条是因为它的**响应形状**与别家都不同:响应体**就是音频**,
+   * 而 `sync-http` 那条是按"回 JSON、再去拿"(IndexTTS 的服务端路径)写的。
+   *
+   * 覆盖面:**一大类** —— 硅基流动(CosyVoice2 / IndexTTS / fish-speech 都挂在它下面)、
+   * OpenAI 自己的 TTS、以及绝大多数"OpenAI 兼容"的中转网关,都是这一个形状。
+   * 音色用上游的 **`voice` 名**(不是参考音频文件)。
+   */
+  | 'openai-speech'
   /** 异步任务:提交拿任务 id,轮询到终态再取音频。Suno 类聚合多为此(**id 走查询串**)。 */
   | 'async-task'
   /**
@@ -124,7 +135,23 @@ export interface AudioChannelSettings {
 export interface AudioPorts {
   /** 出网(生产 fetch / 快带假上游)。形状与图像的 `HttpRequest` 同构,但**各走各的渠道**。 */
   http: {
-    send: (request: { url: string; method: string; headers: Record<string, string>; body: string }) => Promise<{ status: number; text: string }>
+    /**
+     * 发一个 HTTP 请求。
+     *
+     * `text` 是给"上游回 JSON / 回一行话"那些协议用的;`bytes` + `contentType` 是给
+     * **"POST 出去、直接把音频收回来"**那一类用的(OpenAI 兼容的 `/audio/speech` 就是)。
+     *
+     * 为什么把 `bytes` 做成**可选**:与 `download` 同一个态度 —— 这是后加的一格能力,
+     * 已经存在的假端口不必全都跟着改;而**真需要它的适配器**要自己判断在不在,
+     * 不在就**如实报错**(见 `openai-speech`),不拿 `text` 冒充音频
+     * (把音频按文本解码就是坏的,而且坏得看不出来)。
+     */
+    send: (request: { url: string; method: string; headers: Record<string, string>; body: string }) => Promise<{
+      status: number
+      text: string
+      bytes?: Uint8Array
+      contentType?: string
+    }>
     /**
      * **下载产物字节**(T29 / #37)。
      *
@@ -407,8 +434,11 @@ export interface AudioAdapter {
    *
    * **可以是异步的**:有的上游把产物放在**服务端路径**上(IndexTTS 就是),
    * 这时适配器要读那个文件才拿得到字节。异步在这里是必要的,不是顺手加的。
+   *
+   * `bytes` / `contentType` 给"**POST 出去、直接把音频收回来**"那一类用
+   * (OpenAI 兼容的 `/audio/speech`);要用的适配器自己判断在不在,不在就如实报错。
    */
-  onSubmit: (response: { status: number; text: string }, model: AudioModelDescriptor) => AudioSubmission | Promise<AudioSubmission>
+  onSubmit: (response: { status: number; text: string; bytes?: Uint8Array; contentType?: string }, model: AudioModelDescriptor) => AudioSubmission | Promise<AudioSubmission>
   /** 异步制:轮询一步。 */
   poll?: (response: { status: number; text: string }, taskId: string) => AudioPollStep
   /** 异步制:据此拼下一次轮询的请求。 */

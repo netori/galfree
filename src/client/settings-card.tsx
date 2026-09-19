@@ -600,7 +600,14 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
           <div className={s.divider} role="separator" aria-label="语音生成渠道" />
           <h4 className={s.groupTitle}>语音(TTS)生成渠道</h4>
           <p className={s.hint} style={{ marginBottom: 8 }}>
-            本地服务(如 IndexTTS 的 `app_api.py`)填 `http://127.0.0.1:9005` 即可。
+            <b>本地服务</b>(如 IndexTTS 的 `app_api.py`)填 `http://127.0.0.1:9005`,协议选「同步 · IndexTTS 形状」。
+            <br />
+            <b>云端 TTS</b>(硅基流动的 CosyVoice2 / IndexTTS / fish-speech、OpenAI 的 TTS、
+            以及大多数「OpenAI 兼容」中转网关)填它们的基址,协议选
+            「<b>OpenAI 兼容语音</b>」—— 那一条是{'`POST {base}/audio/speech`'},
+            **响应体直接就是音频**;音色填上游的 `voice` 名字(如 `alloy`、
+            `FunAudioLLM/CosyVoice2-0.5B:alex`),不是参考音频文件。
+            <br />
             没配 = 建语音任务如实拒绝(`no-voice-channel`);但**不配也能做语音** ——
             走「语音批量清单」那条不花额度的路(导出 → 本地工具 → 按 id 导回)。
           </p>

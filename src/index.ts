@@ -18,6 +18,7 @@ import { createNodeHttpClient, type ImageChannelSettings, type ImageModelDescrip
 import type { AudioChannelSettings, AudioModelDescriptor, AudioPurpose } from './service/audio-generation.ts'
 import { registerAudioAdapter } from './service/audio-generation.ts'
 import { createIndexttsAdapter } from './service/audio-adapter-indextts.ts'
+import { createOpenAiSpeechAdapter } from './service/audio-adapter-openai-speech.ts'
 import { createSunoAdapter } from './service/audio-adapter-suno-register.ts'
 import { createMusicRestAdapter } from './service/audio-adapter-music-rest.ts'
 import { discoverModels } from './service/discovery.ts'
@@ -456,6 +457,7 @@ export function apply(ctx: Context, config?: Config): void {
    * `app_api.py`,默认 `127.0.0.1:9005`)。要接别家就在下面按同一个形状加一行。
    */
   registerAudioAdapter(createIndexttsAdapter())
+  registerAudioAdapter(createOpenAiSpeechAdapter())
   // Suno 类聚合站(音乐):提交 → taskId → 轮询 → 音频 URL → 下载。
   // 协议事实与出处见 `audio-adapter-suno.ts` 的表格;路径与模型版本可在模型目录的 note 里覆盖。
   registerAudioAdapter(createSunoAdapter())
@@ -480,7 +482,20 @@ export function apply(ctx: Context, config?: Config): void {
         headers: request.headers,
         ...(method === 'GET' || method === 'HEAD' ? {} : { body: request.body }),
       })
-      return { status: response.status, text: await response.text() }
+      // **体只读一次**:先拿字节,再从同一份字节解出文本。
+      // (`response.text()` 与 `arrayBuffer()` 不能都调 —— 体被消费掉了。)
+      //
+      // 为什么要带上字节:有一类语音协议**响应体就是音频**
+      // (OpenAI 兼容的 `/audio/speech`,`openai-speech` 适配器)。那条路此前走不通 ——
+      // 端口只回文本,而把音频按文本解码就是坏的,且坏得看不出来。
+      // 文本仍然照给(别的协议回 JSON / 回一行话,照旧读它)。
+      const bytes = new Uint8Array(await response.arrayBuffer())
+      return {
+        status: response.status,
+        text: new TextDecoder().decode(bytes),
+        bytes,
+        contentType: response.headers.get('content-type') ?? '',
+      }
     },
     // 产物是音频 URL 时用它取字节(Suno 类上游就是这样)。
     download: async (url: string) => {

@@ -77,8 +77,18 @@ export const AUDIO_CAPABILITY_FIELDS: Record<AudioPurpose, AudioCapabilityField[
 /** 协议的中文名与说明(面板显示;两条渠道共用同一份措辞)。 */
 export const AUDIO_ADAPTER_INFO: Record<AudioAdapterChoice, { label: string; hint: string }> = {
   'sync-http': {
-    label: '同步(一次 POST 拿回)',
-    hint: '本机 TTS、MiniMax 音乐这一类:一次调用直接回音频(或它的 base64)。',
+    label: '同步 · IndexTTS 形状(回 JSON,再去取)',
+    hint: '本机 IndexTTS 那类服务:`POST {base}/tts` + `{speaker, audio, text, lang, return_type}`。'
+      + '它**要一个服务端音色库里的参考音频文件名**,而且产物是"服务端路径"(要同机才读得到)。'
+      + '云端服务不认这个形状 —— 那些请选下面那条。',
+  },
+  'openai-speech': {
+    label: 'OpenAI 兼容语音(响应体直接是音频)',
+    hint: '`POST {base}/audio/speech` + `{model, input, voice, response_format}`,**响应体就是音频**。'
+      + '一条通吃一大类:硅基流动(CosyVoice2 / IndexTTS / fish-speech)、OpenAI 的 TTS、'
+      + '以及大多数"OpenAI 兼容"中转网关。'
+      + '音色填**上游的 `voice` 名字**(如 `alloy`,或硅基流动的 `FunAudioLLM/CosyVoice2-0.5B:alex`)'
+      + '—— 不是参考音频文件。',
   },
   'async-task': {
     label: '异步任务制(提交后轮询)',
