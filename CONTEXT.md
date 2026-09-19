@@ -224,3 +224,28 @@
   (`~/.dsh/storages/workspace.json` 的 `sessionIds`)引用的会话没被索引到(会话被删/归档),
   于是那条会话被从成员里过滤并记一条 warn。**插件侧一行都不碰 workspace/session**
   (`git grep -i workspace src/` 为空),所以别把它算在本插件头上。
+- **CI 已加(2026-09-14 · commit `7f65200` · `.github/workflows/ci.yml`)**:
+  在它之前"快带 + 慢带 + 发版前必跑"只写在文档里,没有东西把关。
+  - **fast**(push / PR):`npm ci` → typecheck → build → `npm test`,矩阵
+    [ubuntu-latest, windows-latest](Windows 与开发机一致;Ubuntu 是跨平台哨兵),
+    末尾断言 `lib/index.js` / `lib/client.js` 存在(宿主/面板真正加载的东西)。
+  - **slow**:只能 `workflow_dispatch` 手动 —— 它要下 155MB 钉版 SDK、**真起游戏窗口**、
+    真打一次包,托管 runner 没有显示器。发版前在有显示器的机器上跑。
+  - **上线时它当场抓到两件**(都已修):① `package-lock.json` 与 `package.json` 不同步
+    ⇒ `npm ci` 会直接失败;② `src/testing/tmp.test.ts` 两条用例断言的是 Windows 专有行为
+    (活进程占着 cwd ⇒ `rm` 抛 EPERM),POSIX 不阻止删除 ⇒ Linux 上会红,已改 `it.skipIf`
+    并补一条 POSIX 对照用例。**教训**:CI 的价值之一就是逼出这类"只在开发机上成立"的假设。
+  - ⚠️ **Ubuntu 那条腿本机没法验证**(手边只有 Windows)。首次在 GitHub 上跑出来的结果才是
+    它的第一次真实验证 —— 如果它红了,那是**真实信息**,别当成 CI 配错了。
+- **`reference-chain.test.ts` 的负载敏感 flake:查过,但**没能复现**,所以**没有动它**
+  (2026-09-14):
+  - 症状:满带跑时偶发 `expected 'failed' to be 'awaiting-review'`(那一条跑的是真本地 HTTP
+    假上游);该文件单独跑 28–35 秒,**满载下 65–72 秒**。
+  - 复现尝试:**连跑 3 次满带全绿**;算上先前那次,约 **5 次里红 1 次**(≈20%)。
+  - 已做(唯一能确定有用的事):5 处 `awaiting-review` 断言收进 `expectAwaitingReview()`,
+    失败时把 `state` 与 **`lastError` 原话**一起报出来 —— 下次再红就能直接归因,
+    不必再从头复现(与 `async-image` 那条"两种失败要说得出区别"同一件事)。
+  - **量过的一个候选方案,结论是不做**:把 worker 数压到 4(本机 24 核)⇒ **125 秒 vs 87 秒**,
+    慢 44%,而对稳定性只是**推测**有益。拿 44% 的墙钟时间换一个没证据的好处,不划算。
+  - **没做归因就不修**:`async-image` 那条同类的、文档记过的成因是满载时 `fetch failed`,
+    但**那不是这条的证据** —— 按本仓库的纪律("看着像"不等于事实),不据此加"重试"来掩盖。
