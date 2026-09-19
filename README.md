@@ -92,7 +92,24 @@ npm run build          # lib/index.js(ESM host)+ lib/client.js(web bundle)
 ## 安装(人工验收)
 
 以本仓库为插件源,按标准 DSH 插件流程安装(设置 → 插件 → 从本地/仓库添加);
-装载后侧边栏出现「GALFree 工作台」入口。设置命名空间 `dsh-galfree` 可配
+装载后侧边栏出现「GALFree 工作台」入口。
+
+**从仓库安装时它会现场构建一次**(仓库里不带 `lib/`,`package.json` 的 `prepare`
+负责构建;这是 DSH 对 git 插件的既定方式)。pnpm 默认**拦下**安装期构建脚本,所以第一次
+会失败并打印一个 key —— 把那个 key 原样填进 profile 的 `pnpm-workspace.yaml` 的
+`allowBuilds`,再装一次即可(`~/.dsh/profiles/<profile>/pnpm-workspace.yaml`)。
+不想走构建也行:装发到 npm 的预构建包(那样会跳过这一步)。
+
+**自己改代码**时不必依赖 `prepare`:在**本仓库目录里**跑
+
+```bash
+npm install && npm run build   # 产出 lib/,宿主加载的就是它
+```
+
+**改完必须重建 + 重启宿主**:宿主只在启动时载入 `lib/index.js`;面板是按需从磁盘取的,
+所以只重建不重启会出现"面板有按钮、宿主没路由"。
+
+设置命名空间 `dsh-galfree` 可配
 `defaultProjectsRoot`(新建项目默认父目录)与 `sdkPath`(既有 SDK 路径覆盖),
 以及图像渠道(T14):
 

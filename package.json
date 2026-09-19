@@ -27,7 +27,8 @@
     "templates",
     "cordis.patch.yml",
     "docs/contracts",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {
@@ -45,6 +46,7 @@
   "scripts": {
     "build": "tsdown",
     "watch": "tsdown --watch",
+    "prepare": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -53,7 +55,13 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": ">=0.1.5-0 <0.2.0-0",
     "react": "^18.3.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
   },
   "dependencies": {
     "extract-zip": "^2.0.1",

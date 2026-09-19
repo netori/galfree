@@ -7,7 +7,11 @@
 
 ## 一句话结论
 
-**代码这一侧全部达标;卡住的只有一件与代码无关的事:仓库是 `private`。**
+**代码这一侧全部达标。** 阻塞/待办共三类,都不是"写得对不对"的问题:
+
+1. ⛔ **仓库是 `private`** —— 评审者读不到仓库,CI 也取不到 `package.json`(只有所有者能拍板);
+2. ✅ **能不能装上**(以前不能,已于 2026-09-14 修):见下节"安装可用性";
+3. 🟡 两件可选项:加 `dsh-plugin` topic、发 npm。
 
 ## 逐条核验
 
@@ -17,7 +21,10 @@
 | 不是只声明 `dsh.client`(最常见被拒原因) | bundle 与 client 都有 | ✅ |
 | 仓库有真实可用代码,非占位/纯 README | `src/` 137 文件 / 约 33.8k 行 / 56 个测试文件 | ✅ |
 | 仓库创建满 1 天 | 创建于 2026-09-11 | ✅ |
-| 活跃维护 | 121 commits,持续提交 | ✅ |
+| 活跃维护 | 121+ commits,持续提交 | ✅ |
+| **能从源码装上**(见下节) | 以前**不能**;加 `prepare` 后能 | ✅(已修) |
+| 官方 `@deepseek-ai/*` 走 peerDependencies | `@deepseek-ai/dsh-tools` 以前只是 devDependency(运行时却 import 它) | ✅(已修) |
+| peer 范围不静默排除预发布版 | 换成 `>=0.1.5-0 <0.2.0-0`(实测放行 `0.1.5-rc.2`) | ✅(已修) |
 | 加 `dsh-plugin` topic | **未加**(且私有仓库上没意义) | ⛔ 待办 |
 | 描述如实、无营销词 | 只陈述功能(见 yml) | ✅ |
 | 分类贴合 | `dev`(全流程工作台,非 UI 主题) | ✅ |
@@ -25,7 +32,45 @@
 | 依赖指向原作者 | 依赖仅 `extract-zip` / `schemastery`,无他人包副本 | ✅ |
 | 一个 PR 最多 3 条 | 只投 1 条 | ✅ |
 
-## ⛔ 唯一的硬阻塞:仓库可见性
+## ✅ 安装可用性(2026-09-14 修,这是当时的第二个硬阻塞)
+
+**症状**:`lib/` 在 `.gitignore` 里(**仓库不带构建产物**),而 `package.json` 又**没有
+`prepare` 脚本** ⇒ 任何人从 GitHub 装下来的包里 **`main` 指向的 `lib/index.js` 根本不存在**。
+只有作者本机能用(profile 里是 `link:E:/DSH_project/DSH_creator`,本地早已构建过)。
+
+**证据**(不是推理):
+- `git clone` 一份干净的 → 目录里**没有 `lib/`**;
+- 加了 `"prepare": "npm run build"` 之后再 `npm install` → `lib/index.js` 与 `lib/client.js`
+  两个都出来了(实测通过)。
+
+**修法**:`prepare` 脚本(与市场里 `dshmarket` 同一种做法)。
+DSH 的安装器原话印证了这条路:*"git-hosted plugins build on install via their prepare
+script, which pnpm blocks until allowed — add the exact key pnpm printed above under
+`allowBuilds`"* —— 所以从仓库装的人要按提示把 key 填进 `pnpm-workspace.yaml`,这一步写进 README 了。
+
+### 顺带修掉的两处声明问题
+
+- **`@deepseek-ai/dsh-tools` 以前只在 `devDependencies` 里,而 `lib/index.js` 运行时
+  `import { defineTool } from "@deepseek-ai/dsh-tools"`** —— 运行时依赖没声明。
+  (它**今天能跑**:宿主把 harness 包挂在 `~/.dsh/profiles/node_modules/@deepseek-ai/`,
+  向上查找够得到;但这是"碰巧成立",不是声明成立的。市场指南明确要求官方包走
+  `peerDependencies`。)现在补成 **optional peer**:插件对工具席位本来就是这个态度
+  —— `ctx.inject(['tools'], …)` 缺席就少几个入口,不崩。
+- **peer 范围会静默排除预发布版**:harness 发的是 `0.1.5-rc.2` 这种预发布。
+  实测(node-semver,`includePrerelease=false`,即 npm/pnpm 的默认解析):
+
+  | 范围 | 0.1.5-alpha.2 | 0.1.5-rc.2 | 0.1.5 |
+  |---|---|---|---|
+  | `^0.1.5`(直觉写法) | no | no | YES |
+  | `>=0.0.1-rc.1 <0.2.0`(指南的 ❌) | no | no | YES |
+  | 指南的 ✅ `… <0.1.0 \|\| >=0.1.0-rc.1 <0.2.0-0` | **no** | **no** | YES |
+  | **`>=0.1.5-0 <0.2.0-0`(采用)** | **YES** | **YES** | YES |
+
+  ⚠️ 连指南里那个 ✅ 例子都放行不了 `0.1.5-*`(它的比较符落在 `0.1.0` 元组上,而我们的
+  版本在 `0.1.5` 元组)—— 规则的实质是"**每个元组各要一条带预发布标签的分支**"。
+  以后 harness 升到 `0.1.6-*` 时这一步**要跟着加一条分支**,否则又是一个静默 ERESOLVE。
+
+## ⛔ 头号阻塞:仓库可见性
 
 ```
 "private": true    visibility: "private"    (netori/galfree,经 GitHub API 确认)
