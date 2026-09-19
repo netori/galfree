@@ -9,6 +9,7 @@ import { createCompositeValidator } from './composite-validator.ts'
 import { createProjectService, type ProjectInfo, type ProjectService } from '../project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../../testing/tmp.ts'
 import { fakeUiTemplate, makeFakeSdk } from '../../testing/sdk-fixture.ts'
+import { platformLauncherName } from '../hash.ts'
 
 describe('合成验证器(T5 接线)', () => {
   let base: string
@@ -40,9 +41,14 @@ describe('合成验证器(T5 接线)', () => {
 
   it('覆盖目录版本 ≠ 钉版 → 方言差异警告进结果且 ok 不被阻塞为假阳性', async () => {
     // 造一个假"覆盖 SDK"目录:启动器存在但版本是 9.9.9。
+    // ⚠️ 启动器文件名**必须**走 `platformLauncherName()`:合成验证器是用它去探的
+    // (`composite-validator.ts` 里 `probeOverrideSdk(dirname(launcher), platformLauncherName())`)。
+    // 早先这里硬写 `renpy.exe`,于是这条用例在 Linux 上必红 —— CI 的 ubuntu 那条腿第一次跑就抓到
+    // (`expected 'fake' to be 'sdk'`:探不到启动器 ⇒ 不升级 ⇒ 还留在假验证器)。
     const override = join(base, 'user-sdk')
+    const launcher = platformLauncherName()
     await mkdir(join(override, 'renpy-9.9.9-sdk'), { recursive: true })
-    await writeFile(join(override, 'renpy-9.9.9-sdk', 'renpy.exe'), '@echo off')
+    await writeFile(join(override, 'renpy-9.9.9-sdk', launcher), '@echo off')
     const service2 = createProjectService({
       dataDir: join(base, 'data'),
       uiTemplate: fakeUiTemplate(sdkDir),

@@ -237,6 +237,34 @@
     并补一条 POSIX 对照用例。**教训**:CI 的价值之一就是逼出这类"只在开发机上成立"的假设。
   - ⚠️ **Ubuntu 那条腿本机没法验证**(手边只有 Windows)。首次在 GitHub 上跑出来的结果才是
     它的第一次真实验证 —— 如果它红了,那是**真实信息**,别当成 CI 配错了。
+  - **首次实跑的结果:Ubuntu 腿红了,抓到 3 个"只在 Windows 上成立"的假设**:
+    ① `composite-validator.test.ts` 硬写 `renpy.exe`,而生产是用 `platformLauncherName()`
+    去探的(非 Windows 是 `renpy.sh`)⇒ 探不到启动器 ⇒ 验证器升不上去 ⇒
+    `expected 'fake' to be 'sdk'`。**已修**(改用 `platformLauncherName()`),这也是
+    "CI 的价值就是逼出这类假设"的又一个实例。
+    ②③ 都在 `write-gateway.test.ts`,**都还没修**(见下)。
+  - **Ubuntu 腿已改成"观测"(不拦合并)**:Windows 腿是门禁(与开发机一致,机械保证落在它身上),
+    Ubuntu 腿照跑、结果照看得见,但 `continue-on-error`。**理由不是嫌它红,是②③ 没法验证修法**
+    —— 手边只有 Windows,而它们都在写网关的观察/回滚时序里(就地写 + 350ms settle 定时器 +
+    断言里固定 sleep)。按本仓库纪律:**没归因就不改、不为让它变绿而掩盖**。
+- **两个待修的跨平台问题(2026-09-14 由 CI 的 Ubuntu 腿发现,尚未修)**:
+  都在 `src/service/write-gateway.test.ts`,**只有 Linux 上红**:
+  1. 「网关自写不伪装成外部修改:网关写批只产生 internal 事件」——
+     Linux 上 `forRel.every(kind === 'internal')` 为假,出现了 `external`。
+     相关实现:`write-gateway.ts` 的就地写(不是 temp+rename)、`#inFlight`/`#settling` 抑制、
+     以及 **350ms 的 settle 复查**(`setTimeout(..., 350)`);而用例只等**固定 400ms**。
+     同文件另一条(观察外部改动)用的是 `expect.poll(..., timeout: 4000)` —— 这条是固定 sleep,
+     两者不一致,固定 sleep 本身就是个可疑点。
+     **要修的其实是"抑制逻辑在各平台都成立"**,不是把断言放宽。
+  2. 「落盘中途失败 → 已写文件回滚为旧内容」—— 用例用"把已存在文件当目录"
+     (`game/script.rpy/impossible-child.rpy`)来逼出落盘失败,期望 `write-failed`;
+     **Linux 上先得到 `read-failed`**:`read()` 只把 `ENOENT`/`EISDIR` 当"缺失"
+     (`write-gateway.ts:115`),而 POSIX 读这种路径给的是 **ENOTDIR** ⇒ 在读那一步就抛了,
+     于是**回滚根本没被验到**(这条用例在 Linux 上其实是空的)。
+     候选修法(二选一,都得在 Linux 上验):把 `ENOTDIR` 也归入"缺失"(语义上更准:祖先不是
+     目录 ⇒ 该文件确定不存在),或换一种跨平台的方式逼出"第一个文件写成功之后才失败"。
+  - **同时问自己一句**(未决):插件的 Linux 支持到什么程度是承诺?
+    `platformLauncherName()` 是有 `renpy.sh` 分支的,说明当初是打算支持的。
 - **`reference-chain.test.ts` 的负载敏感 flake:查过,但**没能复现**,所以**没有动它**
   (2026-09-14):
   - 症状:满带跑时偶发 `expected 'failed' to be 'awaiting-review'`(那一条跑的是真本地 HTTP
