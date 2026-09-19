@@ -17,8 +17,8 @@ import { ProjectRegistry, type RegistryEntry } from './registry.ts'
 import { commitSnapshot, fileDiff, fileHistory, rollbackFile, type SnapshotEntry } from './snapshot.ts'
 import { PROJECT_NAME_RE, TEMPLATE_CJK_FONT, TEMPLATE_UI_FILES, TEMPLATE_UI_IMAGE_DIR, TEMPLATE_WINDOW_ICON, renderTemplateFiles, renderUiPatch, templateKeepFiles } from './template.ts'
 import { COVER_TARGETS, coverTargetOf, coverTargetIds } from './covers.ts'
-import { dialogueRowsOf } from './dialogue-id.ts'
-import { isVoiceAudioFile, matchVoiceFiles, voiceTargetPath, type VoiceBatch, type VoiceBatchRow } from './voice-batch.ts'
+import { dialogueRowsOf, stampDialogueIds } from './dialogue-id.ts'
+import { AUTO_VOICE_LINE, isVoiceAudioFile, matchVoiceFiles, voiceTargetPath, type VoiceBatch, type VoiceBatchRow, type VoiceWiringReport, type VoiceWiringScene } from './voice-batch.ts'
 import { FakeValidator } from './validation/template-validator.ts'
 import { deriveGraph, parseRpy } from './rpy/parse.ts'
 import { readRpyFiles } from './rpy/files.ts'
@@ -970,7 +970,12 @@ export class ProjectService {
     const gatewayPath = gatewayPathOf(canonical)
     const gateway = await this.#gatewayFor(projectRef)
     const current = await gateway.read(gatewayPath)
-    const composed = composeSceneFile(label, input.source, current.content, nextLabel)
+    // 对话 id(T26 / ADR-0013):**生成侧盖章**是整条语音链路的前提,不能漏。
+    // 不盖的话引擎用的标识符是**内容哈希**,`config.auto_voice = "voice/{id}.ogg"`
+    // 会去格式化出一个不存在的文件名 ⇒ 语音文件生出来了也没人找得到(静默无声)。
+    // 这是 2026-09-19 实测出来的:那批 655 个语音文件全对,但一句都听不到。
+    const stamped = stampDialogueIds(input.source, label)
+    const composed = composeSceneFile(label, stamped, current.content, nextLabel)
 
     // 一个写批 = 一个快照。
     await gateway.writeBatch(
@@ -2420,9 +2425,96 @@ export class ProjectService {
         dialogueId: row.dialogueId,
         targetPath,
         missing: !existing.has(targetPath.replace(/^game\//, '')),
+        // 这一句在 `.rpy` 里有没有显式 id —— 决定引擎认不认这个文件名(见 VoiceBatchRow)。
+        stamped: row.stamped,
       }
     })
     return { rows, missingVoiceFiles: rows.filter((row) => row.missing).length, extension: 'ogg' }
+  }
+
+  /**
+   * **语音接线落地检查 / 补课**(ADR-0013 的那两条前提)。
+   *
+   * 语音能不能响,要**同时**满足两件事,缺一件都是**静默无声**(引擎不报错):
+   *
+   *  1. 项目里得有 `define config.auto_voice = "voice/{id}.ogg"` —— 没有它引擎根本不找;
+   *  2. 剧本里每句对白得带**显式 `id`** —— 不给时 Ren'Py 用的标识符是**内容哈希**
+   *     (`renpy/translation/__init__.py:337-357`),`auto_voice` 就会去格式化一个
+   *     不存在的文件名(`renpy/common/00voice.rpy:364-372`)。
+   *
+   * 这两条都是**模板演进的一部分**,而"新建时才写"意味着**老项目永远缺**
+   * (同 `build.name` / 界面补丁那两处)。这个入口就是给老项目补课的。
+   *
+   * `apply: false`(缺省)只读:`apply: true` 才写,而且**一个写批 = 一个快照**。
+   * 盖章是**幂等**的,且指纹剔掉了 `id` 子句 —— 所以**不会清掉人的审读戳**。
+   */
+  async voiceWiring(projectRef: string, input: { apply?: boolean } = {}): Promise<VoiceWiringReport> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const apply = input.apply === true
+
+    const gateway = await this.#gatewayFor(projectRef)
+    const configPath = 'game/options.rpy'
+    const config = await gateway.read(configPath)
+    const autoVoiceLine = AUTO_VOICE_LINE
+    const configPresent = config.missing ? false : config.content.includes('config.auto_voice')
+
+    const parsed = await this.#parseScript(projectRef)
+
+    const scenes: VoiceWiringScene[] = []
+    for (const scene of parsed.scenes) {
+      // 只处理**生成目录**里的场景:手写文件归人管,生成器不越界(T10 的同一道边界)。
+      if (!scene.file.startsWith('scenes/')) {
+        scenes.push({ label: scene.label, file: scene.file, dialogueCount: 0, stampedCount: 0, needsStamp: false, handWritten: true })
+        continue
+      }
+      const rows = dialogueRowsOf([scene])
+      const stampedCount = rows.filter((row) => row.stamped).length
+      scenes.push({
+        label: scene.label,
+        file: scene.file,
+        dialogueCount: rows.length,
+        stampedCount,
+        needsStamp: rows.length > 0 && stampedCount < rows.length,
+        handWritten: false,
+      })
+    }
+
+    const changed: string[] = []
+    if (apply) {
+      const ops: Array<{ path: string; content: string; expectVersion: string }> = []
+      for (const item of scenes) {
+        if (!item.needsStamp) continue
+        const path = gatewayPathOf(item.file)
+        const current = await gateway.read(path)
+        if (current.missing) continue
+        const stamped = stampDialogueIds(current.content, item.label)
+        if (stamped === current.content) continue
+        ops.push({ path, content: stamped, expectVersion: current.version })
+        changed.push(item.file)
+      }
+      if (!configPresent) {
+        const next = config.missing
+          ? `${autoVoiceLine}\n`
+          : `${config.content.replace(/\s*$/, '')}\n\n${autoVoiceLine}\n`
+        ops.push({ path: configPath, content: next, expectVersion: config.version })
+        changed.push(configPath)
+      }
+      if (ops.length > 0) {
+        await gateway.writeBatch(ops, { origin: 'agent', reason: 'edit' })
+        // 写完把"现在是什么样"**重新读一遍**回报(不靠推断)——
+        // 但 `changed` 要用**这一次真动过的**那份:重读是只读的,它的 changed 恒为空。
+        const after = await this.voiceWiring(projectRef, { apply: false })
+        return { ...after, changed }
+      }
+    }
+
+    return {
+      autoVoice: { present: configPresent, file: configPath, line: autoVoiceLine },
+      scenes,
+      changed,
+      needsWiring: !configPresent || scenes.some((scene) => scene.needsStamp),
+    }
   }
 
   /**

@@ -45,6 +45,15 @@ export interface VoiceBatchRow {
   targetPath: string
   /** 这条还没生成(磁盘上没有对应文件)。 */
   missing: boolean
+  /**
+   * 这一句在 `.rpy` 里**带显式 id** 吗?
+   *
+   * `false` = 我们按序号给它派生了 id(清单/账本照旧能用),但**引擎不认这个名字** ——
+   * Ren'Py 会用内容哈希当标识符,`config.auto_voice` 于是找一个不存在的文件、
+   * **静默无声**。所以"文件配齐了"不等于"能听见":这条为 false 时先跑
+   * `galfree_voice_wiring` 盖章。
+   */
+  stamped: boolean
 }
 
 export interface VoiceBatch {
@@ -173,4 +182,40 @@ export function matchVoiceFiles(rows: Array<Pick<VoiceBatchRow, 'dialogueId' | '
     imported.push({ dialogueId: row.dialogueId, targetPath, sourcePath: chosen.path })
   }
   return { imported, duplicates, unknown, missing }
+}
+
+// ─── 语音接线落地(ADR-0013 的两条前提)────────────────────────────────
+
+/**
+ * 项目里那行"引擎按 id 找语音文件"的配置。**与模板写的那行逐字一致**
+ * (`template.ts` 的 `game/options.rpy`)—— 对不上就等于没配。
+ */
+export const AUTO_VOICE_LINE = 'define config.auto_voice = "voice/{id}.ogg"'
+
+/** 一个场景的接线处境。 */
+export interface VoiceWiringScene {
+  label: string
+  /** 相对 `game/` 的路径(如 `scenes/start.rpy`)。 */
+  file: string
+  /** 这一场有几条对白。 */
+  dialogueCount: number
+  /** 其中几条在 `.rpy` 里**带了显式 id**。 */
+  stampedCount: number
+  /** 有对白、但没盖全 ⇒ 这些句子**引擎找不到语音**(静默无声)。 */
+  needsStamp: boolean
+  /**
+   * 这一场住在**手写文件**里(不在 `game/scenes/`)—— 生成器不越界,
+   * 所以只报不改。
+   */
+  handWritten: boolean
+}
+
+export interface VoiceWiringReport {
+  /** `config.auto_voice` 在不在(没有它引擎根本不找语音文件)。 */
+  autoVoice: { present: boolean; file: string; line: string }
+  scenes: VoiceWiringScene[]
+  /** 本次真的动了哪些文件(`apply` 时才有)。 */
+  changed: string[]
+  /** 还有没有该补的(配置缺 / 有场景没盖全)。 */
+  needsWiring: boolean
 }

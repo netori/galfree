@@ -143,11 +143,14 @@ describe('对话流结构化编辑器(T11)', () => {
     expect(after).toContain('# 这一行的注释不许被动')
 
     // git diff:一次写批 = 一个快照;这一批的 diff 只有一行增删。
+    // 注意行尾那个 `id scene_one_0000`(T26 / ADR-0013):**它必须还在** ——
+    // 表单改台词时那一行是重建出来的,而 id 是语音文件名的锚,丢了这一句就永远没声音。
+    // 下面这两条断言同时也在守这件事:谁要是把 id 弄丢了,这里立刻红。
     const history = await service.snapshotHistory('edit', 'game/scenes/scene_one.rpy')
     const diff = await service.snapshotDiff('edit', 'game/scenes/scene_one.rpy', history[1]!.commit, history[0]!.commit)
     const changed = diff.split('\n').filter((line) => /^[+-]/.test(line) && !/^(\+\+\+|---)/.test(line))
-    expect(changed.filter((line) => line.startsWith('-'))).toEqual(['-    xiao_tang "你来啦。"'])
-    expect(changed.filter((line) => line.startsWith('+'))).toEqual(['+    xiao_tang "你也是来看雨的哦。"'])
+    expect(changed.filter((line) => line.startsWith('-'))).toEqual(['-    xiao_tang "你来啦。" id scene_one_0000'])
+    expect(changed.filter((line) => line.startsWith('+'))).toEqual(['+    xiao_tang "你也是来看雨的哦。" id scene_one_0000'])
 
     // 改完照常判定:把新的事实交回(与 T10 同一形状)。
     const report = await service.editScene('edit', {

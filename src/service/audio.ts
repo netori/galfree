@@ -21,7 +21,14 @@ import type { DialectProblem, SceneNode, Statement } from './rpy/dialect.ts'
 /** 认得的音频后缀(Ren'Py 支持的常见几档;判后缀,不解析内容)。 */
 export const AUDIO_EXTENSIONS = ['ogg', 'oga', 'opus', 'mp3', 'wav', 'm4a', 'flac', 'aac'] as const
 
-/** 不扫的目录(Ren'Py 自己的运行目录,不会有素材)。 */
+/**
+ * 不扫的目录。
+ *
+ * `cache` / `saves`:Ren'Py 自己的运行目录,不会有素材。
+ *
+ * 注意 `voice/` **不在**这个名单里:语音文件仍然进池(见 `isVoicePath` ——
+ * 它们只是不算"未使用")。"落盘 → 池里立刻有它"是 T29 的验收口径,别把它踢掉。
+ */
 const SKIP_DIRS = new Set(['cache', 'saves'])
 
 export interface AudioFileEntry {
@@ -187,11 +194,27 @@ export function deriveAudio(input: { scenes: SceneNode[]; files: AudioFileEntry[
     }
   }
 
-  const unused = input.files.filter((file) => !used.has(file.path)).map((file) => file.path)
+  const unused = input.files
+    .filter((file) => !used.has(file.path) && !isVoicePath(file.path))
+    .map((file) => file.path)
   return { files: input.files, references, missing: references.filter((reference) => !reference.found), unused, problems }
 }
 
-/** 推导结果 → 面板/工具读的池视图(问题那一摞另有去处:它进 `progress.problems`)。 */
+/**
+ * 语音文件**不算"未使用"**(2026-09-19)。
+ *
+ * 为什么:`unused` 问的是"这份素材丢进项目了、却没有任何 `play` 引用它吗?" ——
+ * 那是 BGM/SE 的问题。而语音**按设计就不写 `play` 语句**:ADR-0013 让引擎按**对话 id**
+ * 去 `game/voice/<id>.ogg` 自动找(`config.auto_voice`)。所以拿 play 引用去衡量语音,
+ * 得出的"未使用"是**假事实** —— 实测:这一部戏 655 条语音全被报成 unused。
+ *
+ * 语音文件**仍然留在 `files` 里**(不从这个池里踢出去):T29 的验收之一就是
+ * "产物落进 `game/voice/` → **池里立刻有它**",那是"写真的落盘了"的观察口。
+ */
+function isVoicePath(path: string): boolean {
+  return path.startsWith('voice/')
+}
+
 export function poolViewOf(derivation: AudioDerivation): AudioPoolView {
   const { files, references, missing, unused } = derivation
   return { files, references, missing, unused }

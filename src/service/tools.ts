@@ -1245,6 +1245,68 @@ export function registerGalfreeTools(
     },
   })))
 
+  // ─── 语音接线(T35 补的入口):ADR-0013 那两条前提**有没有落到项目里** ──
+  //
+  // 为什么需要它(2026-09-19 实测):语音能不能响要同时满足两件事,缺一件都是
+  // **静默无声**(引擎不报错、试玩也照过)——
+  //   ① 项目里有 `define config.auto_voice = "voice/{id}.ogg"`;
+  //   ② 剧本里每句对白带**显式 `id`**(不给时 Ren'Py 用内容哈希当标识符)。
+  // 这两条都是**模板演进**的一部分,而"只在新建时写"意味着**老项目永远缺** ——
+  // 于是出现"655 个语音文件全对、一句都听不到"。这个入口就是给老项目补课的。
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_voice_wiring',
+    description: [
+      '**语音接线检查/补课**(ADR-0013):查项目里那两条前提有没有落地,可选地补上。',
+      '要**同时**满足:① `define config.auto_voice = "voice/{id}.ogg"` 在项目里;',
+      '② 剧本每句对白带**显式 `id`**。缺任何一条,引擎都**静默无声**',
+      '(它会拿内容哈希去格式化文件名,找不到就当没这句语音)。',
+      '`action: "read"`(缺省)= 只读:配置在不在、哪些场景没盖全。',
+      '`action: "apply"` = 补上:给生成目录(`game/scenes/`)里没盖全的场景**逐条盖 id**',
+      '(幂等;**指纹剔掉了 id 子句,所以不会清掉人的审读戳**),并补上那行配置;一个写批 = 一个快照。',
+      '手写文件(`script.rpy`)**只报不改** —— 生成器不越界。',
+      '**先跑这个再配音**:不然文件配齐了也是白配。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      action: { type: 'string', description: 'read = 只读检查(缺省);apply = 盖章 + 补配置' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目:先建一个(galfree_create_project)。'
+      const action = String(args.action ?? 'read')
+      if (action !== 'read' && action !== 'apply') return `不认识的 action:${action} —— 只有 read / apply。`
+      try {
+        const before = await service.voiceWiring(active, { apply: action === 'apply' })
+        const unstamped = before.scenes.filter((scene) => scene.needsStamp)
+        return JSON.stringify({
+          autoVoice: before.autoVoice,
+          configOk: before.autoVoice.present,
+          scenes: before.scenes.filter((scene) => scene.dialogueCount > 0 || scene.handWritten).length,
+          needingStamp: unstamped.map((scene) => ({
+            scene: scene.label,
+            file: scene.file,
+            dialogue: scene.dialogueCount,
+            stamped: scene.stampedCount,
+          })),
+          handWritten: before.scenes.filter((scene) => scene.handWritten).map((scene) => scene.file),
+          changed: before.changed,
+          needsWiring: before.needsWiring,
+          next: before.needsWiring
+            ? '还没接线完:配置缺 或 有场景没盖全(见 needingStamp)。再跑一次 `action: "apply"` 补上,然后再配音。'
+            : '接线齐了:配置在、生成目录里的对白都带显式 id ⇒ `config.auto_voice` 找得到 `game/voice/<id>.ogg`。'
+              + '**手写文件里那几场**要自己盖(见 handWritten)——生成器不越界。',
+        }, null, 2)
+      } catch (error) {
+        return `语音接线检查没跑成:${describe(error)}`
+      }
+    },
+  })))
+
   // ─── 音频生成渠道(T27 / ADR-0012):**音乐与语音各一条**,建任务之前先看这个 ──
   //
   // 为什么给它一个读入口:建音乐/语音任务要一个**属于那条渠道**的 model id,

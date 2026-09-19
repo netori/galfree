@@ -15,6 +15,7 @@
  * 解析器看到的是同一套词汇。
  */
 import type { SceneNode, Statement } from './rpy/dialect.ts'
+import { idClauseTextOf } from './dialogue-id.ts'
 
 export type SceneRowKind =
   | 'dialogue' | 'image' | 'jump' | 'call' | 'return' | 'menu' | 'with' | 'pause' | 'audio'
@@ -212,7 +213,12 @@ export function applySceneEdit(text: string, edit: SceneEdit): string {
   switch (edit.kind) {
     case 'setDialogue': {
       guard(edit.line)
-      lines[edit.line - 1] = serializeDialogue(indentOf(at(edit.line)), edit.speaker, edit.text)
+      // **把这一行原有的 id 子句原样接回去**(T26 / ADR-0013)。
+      // 这一行是**重建**出来的,而 id 是语音文件名的锚 —— 丢了它这一句就**永远没声音**
+      // (引擎会拿内容哈希去找一个不存在的文件)。2026-09-19 实测踩到:
+      // 作者试玩听不到语音,其中一个成因就是"改过台词的那几句 id 掉了"。
+      const clause = idClauseTextOf(at(edit.line))
+      lines[edit.line - 1] = `${serializeDialogue(indentOf(at(edit.line)), edit.speaker, edit.text)}${clause}`
       return lines.join('\n')
     }
     case 'setImage': {

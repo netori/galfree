@@ -68,12 +68,12 @@ describe('agent 工具(T10)', () => {
     return registry.tools
   }
 
-  it('注册出模型看到的契约:二十三个工具,参数与输出声明齐备', () => {
+  it('注册出模型看到的契约:二十四个工具,参数与输出声明齐备', () => {
     const tools = register()
     // 剧本环节两个 + 美术环节(T15)五个 + 参考链回路(T16)两个 + 发布(T18)一个
     // + 项目工作周期 / 设定集 / 场景编辑 / 音频接线 / 试玩 / 快照(T20)六个
     // + 封面(T30)一个 + 语音批量清单(T29)一个 + 界面换皮(T31)一个 + 音频渠道(T27)一个
-    // + 声音锚(T32)一个 + 建音频任务的入口与队列(T33)两个。
+    // + 声音锚(T32)一个 + 建音频任务的入口与队列(T33)两个 + 语音接线(T35)一个。
     // **这份清单是显式的**:新增一个工具必须在这里露面,漏一个就红 ——
     // 于是"某个动作悄悄多了个 agent 入口"不可能没人看见(审读戳那条红线靠的就是它)。
     expect(tools.map((tool) => tool.name).sort()).toEqual([
@@ -99,6 +99,7 @@ describe('agent 工具(T10)', () => {
       'galfree_theme',
       'galfree_voice_anchor',
       'galfree_voice_batch',
+      'galfree_voice_wiring',
       'galfree_wire_audio',
     ])
 

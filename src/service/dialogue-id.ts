@@ -76,6 +76,20 @@ export function stripDialogueId(body: string): string {
 }
 
 /**
+ * 行尾 id 子句的**原文**(含前面的空格,如 ` id scene_one_0001`);没有就空串。
+ *
+ * 为什么需要它(2026-09-19 实测出来的坑):表单改一句台词时,那一行是**重建**出来的
+ * (`serializeDialogue`),于是**原有的 id 被悄悄丢掉** —— 而 id 是语音文件名的锚,
+ * 丢了的后果是**这一句从此没声音**(引擎按内容哈希去找一个不存在的文件)。
+ * 所以重建之后必须把**原样的子句**接回去:一字不改,连坏掉的形态也照原样留着
+ * (坏形态由解析器如实报错,不该在这一步被悄悄"修好")。
+ */
+export function idClauseTextOf(body: string): string {
+  const match = TRAILING_ID_CLAUSE_RE.exec(body)
+  return match === null ? '' : match[0].replace(/\s+$/, '')
+}
+
+/**
  * 场景文本 → **指纹口径的文本**:逐行剔掉行尾 id 子句。
  *
  * 单独成函数是因为它必须与解析器用**同一条**规则:两处各写一遍,迟早一处改了另一处没改
@@ -174,6 +188,14 @@ export interface DialogueRow {
   text: string
   /** **对话 id**:`.rpy` 里显式写了的用它,否则按 `dialogueIdFor(label, seq)` 派生。 */
   dialogueId: string
+  /**
+   * 这个 id 是**显式写在 `.rpy` 里**的吗?
+   *
+   * `false` = 只是我们按序号派生的(清单/任务账本用得上),但**引擎不认它** ——
+   * 没有显式 id 时 Ren'Py 用内容哈希当标识符,`auto_voice` 会去找一个不存在的文件。
+   * 所以语音能不能响,看的是这个字段,不是 `dialogueId` 有没有值。
+   */
+  stamped: boolean
 }
 
 /**
@@ -201,6 +223,11 @@ export function dialogueRowsOf(scenes: ReadonlyArray<DialogueSceneLike>): Dialog
         text: dialogue.text,
         // **显式 id 优先**:钉死文件名的那条路(ADR-0013);没有才按序号派生。
         dialogueId: dialogue.id ?? dialogueIdFor(scene.label, seq),
+        // 这一句在 `.rpy` 里**有没有**显式 id。
+        // 为什么单列一个字段(2026-09-19):派生的 id 与"引擎认的标识符"**不是一回事** ——
+        // 没有显式 id 时 Ren'Py 用的是**内容哈希**,`config.auto_voice` 于是找不到文件、
+        // **静默无声**。所以"清单里有 id"并不等于"这一句能出声",必须能分开看。
+        stamped: typeof dialogue.id === 'string' && dialogue.id !== '',
       })
       seq += 1
     }
