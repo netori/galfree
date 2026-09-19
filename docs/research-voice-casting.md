@@ -302,4 +302,76 @@
 ⚠️ **但先别急着跑批量**:§9.4 那两条口径还没定(夏晚不该出声、旁白要不要配)。
 现在把清单丢给任何一家 TTS,它都会**连旁白和夏晚一起念**(3,115 行)。
 
+---
+
+## 11. 真配了:两个女主 657 行(2026-09-19)
+
+作者定了口径:**只配两个女主角**(苏晴 + 夏晚),旁白与另外三个角色都不配。
+
+### 11.1 结果
+
+| 项 | 值 |
+|---|---|
+| 清单 | **657 行 / 8,599 字符**(苏晴 450 · 夏晚 207) |
+| 合成成功 | **655** |
+| 落盘 | `game/voice/<对话id>.ogg`,**655 个 / 11.7 MB**,经**写网关**收进(自动快照) |
+| 跳过(已存在) | 0 |
+| 失败 | **2** —— 见下 |
+| 成本 | 0.8 元/万字符 × 0.8599 万 ⇒ **¥0.69**;该模型有 1 万字符免费额度 ⇒ 实际 **¥0** |
+
+**那 2 条不是缺陷**:它们是 `c08_suqing_shift_0006` 与 `q06_wait_in_rain_0034`,
+原文都是 `"……"` —— **纯停顿记号,没有话可说**。上游回 400
+`Due to invalid text, invalid audio was returned` 是**对的**。
+处理后:**不给它们文件**(引擎找不到就不播,正是"这里没有声音"的意思)。
+刻意**没有**塞一段静音去把计数凑绿 —— 那是把数字弄好看,不是事实。
+
+导回报告逐条对得上:`imported 655` + `missing 2460`
+(其余说话人 2,458 行 + 这 2 条停顿)= 3,115 行,一行不差。
+
+### 11.2 一条**必须**遵守的硬事实:后缀只能是 `.ogg`
+
+模板写死 `define config.auto_voice = "voice/{id}.ogg"`,而引擎那条路是
+`renpy.loadable(fn, directory="audio")` → `loadable_core` → `transfn()`
+→ **对精确路径做 `os.path.isfile`**(实测 SDK `renpy/loader.py:753/715/782`
+与 `renpy/common/00voice.rpy:372`)。
+
+⇒ **`voice/<id>.mp3` 是找不到的** —— 后缀必须逐字对上。
+百炼回的是 wav,所以那条路里叫了一次 **ffmpeg 转 ogg(vorbis)**。
+(本机 ffmpeg 在 `C:\Users\20905\ffmpeg-shared\...\ffmpeg.exe`。)
+
+### 11.3 那条工具:`scripts/tts-bailian.mjs`
+
+可重入(已存在的产物跳过)、并发 3、429/5xx 退避重试。它**不写项目** ——
+产物落进 `--out` 投放目录,再由 `galfree_voice_batch(action:"import")` 经**写网关**收进去
+(ADR-0003/0004:项目文件的一切写走网关)。
+
+```bash
+node --experimental-strip-types scripts/tts-bailian.mjs \
+  --project D:/GALGAME/before_the_rain \
+  --characters su_qing,xia_wan \
+  --out .scratch/voice-out
+```
+
+**它用插件自己的解析器算 id**(`readRpyFiles` → `parseRpy` → `deriveGraph` → `dialogueRowsOf`),
+不是另写一套 —— 所以清单与 `galfree_voice_batch` **逐字一致**。这一点被导回结果证实:
+`duplicates: []`、`unknownFiles: []`,655 个文件名一个都没错。
+
+### 11.4 顺手暴露的两个建模缺口(值得单独一票)
+
+1. **登记簿没有"云端 voice_id"这个字段**。`voiceProfile` 是 **IndexTTS 形状**的:
+   `sample`(服务端音色库**文件名**)+ `speaker`(LoRA 名)+ `emotion`。
+   换到任何一家云端 TTS,它要的是一个 **voice_id** —— 现在只能塞进 `voiceProfile.note`,
+   由脚本正则取(`/voice_id\s+([A-Za-z0-9_-]+)/`)。要正经支持云端渠道,
+   这条档案得能表达"**属于哪条渠道 + 那个渠道里的 id 是什么**"(ADR-0012 的三条渠道思路是对的,
+   只是档案的形状还是单一渠道的)。
+2. **"不配音的角色"没有表达方式**(§9.4 第二条)。这次靠**命令行参数**绕过去了
+   (`--characters su_qing,xia_wan`),但板子本身仍然分不清"设计上不配"与"还没配"。
+
+### 11.5 还没做的
+
+- **没做响度归一化**:各家 TTS 默认音量不一,跨角色可能一大一小。真听出来再在 ffmpeg 那步加 `loudnorm`。
+- **没试听**:音色对不对、语气合不合适,**只有人能说**(覆盖试玩那一步)。
+- 另外三个角色(陈屿 414 行、周洋 57、苏阳 29)与旁白(1,958 行)**没有配** —— 按作者口径。
+
+
 
