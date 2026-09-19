@@ -278,6 +278,36 @@ button.slotChip:disabled { opacity: 0.5; cursor: default; }
 .commitSubject { flex: 1; min-width: 0; font-size: 12.5px; }
 .commitWhen { font-size: 11px; color: var(--gf-text-4); flex: none; font-variant-numeric: tabular-nums; }
 
+/* ─── 设定集的章节行 ──────────────────────────────────────────────────
+ *
+ * **不能复用 `.commitRow` 那一套**(2026-09-19 实测踩到,截图里标题被压成一列汉字):
+ * 那一套是给 git 提交行设计的 —— "一个固定宽的(哈希)+ 一个弹性的(主题)+ 一个固定的(时间)"。
+ * 时间戳很短,所以 `flex: none` 是对的。
+ *
+ * 但章节行右边挂的是**这一章覆盖的全部 label**(一部戏几十个),
+ * 那串东西又长、又 `flex: none`(不收缩)⇒ 两头出错:
+ *   1. 它把行撑到容器之外(溢出屏幕);
+ *   2. 它把中间那个 `flex: 1; min-width: 0` 的标题挤到**几乎零宽** ——
+ *      而中文**任意两字之间都能断行**,于是标题变成一列,一个字一行。
+ *
+ * 所以章节行自己一套:标题给一个**容得下中文的最小宽度**(不许被挤没),
+ * 场景列表**另起一行**自己换行(它本来就没有理由跟标题抢同一行)。 */
+
+.chapterRow { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 9px; padding: 8px 0; }
+.chapterRow + .chapterRow { border-top: 0.5px solid var(--gf-border); }
+.chapterId { font-family: var(--gf-mono); font-size: 11px; color: var(--gf-text-3); flex: none; }
+/* `min-width` 是这里的要害:不给它,中文标题就会被右边那串 label 挤成一列。 */
+.chapterTitle { flex: 1 1 auto; min-width: 11em; font-size: 12.5px; }
+/* `flex: 1 1 100%` = 永远另起一行;自己软换行,不再跟标题抢宽度。 */
+.chapterScenes {
+  flex: 1 1 100%;
+  font-family: var(--gf-mono);
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--gf-text-4);
+  overflow-wrap: anywhere;
+}
+
 .diff {
   font-family: var(--gf-mono);
   font-size: 11.5px;

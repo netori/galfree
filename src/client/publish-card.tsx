@@ -145,7 +145,16 @@ export function PublishCard({ api, hasProject, onChanged, onNotice }: {
                   last.artifacts.map((artifact) => (
                     <div key={artifact.path} className={s.commitRow}>
                       <span className={s.sceneLabel} style={{ flex: 'none' }}>{artifact.name}</span>
-                      <span className={s.sceneWhere} title={artifact.path} style={{ wordBreak: 'break-all' }}>{artifact.path}</span>
+                      {/* 产物路径是**绝对路径**(可以很长),而 `.sceneWhere` 是 `flex: none`(不收缩)
+                          —— 照原样放会像章节行那样把这一行撑出面板(2026-09-19 同一类问题)。
+                          这里就地覆盖成"可收缩 + 省略号",完整路径仍在 title 里悬停可见。 */}
+                      <span
+                        className={s.sceneWhere}
+                        title={artifact.path}
+                        style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                      >
+                        {artifact.path}
+                      </span>
                       <span className={s.sceneStamp}><Chip tone="quiet">{Math.round(artifact.bytes / 1024 / 1024 * 10) / 10} MB</Chip></span>
                     </div>
                   ))

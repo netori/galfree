@@ -129,13 +129,15 @@ export function BibleCard({ bibleStamp, api, hasProject, sceneLabels, onChanged,
             {chapters.length > 0 ? (
               <div style={{ marginTop: 8 }}>
                 {chapters.map((chapter) => (
-                  <div key={chapter.id} className={s.commitRow}>
-                    <span className={s.commitHash}>{chapter.id}</span>
-                    <span className={s.commitSubject}>
+                  <div key={chapter.id} className={s.chapterRow}>
+                    <span className={s.chapterId}>{chapter.id}</span>
+                    <span className={s.chapterTitle}>
                       {chapter.title}
                       {chapter.outline === undefined ? null : <span style={{ color: 'var(--gf-text-3)' }}> · {chapter.outline}</span>}
                     </span>
-                    <span className={s.commitWhen}>
+                    {/* 场景列表**另起一行**自己换行:几十个 label 跟标题挤同一行,
+                        会把标题挤成一列汉字(见 panel.module.css 的 `.chapterRow` 说明)。 */}
+                    <span className={s.chapterScenes}>
                       {chapter.scenes.length === 0 ? '未挂场景' : chapter.scenes.map((label) => `#${label}`).join(' ')}
                     </span>
                   </div>
