@@ -78,9 +78,12 @@ describe('cleanupTempDirs(夹具退避)', () => {
     expect(failed).toEqual([])
   })
 
-  it('进程占着目录一会儿 → 退避之后仍然删得掉(**不**误报失败)', async () => {
-    // 这就是慢带那条红的形状:进程刚被杀、文件还没放开。
-    // 先确认"占着的时候真的删不掉" —— 否则这条用例是空的(实测过 cwd 会抛 EPERM)。
+  // 下面两条只能在 Windows 上构造:POSIX 不允许"活进程占着 cwd"阻止删除。
+  // 用 `skipIf` 而不是提前 return —— 后者会把"什么都没跑"报成**通过**,那是假绿。
+  const onWindows = process.platform === 'win32'
+
+  it.skipIf(!onWindows)('进程占着目录一会儿 → 退避之后仍然删得掉(**不**误报失败)', async () => {
+    // 这条盯的是 **Windows** 的形状:进程刚被杀、目录还占着,`rm` 先抛后成。
     const dir = await makeTempDir('galfree-cleanup-lock-')
     await writeFile(join(dir, 'renpy.exe'), 'fake', 'utf8')
     const child = holdCwd(dir, 250)
@@ -99,7 +102,7 @@ describe('cleanupTempDirs(夹具退避)', () => {
     expect(existsSync(dir)).toBe(false)
   })
 
-  it('真删不掉 → **如实报路径**,不静默(临时目录在漏要看得见)', async () => {
+  it.skipIf(!onWindows)('真删不掉 → **如实报路径**,不静默(临时目录在漏要看得见)', async () => {
     const dir = await makeTempDir('galfree-cleanup-stuck-')
     await writeFile(join(dir, 'renpy.exe'), 'fake', 'utf8')
     // 占住整个退避窗口都不放(5s 远大于约 1.9s 的总退避)。
@@ -114,4 +117,18 @@ describe('cleanupTempDirs(夹具退避)', () => {
     expect(existsSync(dir)).toBe(true)
     // 收尾交给 afterEach(它会先杀掉进程再删)。
   }, 30_000)
+
+  it.skipIf(onWindows)('POSIX:进程占着 cwd **不**阻止删除(所以那套退避在那边是空转,不是必需)', async () => {
+    // 把平台差异写成断言,而不是让它变成一个"在 CI 上莫名红"的坑。
+    const dir = await makeTempDir('galfree-cleanup-posix-')
+    await writeFile(join(dir, 'renpy.exe'), 'fake', 'utf8')
+    const child = holdCwd(dir, 2000)
+    spawned.push(child)
+    await new Promise((resolve) => setTimeout(resolve, 150))
+
+    let blocked = false
+    try { rmSync(dir, { recursive: true, force: true }) } catch { blocked = true }
+    expect(blocked).toBe(false)
+    expect(existsSync(dir)).toBe(false)
+  })
 })

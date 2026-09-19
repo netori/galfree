@@ -1,0 +1,113 @@
+# CI:GALFree 的**机械保证**。
+#
+# 为什么要有这一份:这个项目的验收方式是"快带 + 慢带 + 发版前必跑",而在有 CI 之前
+# 那三条全靠人记得跑 —— 也就是说,规矩写在文档里,却没有东西替它把关。
+#
+# 分成两条:
+#   1. `fast`(每次 push / PR,双平台矩阵)—— 无网络、无真 SDK,应当永远跑得动;
+#   2. `slow`(**只能手动触发**)—— 要下载钉版 SDK(155MB)、要真起 Ren'Py 窗口、
+#      还要真打一次包(实测 60 秒上下)。**托管 runner 没有显示器**,所以它不适合
+#      挂在每次 push 上;发版前在**有显示器的机器**上手动跑一次(见下面说明)。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支上新的推送取消掉还在跑的旧任务(省额度,也让结果跟最新代码对得上)。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── 快带:typecheck + build + 测试(无网络、无真 SDK)──────────────────────
+  fast:
+    name: fast (${{ matrix.os }} / node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 一个平台红了也让另一个跑完:两个平台的信息都要,不要互相掩盖。
+      fail-fast: false
+      matrix:
+        # 开发机是 Windows,所以 Windows 这条腿是"与日常一致"的那条;
+        # Ubuntu 那条腿是**跨平台哨兵** —— 插件是给别人装的,不该只在一种系统上成立。
+        os: [ubuntu-latest, windows-latest]
+        node: ['22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `npm ci` 会跑 `prepare`(=> npm run build),所以 lib/ 在这一步就出来了;
+      # 若 package.json 与 lock 不同步,这一步会**直接失败** —— 那正是我们要的早失败。
+      - name: 安装依赖(含 prepare 构建)
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      # 显式再构建一次:上一步的 prepare 已经构建过,但"构建本身能过"值得单独一条记录
+      # (它也是别人从仓库安装时的必经之路)。
+      - name: 构建
+        run: npm run build
+
+      - name: 快带
+        run: npm test
+
+      # 构建产物是宿主要加载的那一半:没有它,插件装上也是死的。
+      # 这一步把"装出来的东西真的存在"钉住。
+      # 用 node 而不是 shell:两条腿(ubuntu / windows)行为完全一致,
+      # 不必赌 windows runner 上 `shell: bash` 的可用性。
+      - name: 断言产物存在(宿主加载的就是它)
+        run: |
+          node -e "const fs=require('fs');const need=['lib/index.js','lib/client.js'];const missing=need.filter(f=>!fs.existsSync(f));if(missing.length){console.error('::error::缺构建产物: '+missing.join(', ')+' —— 宿主/面板加载不到插件');process.exit(1)}console.log('产物齐全: '+need.join(', '))"
+
+  # ── 慢带:真钉版 SDK(只能手动)─────────────────────────────────────────
+  #
+  # 为什么**不**挂在 push 上:这条带子会
+  #   - 下载钉版 Ren'Py SDK(约 155MB);
+  #   - **真起一个游戏窗口**并等它 25 秒(托管 runner 没有显示器,这条没有意义);
+  #   - 真跑一次 `build_dists` 并且**启动打出来的主程序**(实测 60 秒上下)。
+  # 所以它属于"发版前、在有显示器的机器上手动跑一次"。
+  #
+  # 手动跑法:仓库 → Actions → CI → Run workflow。
+  # 想少下 155MB:先自备 SDK,再把 `GALFREE_SDK_DIR` 指向它(见 sdk.slow.test.ts 文件头)。
+  slow:
+    name: slow (手动 · 需要显示器 + 真 SDK)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖(含 prepare 构建)
+        run: npm ci
+
+      - name: 慢带(真 SDK lint/compile + 试玩 + 打包)
+        run: npm run test:slow
+        env:
+          # 让测试打印得更完整,失败时好定位(慢带的失败往往只有一行 traceback)。
+          CI: 'true'
+
+      - name: 失败时留下日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slow-band-logs
+          path: |
+            **/traceback.txt
+            **/log.txt
+          if-no-files-found: ignore
+          retention-days: 7

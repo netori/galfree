@@ -177,6 +177,21 @@ describe('参考链一致性回路(T16)', () => {
     await cleanupTempDirs()
   })
 
+  /**
+   * 任务应当成功到「待复审」;没到就把**失败原话**带进断言消息。
+   *
+   * 为什么值得单独一个 helper:这一组用例跑的是**真本地 HTTP**(假上游),
+   * 满载时会偶发地连不上 —— 那时断言只会说 `expected 'failed' to be 'awaiting-review'`,
+   * 而**为什么** failed 全在 `lastError` 里。少了这一句,下一次红又要从头复现一遍。
+   * (与 `async-image.test.ts` 那条"传输层失败"的教训同一件事:两种失败要说得出区别。)
+   */
+  const expectAwaitingReview = (task: GenerationTask): void => {
+    expect(
+      task.state,
+      `任务没到 awaiting-review(实际 ${task.state});lastError=${task.lastError ?? '(无)'}`,
+    ).toBe('awaiting-review')
+  }
+
   // ── AC1:差分批量任务参数含正确链引用 ────────────────────────────────
 
   it('AC1 差分批量:主视觉先出,每个差分自动携登记簿的链引用(假上游看得到)', async () => {
@@ -187,7 +202,7 @@ describe('参考链一致性回路(T16)', () => {
 
     // 1) 顺序:主视觉先出(差分要拿它当锚),差分的顺序不被人为打乱。
     expect(tasks.map((task) => task.slot)).toEqual(['xiao_tang base', 'xiao_tang smile', 'xiao_tang angry'])
-    for (const task of tasks) expect(task.state).toBe('awaiting-review')
+    for (const task of tasks) expectAwaitingReview(task)
 
     // 2) 任务参数:主视觉不带链(自己参考自己没有意义),两个差分各带一条。
     expect(tasks[0]!.referenceImages).toEqual([])
@@ -240,7 +255,7 @@ describe('参考链一致性回路(T16)', () => {
     expect(task.degradation?.droppedReferenceImages.map((reference) => reference.path)).toEqual(['game/images/xiao-tang-ghost.png'])
     expect(task.degradation?.notes.join(' ')).toContain('还不存在')
     // 任务照样跑完 —— 降级不是失败(与 T14 的降级纪律同一条)。
-    expect(task.state).toBe('awaiting-review')
+    expectAwaitingReview(task)
 
     // 发出去的请求里没有那张不存在的图。
     const call = upstream.calls.at(-1)!
@@ -256,7 +271,7 @@ describe('参考链一致性回路(T16)', () => {
 
     expect(task.degradation?.code).toBe('reference-chain-unsupported')
     expect(task.degradation?.droppedReferenceImages).toHaveLength(1)
-    expect(task.state).toBe('awaiting-review')
+    expectAwaitingReview(task)
     expect(upstream.calls.at(-1)!.body.image).toBeUndefined()
   })
 
@@ -310,7 +325,7 @@ describe('参考链一致性回路(T16)', () => {
     // (先建齐再统一跑的实现会在这里留下 reference-missing —— 那正是这条用例守的东西。)
     for (const slot of ['xiao_tang smile', 'xiao_tang angry']) {
       const task = tasks.find((candidate) => candidate.slot === slot)!
-      expect(task.state).toBe('awaiting-review')
+      expectAwaitingReview(task)
       expect(task.degradation).toBeUndefined()
       expect(task.referenceImages.map((reference) => reference.path)).toEqual([slotAssetPath('xiao_tang base')])
     }
@@ -342,7 +357,7 @@ describe('参考链一致性回路(T16)', () => {
     expect(task.degradation?.code).toBe('reference-truncated')
     expect(task.degradation?.droppedReferenceImages.map((reference) => reference.path)).toEqual([slotAssetPath('xiao_tang smile')])
     expect(task.degradation?.notes.join(' ')).toContain('只收一张')
-    expect(task.state).toBe('awaiting-review')
+    expectAwaitingReview(task)
   })
 
   it('AC1 上游拒掉参考图时,失败原因要**可执行**(不是一句"失败了")', async () => {
