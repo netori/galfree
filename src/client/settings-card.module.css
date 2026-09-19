@@ -172,15 +172,18 @@
 
 /* 音频渠道那一段(T27)与图像那段之间的分隔与标题 —— 两条渠道是两个块,要有看得见的分界。
    颜色走宿主令牌(与本文件其他部分同一口径);不新造颜色名。 */
+/* 这一页有**四段**(图像 / 发布输出 / 音乐 / 语音)。
+   分隔与组标题都要**看得出来** —— 2026-09-19 的教训:四段挤在一起、卡片又自称"图像渠道",
+   于是"想配 TTS 的人找不到语音那一段"。不是没做,是**找不到**。 */
 .divider {
   height: 1px;
-  margin: 4px 0;
+  margin: 18px 0 12px;
   background: var(--dsw-alias-border-l3);
 }
 
 .groupTitle {
   margin: 0;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.02em;
 }

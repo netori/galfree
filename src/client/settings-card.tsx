@@ -211,9 +211,9 @@ class SectionBoundary extends Component<{ children: ReactNode }, { error: string
   override render(): ReactNode {
     if (this.state.error === null) return this.props.children
     return (
-      <section className={s.card} aria-label="GALFree 图像渠道">
+      <section className={s.card} aria-label="GALFree 渠道设置">
         <header className={s.head}>
-          <h3 className={s.title}>GALFree · 图像渠道</h3>
+          <h3 className={s.title}>GALFree · 渠道与输出</h3>
         </header>
         <p className={s.error}>这个设置界面渲染失败了(如实报出来,而不是留一片空白):{this.state.error}</p>
         <p className={s.hint}>请把上面这行原文报告给插件作者;项目的出图功能不受影响。</p>
@@ -238,9 +238,9 @@ export function ChannelSettingsCard({ ctx }: { ctx: SettingsCardContext }) {
   }
   if (missing.length > 0) {
     return (
-      <section className={s.card} aria-label="GALFree 图像渠道">
+      <section className={s.card} aria-label="GALFree 渠道设置">
         <header className={s.head}>
-          <h3 className={s.title}>GALFree · 图像渠道</h3>
+          <h3 className={s.title}>GALFree · 渠道与输出</h3>
         </header>
         <p className={s.error}>
           这个宿主没有给本插件装配设置服务(缺:{missing.join('、')})。渠道暂时没法在这里配 ——
@@ -388,12 +388,18 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
   }
 
   return (
-    <section className={s.card} aria-label="GALFree 图像渠道">
+    <section className={s.card} aria-label="GALFree 渠道设置">
       <header className={s.head}>
-        <h3 className={s.title}>GALFree · 图像渠道</h3>
+        <h3 className={s.title}>GALFree · 渠道与输出</h3>
         <p className={s.desc}>
-          素材出图走这里配的端点(Host 直连,不消耗对话回合)。密钥明文存在本机设置文档里
-          (ADR-0010 的知情选择):它不进项目目录、不进快照、不进任务账本。
+          这一页配**四条生成线各自的渠道**,外加发布输出目录 —— 从上到下依次是:
+          <b>图像</b>(素材出图)、<b>发布输出目录</b>、<b>音乐生成</b>、<b>语音(TTS)生成</b>。
+          各条**互不影响**:某一条留空 = 那条没配,对应动作会如实拒绝(不假装能出),
+          也不会拖累别条。都走 Host 直连,不消耗对话回合。
+          密钥**明文**存在本机设置文档里(ADR-0010 的知情选择):不进项目目录、不进快照、不进任务账本。
+          <br />
+          <b>只想配语音(TTS)?</b>往下滚到「语音(TTS)生成渠道」那一段 —— 它有独立的端点、
+          密钥、渠道名与模型目录,与音乐那条分开填。
         </p>
       </header>
 
