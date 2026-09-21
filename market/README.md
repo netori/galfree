@@ -29,12 +29,15 @@
 >    资产 sha256 一致;用 `installTargetFor()` 的判定规则在**冷 store、零 allowBuilds** 的
 >    干净目录里实测安装 **768ms** 成功、`lib/` 就位、宿主半 import 正常。
 >    本地自检脚本:`npm run check:market`。
-> 5. 🟡 **npm 那条路已备好但没走**:`package.json` 加了 `repository` 与 `publishConfig`
->    (官方 registry),`peerDependencies` 的预发布范围实测放行 `0.1.5-alpha.2 / -rc.2 / 0.1.5`
->    (比 contributing 里那个示例更贴合当前 harness)。只差一次 `npm login` +
->    `npm publish --access public`(本机当前 `npm whoami` 是 `ENEEDAUTH`)。
->    发了 npm 就不必在 yml 里写任何字段 —— 映射从 registry 自动采集,而且 contributing
->    明确说**手写 `npm:` 会被校验拒绝**。
+> 5. 🟡 **npm 那条路已备好,但作者决定先不发**(2026-09-21):`package.json` 去掉了
+>    `private` 并补了 `repository` / `publishConfig`(官方 registry + public),
+>    仓库根 `.npmrc` 钉了官方源,`npm run release:npm` 是可用的发布脚本
+>    (前置检查 → publish → 从 registry 读回来核对),流程写在 `docs/release-to-npm.md`。
+>    **卡在哪**:`npm login` 是交互式的,只有人能跑(本机当前 `npm whoami` 是 `ENEEDAUTH`)。
+>    发了 npm 就不必在 yml 里写任何字段 —— 映射从 registry 自动采集
+>    (脚本实测:contributing 明确说**手写 `npm:` 会被校验拒绝**)。
+>    发完那条路给用户的命令是 `dsh plugin --profile web add dsh-galfree`,与 `tarball:`
+>    这条路等效(都不构建),只是多一个下载量数字。
 
 对照 `awesome-dsh-plugin/awesome-dsh-plugin` 的
 [contributing.md](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/blob/main/contributing.md)
