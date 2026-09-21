@@ -91,14 +91,119 @@ npm run build          # lib/index.js(ESM host)+ lib/client.js(web bundle)
 
 ## 安装(人工验收)
 
-以本仓库为插件源,按标准 DSH 插件流程安装(设置 → 插件 → 从本地/仓库添加);
-装载后侧边栏出现「GALFree 工作台」入口。
+装载后侧边栏出现「GALFree 工作台」入口。三条装法,**推荐第一条**。
+
+### ① 从插件市场装 / 预构建包(不需要 git,也不需要构建授权)
+
+`v0.1.0` 起,发行物挂在 GitHub Release 上,资产名**不带版本号**,所以
+`latest/download` 这条链接不会随发版腐烂:
+
+```
+dsh plugin add https://github.com/netori/galfree/releases/latest/download/dsh-galfree.tgz
+```
+
+实测(冷 store,桌面端自带的 pnpm 11.8.0):**768ms 装完**,`lib/index.js` /
+`lib/client.js` / `cordis.patch.yml` 全部就位,**不跑任何安装期构建** ——
+所以没有 `allowBuilds` 那一步,也不需要机器上装过 git
+(`file:` / tarball 依赖 pnpm 不跑 `prepare`,包里的 `prepare` 原样留着也无事)。
+
+**市场条目**(`dsh-market` / 社区市场会读到的那条)在
+[`market/netori__galfree.yml`](market/netori__galfree.yml):`url` + `name` + `category` +
+双语句描述 + `tarball:` 字段。市场的 `installTargetFor()` 规则是
+**repo 验过的 npm 包 > 作者提供的预构建 tarball > `github:owner/repo`** ——
+我们走的是第二条,所以市场给用户的安装目标就是上面这条 `.tgz`。
+本地自检(复刻市场的 tarball 绑定校验 + `latest/download` 腐烂陷阱):
+
+```bash
+node scripts/check-market-entry.mjs market/netori__galfree.yml
+```
+
+⚠️ 条目进市场**要往 `awesome-dsh-plugin` 提 PR**(一个文件 = 全部投稿,见
+`market/README.md`)。**目前还没提** —— 所以现在市场里搜不到,得先用上面那条命令。
+
+**发到 npm 是另一条更省事的路**(市场会优先用它,而且不用往 `awesome-dsh-plugin` 提条目):
+`package.json` 已经为此备好 `repository` 与 `publishConfig`(指向官方 registry),
+只差一次 `npm login` + `npm publish --access public`。本机当前 `npm whoami` 未登录(ENEEDAUTH),
+所以这一步要么在本机登录,要么交给 CI(见 `market/README.md`)。
+
+### ② 从仓库源码装(会现场构建一次,要过 pnpm 的构建授权)
 
 **从仓库安装时它会现场构建一次**(仓库里不带 `lib/`,`package.json` 的 `prepare`
 负责构建;这是 DSH 对 git 插件的既定方式)。pnpm 默认**拦下**安装期构建脚本,所以第一次
 会失败并打印一个 key —— 把那个 key 原样填进 profile 的 `pnpm-workspace.yaml` 的
 `allowBuilds`,再装一次即可(`~/.dsh/profiles/<profile>/pnpm-workspace.yaml`)。
-不想走构建也行:装发到 npm 的预构建包(那样会跳过这一步)。
+
+### 从仓库装,第一次一定失败 —— 那一步是设计如此(2026-09-19 冷 store 实测)
+
+**症状**(原话,用桌面端自带的 pnpm 11.8.0 在一个**空 store** 的干净目录里复现):
+
+```
+[ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED] Failed to prepare git-hosted package fetched from
+"https://codeload.github.com/netori/galfree/tar.gz/<commit>": The git-hosted package
+"dsh-galfree@0.1.0" needs to execute build scripts but is not in the "allowBuilds" allowlist.
+
+Add the package to "allowBuilds" in your project's pnpm-workspace.yaml to allow it to run scripts. For example:
+allowBuilds:
+  dsh-galfree@https://codeload.github.com/netori/galfree/tar.gz/<commit>: true
+```
+
+**触发条件(实测出来的,不是推理)**:这条拦的是「**第一次**从 git 装一个
+**带 `prepare` 而不带 `lib/`** 的包」—— 也就是**冷 store(cafs 里还没有这份已构建的产物)**。
+pnpm 对 git 依赖会先跑 `prepare`(它把 `npm install` → `prepare` → `tsdown` 真跑一遍);
+构建脚本默认不许跑,于是它**抛错而不是跳过**,`lib/` 就不会出现。
+一旦这份构建产物进了 store,**之后所有安装都直接复用、不再问授权**
+(实测:同一台机器、同一个 commit,冷 store 必红;而 store 里有了之后
+`allowBuilds` 写不写都过、2.8 秒装完)。
+
+**修法**:把 pnpm 打印的**那一整行 key 逐字**(带 `@https://codeload…` 与 commit 哈希)
+填进 `~/.dsh/profiles/<profile>/pnpm-workspace.yaml`,再装一次:
+
+```yaml
+allowBuilds:
+  'dsh-galfree@https://codeload.github.com/netori/galfree/tar.gz/<commit>': true
+```
+
+实测(冷 store + 这一条):构建自动跑起来(`npm-install` → `prepare` → `tsdown` 全在输出里),
+`node_modules/dsh-galfree/lib/index.js` 就位,装完。
+
+⚠️ **只写 `dsh-galfree: true` 不行**(冷 store 实测**照样报同一个错**)——
+key 认的是**带 commit 的完整依赖键**;而且用 `github:owner/repo` 这种没钉 commit 的写法时,
+上游一有新提交键里的哈希就变,**同一个症状会再出现一次**,照新打印的那行再填一条即可。
+
+### 从仓库装不上时的另一条路:预构建 tarball(不需要对方装 git)
+
+作者侧一条命令打出 320KB 的预构建包(里面已含 `lib/` 与 `cordis.patch.yml`):
+
+```bash
+npm pack            # 产出 dsh-galfree-0.1.0.tgz
+```
+
+对方那侧(`<tgz>` 换成实际路径):
+
+```bash
+dsh plugin add file:<tgz>
+```
+
+实测两点,都值得记下:
+- **这条路完全不碰 git** —— pnpm 对 `file:` / tarball 依赖**不跑 `prepare`**
+  (包里的 `prepare` 原样留着也无事),于是**没有构建授权那一步**,
+  干净目录里 1.5 秒装完、`lib/index.js` 就位;
+- 仍会有 peer 警告(`react` / `@deepseek-ai/*` 由宿主供给),那是预期的,不是失败。
+
+**拿到的是解压好的目录**就用 `link:`(实测 91ms 装完,同样不跑构建脚本、不需要 `allowBuilds`;
+改代码重启宿主即可生效):
+
+```yaml
+dependencies:
+  dsh-galfree: link:E:/DSH_project/DSH_creator
+```
+
+**tarball 里有什么**(`npm pack --dry-run` 实列,共 8 个文件):
+`package.json` / `lib/index.js` / `lib/client.js` / `cordis.patch.yml` /
+`README.md` / `LICENSE` / `docs/contracts/*.md`。
+仓库里没有 `templates/` 这个目录 —— 新建项目用的界面文件与中文字体是**装好之后**从钉版 SDK
+(或按设置里的 `sdkPath` 指向的既有 SDK)拷进项目的,所以 tarball 里没有它是正常的,
+**不表示打包缺料**。
 
 **自己改代码**时不必依赖 `prepare`:在**本仓库目录里**跑
 

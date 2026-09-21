@@ -1,11 +1,47 @@
-# 申请进入 DSH 插件市场的现状(2026-09-14)
+# 申请进入 DSH 插件市场的现状
+
+> ## 🔄 现状(2026-09-21 更新)
+>
+> 1. ✅ **仓库已公开**、已加 `dsh-plugin` topic、创建满 1 天 —— 收录门槛全过;
+> 2. ✅ **条目早就在市场里了**(PR #5429,2026-09-19 合并)。但**市场给用户的安装命令
+>    是从源码构建的那条**:
+>
+>    ```
+>    dsh plugin --profile web add github:netori/galfree
+>    ```
+>
+>    于是每个用户都会撞上 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`(冷 pnpm store 上第一次必红,
+>    要人手工往 `pnpm-workspace.yaml` 填一条**带 commit 哈希**的 allowBuilds key,
+>    而且上游一 push 那个 key 就失效)—— 这就是"别人安装会报错"的真身。
+> 3. 🚀 **修法已提 PR**:
+>    **[awesome-dsh-plugin#5572](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/5572)**
+>    —— 往我们那条条目加一个 `tarball:` 字段,指向 `v0.1.0` Release 上的预构建资产。
+>    合并后市场给的安装目标会变成那份 `.tgz`(参考同类条目,页面上的 `install` 字段会变成
+>    `dsh plugin --profile web add "<tarball URL>"`),**不拉整仓、不跑安装期构建、
+>    不需要 allowBuilds 授权**。
+>
+>    为什么这条正是 contributing.md 为这种情形留的路:它写着「不发 npm 也可以:把预构建 tarball
+>    附加到 GitHub Release,并用可选的 `tarball:` 字段指向它」,**并注明"如果你的仓库根本无法
+>    从源码安装,这一项是必需的"** —— 我们这种"仓库不带 `lib/`、靠 `prepare` 现场构建"的,
+>    正是那一种。资产名**不带版本号**,所以 `latest/download` 不会随发版 404。
+> 4. ✅ **本地已把 CI 的判据跑过**:`validateEntries()` 全库 0 问题;`tarballProblem()` 通过
+>    (`https` + `github.com` + 同 owner/repo + `/releases/` + `.tgz`);下载该 URL 的字节与上传的
+>    资产 sha256 一致;用 `installTargetFor()` 的判定规则在**冷 store、零 allowBuilds** 的
+>    干净目录里实测安装 **768ms** 成功、`lib/` 就位、宿主半 import 正常。
+>    本地自检脚本:`npm run check:market`。
+> 5. 🟡 **npm 那条路已备好但没走**:`package.json` 加了 `repository` 与 `publishConfig`
+>    (官方 registry),`peerDependencies` 的预发布范围实测放行 `0.1.5-alpha.2 / -rc.2 / 0.1.5`
+>    (比 contributing 里那个示例更贴合当前 harness)。只差一次 `npm login` +
+>    `npm publish --access public`(本机当前 `npm whoami` 是 `ENEEDAUTH`)。
+>    发了 npm 就不必在 yml 里写任何字段 —— 映射从 registry 自动采集,而且 contributing
+>    明确说**手写 `npm:` 会被校验拒绝**。
 
 对照 `awesome-dsh-plugin/awesome-dsh-plugin` 的
 [contributing.md](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/blob/main/contributing.md)
 逐条核过。**投稿数据是 `market/netori__galfree.yml`**(一个文件就是全部投稿;
 两个 README 由 `data/plugins/*.yml` 自动生成,不要手工编辑)。
 
-## 一句话结论
+## 一句话结论(2026-09-14 的原始记录,阻塞项见上面的更新)
 
 **代码这一侧全部达标。** 阻塞/待办共三类,都不是"写得对不对"的问题:
 

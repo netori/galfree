@@ -16,6 +16,15 @@
     "node": ">=22.0.0"
   },
   "main": "lib/index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/netori/galfree.git"
+  },
+  "homepage": "https://github.com/netori/galfree#readme",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
@@ -51,6 +60,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:slow": "vitest run --config vitest.slow.config.ts",
+    "check:market": "node scripts/check-market-entry.mjs market/netori__galfree.yml",
     "clean": "node -e \"require('fs').rmSync('lib',{recursive:true,force:true})\""
   },
   "peerDependencies": {
