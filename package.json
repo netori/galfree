@@ -10,7 +10,6 @@
     "galgame",
     "workbench"
   ],
-  "private": true,
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
@@ -61,6 +60,7 @@
     "test:watch": "vitest",
     "test:slow": "vitest run --config vitest.slow.config.ts",
     "check:market": "node scripts/check-market-entry.mjs market/netori__galfree.yml",
+    "release:npm": "node scripts/publish-npm.mjs",
     "clean": "node -e \"require('fs').rmSync('lib',{recursive:true,force:true})\""
   },
   "peerDependencies": {
