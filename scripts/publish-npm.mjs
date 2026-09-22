@@ -29,8 +29,23 @@ function run(command, commandArgs, options = {}) {
   return execFileSync(command, commandArgs, { encoding: 'utf8', stdio: options.capture === false ? 'inherit' : 'pipe', ...options })
 }
 
+/**
+ * npm 在 Windows 上是 `npm.cmd`,Node 不套 shell 起不来(ENOENT ⇒ status=null),
+ * 而那正好会被下面的登录检查**误读成"没登录"**。所以 npm 一律走 shell 调用;
+ * git 是 .exe,不需要(也避免 shell 解析参数)。
+ */
 function npm(commandArgs, options) {
-  return run('npm', [...commandArgs, '--registry=' + REGISTRY], options)
+  return run('npm', [...commandArgs, '--registry=' + REGISTRY], { shell: true, ...options })
+}
+
+/**
+ * 把"命令起不来"和"命令跑失败"分开报 —— 否则同一个"没登录"的结论会把
+ * 一个执行环境的故障说成凭据问题(本脚本 v1 就踩过这个坑)。
+ */
+function npmErrorText(error) {
+  const stderr = String(error?.stderr ?? '').trim()
+  const stdout = String(error?.stdout ?? '').trim()
+  return (stderr || stdout || error?.message || 'no output').split('\n').slice(-4).join(' | ')
 }
 
 console.log(`包:${pkg.name}@${pkg.version}`)
@@ -40,8 +55,9 @@ console.log(`目标:${REGISTRY}(${pkg.publishConfig?.access ?? 'default'} access
 let who
 try {
   who = npm(['whoami']).trim()
-} catch {
-  console.error('✗ 没登录官方 registry。先跑:npm login --registry=' + REGISTRY)
+} catch (error) {
+  console.error('✗ 拿不到官方 registry 上的身份。npm 的原话:\n  ' + npmErrorText(error))
+  console.error('  是凭据问题就跑:npm login --registry=' + REGISTRY)
   process.exit(1)
 }
 console.log(`✓ 已登录:${who}`)
