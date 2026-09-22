@@ -43,7 +43,8 @@ export const REQUIRED_TOOLS = [
 /** 面向人的安装指引(错误信息里直接给,别让人去猜)。 */
 const HOW_TO_INSTALL = [
   '装法:把 dsh-galfree 装进这个 profile(插件市场 / `dsh` 插件设置,或 profile 的 bundles 里加一行),',
-  '然后重启宿主;preset 与插件不在同一个地方 —— 见 presets/galgame/README.md 的「两种装法」。',
+  '然后重启宿主;preset 与插件不在同一个地方 —— 从插件包自带的 presets/galgame/ 取本目录的说明:',
+  '从市场/npm 装的在 <profile>/node_modules/dsh-galfree/presets/galgame/;仓库 checkout 里就是 presets/galgame/。',
 ].join('')
 
 /**

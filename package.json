@@ -1,6 +1,6 @@
 {
   "name": "dsh-galfree",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "GALFree — Ren'Py galgame full-pipeline workbench plugin for DeepSeek Harness. Host-side project service (write gateway, git snapshots, dialect-subset parser, derived progress, review stamps, pinned SDK validation, playtest) behind one deep seam; the workbench is an embedded web panel consuming the same state.",
   "keywords": [
     "deepseek-harness",
@@ -32,6 +32,7 @@
   },
   "files": [
     "lib/**/*.js",
+    "presets",
     "templates",
     "cordis.patch.yml",
     "docs/contracts",

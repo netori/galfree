@@ -26,15 +26,30 @@ preset 的规则很简单:**一个 preset = 一个目录,目录名就是 id**。
 `<dshHome>/.agent-presets/<id>/`(本机 `~/.dsh/.agent-presets/`),id 必须匹配
 `[a-z0-9][a-z0-9-]*`。
 
+**四个文件就是全部**(`preset.yml` / `agent.cordis.yml` / `guard.mjs` / `README.md`);
+`standard.reference.cordis.yml` 不要拷 —— 它只是仓库里的对照物,给 `src/preset.test.ts`
+检查"组装 = standard + 两处改动"用,preset 运行时用不到。
+
+### 从市场 / npm 装的用户:文件就在你装好的插件目录里
+
+市场装的是**插件**,preset 不是自动生效的 —— 但 `0.1.1` 起**那份 preset 随包一起发**,
+所以不必再来仓库取:
+
 ```powershell
-# 本机(id 必须是 galgame)
+# 从你装好的插件里拷出来(profile 名按你自己的改:web / desktop / …)
+$src = "$env:USERPROFILE\.dsh\profiles\web\node_modules\dsh-galfree\presets\galgame"
+$dst = "$env:USERPROFILE\.dsh\.agent-presets\galgame"
+New-Item -ItemType Directory -Force -Path $dst | Out-Null
+Copy-Item "$src\preset.yml", "$src\agent.cordis.yml", "$src\guard.mjs", "$src\README.md" -Destination $dst
+```
+
+用的是本仓库 checkout 就照原来那样从 `presets\galgame\` 拷:
+
+```powershell
 $dst = "$env:USERPROFILE\.dsh\.agent-presets\galgame"
 New-Item -ItemType Directory -Force -Path $dst | Out-Null
 Copy-Item presets\galgame\preset.yml, presets\galgame\agent.cordis.yml, presets\galgame\guard.mjs, presets\galgame\README.md -Destination $dst
 ```
-
-> `standard.reference.cordis.yml` **不要**拷过去 —— 它只是仓库里的对照物,给
-> `src/preset.test.ts` 检查"组装 = standard + 两处改动"用的,preset 运行时用不到它。
 
 复制完刷新宿主界面(或重启)。宿主界面里也能**从既有 preset 复制一份**再改 —— 那条路会替你
 挑一个不重名的 id,效果一样。
