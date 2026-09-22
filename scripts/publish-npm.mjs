@@ -85,7 +85,22 @@ const publishArgs = ['publish', '--access', pkg.publishConfig?.access ?? 'public
 if (otp !== undefined) publishArgs.push(`--otp=${otp}`)
 if (dryRun) publishArgs.push('--dry-run')
 console.log(`\n$ npm ${publishArgs.join(' ')} --registry=${REGISTRY}\n`)
-npm(publishArgs, { capture: false })
+try {
+  // 捕获而不是 inherit:execFileSync 的 inherit 会把子进程输出吞掉,
+  // 失败时只剩一句 "Command failed",npm 的原话反而看不到(踩过)。
+  const out = npm(publishArgs)
+  if (out.trim() !== '') console.log(out.trim())
+} catch (error) {
+  const stdout = String(error?.stdout ?? '').trim()
+  const stderr = String(error?.stderr ?? '').trim()
+  if (stdout !== '') console.log(stdout)
+  if (stderr !== '') console.error(stderr)
+  console.error(`\n✗ npm publish 失败(status=${error?.status ?? 'unknown'})—— 上面是它的原话`)
+  if (/EOTP|one-time pass/i.test(stdout + stderr)) {
+    console.error('  这是两步验证:把当时的 6 位验证码给我,用 --otp=<code> 重发')
+  }
+  process.exit(1)
+}
 
 if (dryRun) {
   console.log('\n(dry-run:到此为止)')
