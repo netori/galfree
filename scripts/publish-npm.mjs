@@ -74,34 +74,51 @@ function npmErrorText(error) {
 console.log(`包:${pkg.name}@${pkg.version}`)
 console.log(`目标:${REGISTRY}(${pkg.publishConfig?.access ?? 'default'} access)`)
 
-/**
- * 轮询读一次 registry 视图。返回解析好的对象;null = 到点还读不到。
+/* 探测用的 npm 参数:每次探测都必须**有界且快**。
  *
- * 为什么要轮询:刚发完的那几秒 registry 的**读**可能还看不到这个包(E404)——
- * 实测过:发布本身成功、校验却 404,于是脚本把"成功"报成"失败"。
- * 传播延迟不是发布失败,所以这里重试;而"还没看到"与"看到了但版本不对"分开报。
+ * 不加这两条时,`npm view` 对一个不存在的包自己会重试到 ~42 秒才返回
+ * (实测:4 次探测 = 228 秒)—— 外层的轮询预算因此完全失真。
+ * 探测是"读一眼",不是"一定要读到",所以把 npm 自己的重试压到 1 次、超时 15 秒。 */
+const PROBE_ARGS = ['--fetch-retries=1', '--fetch-retry-maxtimeout=5000', '--fetch-timeout=15000']
+
+/**
+ * 轮询读一次 registry 视图,直到**这个版本**读得到为止。
+ *
+ * 为什么要轮询(两次都是现场教出来的):
+ *   ① 刚发完的几秒,registry 的读可能还是 404 —— 发布成功却判失败;
+ *   ② 也可能读得到包、但 `version` 还是**上一版** —— 而脚本立刻断言"版本不一致"
+ *      就报失败(0.1.1 的实际经历:写入成功,读回来了 0.1.0)。
+ * 所以判据是"读到的 version 等于我要发的那个",直到预算用完;
+ * "读到了但一直是旧版"与"根本没读到"分开报。
  */
-async function readBackWithRetry(name) {
-  let last = ''
+async function readBackUntilVersion(name, want, budgetMs = 180_000) {
+  const started = Date.now()
   let attempts = 0
-  for (let attempt = 1; attempt <= 12; attempt++) {
-    attempts = attempt
+  let last = ''
+  let saw = null
+  while (Date.now() - started < budgetMs) {
+    attempts += 1
     try {
-      const value = JSON.parse(npm(['view', name, 'version', 'dist.tarball', '--json']))
-      readBackWithRetry.attempts = attempts
-      return value
+      const info = JSON.parse(npm(['view', name, 'version', 'dist.tarball', '--json', ...PROBE_ARGS]))
+      saw = info
+      if (info.version === want) {
+        readBackUntilVersion.attempts = attempts
+        readBackUntilVersion.saw = info
+        return info
+      }
+      console.log(`… registry 读到的还是 ${info.version}(要的是 ${want}),第 ${attempts} 次`)
     } catch (error) {
-      const detail = npmErrorText(error)
-      last = detail
-      // 判据看**完整** stderr,不是摘要:"404 Not Found" 在 stderr 前部。
-      if (!/E404|Not found|could not be found|404 /i.test(String(detail.full))) break
-      const waitMs = Math.min(2000 * attempt, 10_000)
-      console.log(`… registry 还没读到(第 ${attempt} 次,传播延迟),${Math.round(waitMs / 1000)} 秒后再看`)
-      await new Promise(resolve => setTimeout(resolve, waitMs))
+      last = npmErrorText(error)
+      console.log(`… registry 还没读到(第 ${attempts} 次,传播延迟)`)
     }
+    const remaining = budgetMs - (Date.now() - started)
+    if (remaining <= 0) break
+    const waitMs = Math.min(3000 * attempts, 15_000, remaining)
+    await new Promise(resolve => setTimeout(resolve, waitMs))
   }
-  readBackWithRetry.lastError = last
-  readBackWithRetry.attempts = attempts
+  readBackUntilVersion.lastError = last
+  readBackUntilVersion.attempts = attempts
+  readBackUntilVersion.saw = saw
   return null
 }
 
@@ -110,19 +127,27 @@ async function readBackWithRetry(name) {
 // 断言的是**重试预算真的花完了**(不是"最终返回 null"):只重试一次就放弃
 // 是 v2 的真缺陷,而那种情况同样会返回 null —— 只断言 null 会漏掉它。
 if (args.includes('--selftest-readback')) {
-  const name = 'dsh-galfree-this-package-should-never-exist'
-  console.log(`\n自测:对一个不存在的包名轮询读回(应当耗掉完整重试预算,然后如实报"读不到")\n包名:${name}\n`)
-  const started = Date.now()
-  const result = await readBackWithRetry(name)
-  const seconds = Math.round((Date.now() - started) / 1000)
-  const attempts = readBackWithRetry.attempts
-  console.log(`结果:${result === null ? '读不到(预期)' : '竟然读到了 —— 自测失效'}  用时 ${seconds} 秒,尝试 ${attempts} 次`)
-  console.log(`最后一次 npm 原话:${readBackWithRetry.lastError}`)
-  const pass = result === null && attempts >= 8 && seconds >= 30
-  console.log(pass
-    ? '✓ 自测通过:确实重试到预算耗尽(不是一次就放弃)'
-    : `✗ 自测失败:期望 尝试≥8 且 用时≥30 秒,实际 尝试=${attempts} 用时=${seconds} 秒`)
-  process.exit(pass ? 0 : 1)
+  const bogus = 'dsh-galfree-this-package-should-never-exist'
+  console.log(`\n自测 A:对一个不存在的包名轮询(应当耗掉预算,如实报"读不到")\n包名:${bogus}\n`)
+  const t0 = Date.now()
+  const missing = await readBackUntilVersion(bogus, pkg.version, 60_000)
+  const secA = Math.round((Date.now() - t0) / 1000)
+  const triesA = readBackUntilVersion.attempts
+  const passA = missing === null && triesA >= 3
+  console.log(`结果A:${missing === null ? '读不到(预期)' : '竟然读到了 —— 自测失效'}  用时 ${secA} 秒,尝试 ${triesA} 次`)
+
+  console.log(`\n自测 B:对**真实存在但我们不要那个版本**的包轮询(应当一直重试到预算用完)\n包名:${pkg.name},要的版本:9.9.9(永不存在)\n`)
+  const t1 = Date.now()
+  const wrong = await readBackUntilVersion(pkg.name, '9.9.9', 45_000)
+  const secB = Math.round((Date.now() - t1) / 1000)
+  const triesB = readBackUntilVersion.attempts
+  const sawB = readBackUntilVersion.saw?.version
+  const passB = wrong === null && triesB >= 2 && typeof sawB === 'string' && sawB !== '9.9.9'
+  console.log(`结果B:${wrong === null ? '未拿到目标版本(预期)' : '竟然拿到了 —— 自测失效'}  用时 ${secB} 秒,尝试 ${triesB} 次,读到的版本=${sawB}`)
+  console.log(passB ? '  ✓ 自测 B 通过:读到了旧版本也没有立刻放弃,而是重试到预算用完' : '  ✗ 自测 B 失败:期望"读到旧版本后继续重试"')
+
+  console.log(passA && passB ? '\n✓ 自测通过(A 与 B)' : '\n✗ 自测失败')
+  process.exit(passA && passB ? 0 : 1)
 }
 
 // ── 1. 前置 ────────────────────────────────────────────────────────────
@@ -169,11 +194,22 @@ try {
   const stderr = String(error?.stderr ?? '').trim()
   if (stdout !== '') console.log(stdout)
   if (stderr !== '') console.error(stderr)
-  console.error(`\n✗ npm publish 失败(status=${error?.status ?? 'unknown'})—— 上面是它的原话`)
-  if (/EOTP|one-time pass/i.test(stdout + stderr)) {
-    console.error('  这是两步验证:把当时的 6 位验证码给我,用 --otp=<code> 重发')
+  // npm 对"这个版本已经发过了"报的是 E403 + "cannot publish over the previously
+  // published versions"。它可能是**同一次发布的第二次尝试**(上一次写成功了、只是读还没跟上),
+  // 也可能真的是重复发布 —— 两种都不该在此时判死,交给下面的读回轮询去定论。
+  if (/previously published versions/i.test(stdout + stderr)) {
+    console.log(`\n… npm 说 ${pkg.version} 已经在 registry 上了 —— 可能是上一次已经写成功(读延迟)。继续读回核对。`)
+  } else {
+    console.error(`\n✗ npm publish 失败(status=${error?.status ?? 'unknown'})—— 上面是它的原话`)
+    if (/EOTP|one-time pass/i.test(stdout + stderr)) {
+      console.error('  这是两步验证:把当时的 6 位验证码给我,用 --otp=<code> 重发')
+    }
+    if (/ETIMEDOUT|ECONNRESET|ENOTFOUND/i.test(stdout + stderr)) {
+      console.error('  这是网络到不了官方 registry。若本机有代理:npm 支持 HTTPS_PROXY,例如')
+      console.error('    $env:HTTPS_PROXY=\'http://127.0.0.1:7897\'; npm run release:npm')
+    }
+    process.exit(1)
   }
-  process.exit(1)
 }
 
 if (dryRun) {
@@ -181,24 +217,18 @@ if (dryRun) {
   process.exit(0)
 }
 
-// ── 3. 从 registry 读回来核对 ──────────────────────────────────────────
-// ⚠️ 刚发完的那几秒,registry 的**读**可能还看不到这个包(E404)—— 实测过:
-// 发布本身成功、校验却 404,于是脚本报"失败"。这只是传播延迟,不是发布失败,
-// 所以这里要轮询;而且"还没看到"必须与"看到了但版本不对"分开报。
-// ── 3. 从 registry 读回来核对 ──────────────────────────────────────────
-const info = await readBackWithRetry(pkg.name)
+// ── 3. 从 registry 读回来核对(轮询到"这个版本"出现为止)──────────────
+const info = await readBackUntilVersion(pkg.name, pkg.version)
 if (info === null) {
-  console.error('\n✗ 发布命令成功了,但 registry 读不到这个包 —— 两种可能:')
-  console.error(`  ① 传播还没完(等一下重跑:npm view ${pkg.name} version --registry=${REGISTRY})`)
-  console.error('  ② 发布其实没落地。npm 的原话:' + readBackWithRetry.lastError)
+  const saw = readBackUntilVersion.saw
+  console.error('\n✗ 发布命令没报错,但 registry 上读不到这个版本 —— 两种可能:')
+  if (saw !== null) console.error(`  ① 读延迟:目前读到的是 ${saw.version}(要的是 ${pkg.version})—— 过几分钟再核对`)
+  else console.error(`  ① 读延迟:连包都还没读到(${readBackUntilVersion.lastError})`)
+  console.error('  ② 发布其实没落地 —— 去 https://www.npmjs.com/package/' + pkg.name + '?activeTab=versions 看一眼')
   process.exit(1)
 }
 console.log('\nregistry 上现在是这样:')
 console.log(JSON.stringify(info))
-if (info.version !== pkg.version) {
-  console.error(`✗ 发布后 registry 上的 version 是 ${info.version},与期望的 ${pkg.version} 不一致`)
-  process.exit(1)
-}
 console.log(`\n✓ 发布成功:${pkg.name}@${pkg.version}`)
 console.log(`  用户装法:dsh plugin --profile web add ${pkg.name}`)
 console.log('  市场:awesome-dsh-plugin 会从 registry 自动采集 npm 映射(条目里不要写 npm: 字段)')
