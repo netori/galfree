@@ -16,6 +16,24 @@ npm whoami --registry=https://registry.npmjs.org/  # 应打印你的 npm 用户�
 本机用户级 `~/.npmrc` 指向的是只读镜像,所以**每条命令都显式带 `--registry`**;
 或直接 `cd` 到本仓库(仓库根的 `.npmrc` 已把 registry 钉成官方源)。
 
+### ⚠️ 这个账号开了两步验证 —— 登录不够,得用 automation token(实测)
+
+`npm login` 之后直接发,第一次是这么被拒的:
+
+```
+npm error code E403
+npm error 403 Forbidden - PUT https://registry.npmjs.org/dsh-galfree
+Two-factor authentication or granular access token with bypass 2fa enabled is required to publish packages.
+```
+
+两条出路:
+
+1. **automation token(推荐,一次配好以后免验证码)** —— 步骤写在
+   [`docs/npm-token-setup.md`](npm-token-setup.md):在 npm 网站生成 **Automation** token,
+   用 `Read-Host -AsSecureString` 粘进用户级 `~/.npmrc`(凭据不进仓库、不回显、不进聊天)。
+2. **每次带验证码** —— `npm run release:npm -- --otp=123456`。实测这条路的往返约 **7 秒**
+   (假码也在这个时间被拒),所以码有 30 秒时效也来得及,但每次发版都要你在场。
+
 ## 每次发版
 
 ```powershell
@@ -24,7 +42,7 @@ npm whoami --registry=https://registry.npmjs.org/  # 应打印你的 npm 用户�
 npm run typecheck; npm test
 # 3) 发布(会先跑 prepare → tsdown,把 lib/ 打进包)
 npm run release:npm
-#    开了两步验证的账号:把验证码带上
+#    没配 automation token 就得带验证码:
 npm run release:npm -- --otp=123456
 #    只想预演:--dry-run
 ```
