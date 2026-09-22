@@ -41,15 +41,70 @@ function npm(commandArgs, options) {
 /**
  * 把"命令起不来"和"命令跑失败"分开报 —— 否则同一个"没登录"的结论会把
  * 一个执行环境的故障说成凭据问题(本脚本 v1 就踩过这个坑)。
+ * 返回一行摘要(给日志看),同时把完整文本挂在 .full 上 —— 判据不能只看末 4 行:
+ * "404 Not Found" 那行在 stderr 的**前面**,截尾巴会让重试判定失效(v2 踩过)。
  */
 function npmErrorText(error) {
   const stderr = String(error?.stderr ?? '').trim()
   const stdout = String(error?.stdout ?? '').trim()
-  return (stderr || stdout || error?.message || 'no output').split('\n').slice(-4).join(' | ')
+  const full = stderr || stdout || error?.message || 'no output'
+  const summary = full.split('\n').slice(-4).join(' | ')
+  return Object.assign(new String(summary), { full })
 }
 
 console.log(`包:${pkg.name}@${pkg.version}`)
 console.log(`目标:${REGISTRY}(${pkg.publishConfig?.access ?? 'default'} access)`)
+
+/**
+ * 轮询读一次 registry 视图。返回解析好的对象;null = 到点还读不到。
+ *
+ * 为什么要轮询:刚发完的那几秒 registry 的**读**可能还看不到这个包(E404)——
+ * 实测过:发布本身成功、校验却 404,于是脚本把"成功"报成"失败"。
+ * 传播延迟不是发布失败,所以这里重试;而"还没看到"与"看到了但版本不对"分开报。
+ */
+async function readBackWithRetry(name) {
+  let last = ''
+  let attempts = 0
+  for (let attempt = 1; attempt <= 12; attempt++) {
+    attempts = attempt
+    try {
+      const value = JSON.parse(npm(['view', name, 'version', 'dist.tarball', '--json']))
+      readBackWithRetry.attempts = attempts
+      return value
+    } catch (error) {
+      const detail = npmErrorText(error)
+      last = detail
+      // 判据看**完整** stderr,不是摘要:"404 Not Found" 在 stderr 前部。
+      if (!/E404|Not found|could not be found|404 /i.test(String(detail.full))) break
+      const waitMs = Math.min(2000 * attempt, 10_000)
+      console.log(`… registry 还没读到(第 ${attempt} 次,传播延迟),${Math.round(waitMs / 1000)} 秒后再看`)
+      await new Promise(resolve => setTimeout(resolve, waitMs))
+    }
+  }
+  readBackWithRetry.lastError = last
+  readBackWithRetry.attempts = attempts
+  return null
+}
+
+// 自测:轮询这条路要能被单独测到(否则"刚发完读不到"只能在现场碰运气)。
+// 放在发布守卫之前 —— 自测不改动任何东西,不该被"工作区干净"挡下。
+// 断言的是**重试预算真的花完了**(不是"最终返回 null"):只重试一次就放弃
+// 是 v2 的真缺陷,而那种情况同样会返回 null —— 只断言 null 会漏掉它。
+if (args.includes('--selftest-readback')) {
+  const name = 'dsh-galfree-this-package-should-never-exist'
+  console.log(`\n自测:对一个不存在的包名轮询读回(应当耗掉完整重试预算,然后如实报"读不到")\n包名:${name}\n`)
+  const started = Date.now()
+  const result = await readBackWithRetry(name)
+  const seconds = Math.round((Date.now() - started) / 1000)
+  const attempts = readBackWithRetry.attempts
+  console.log(`结果:${result === null ? '读不到(预期)' : '竟然读到了 —— 自测失效'}  用时 ${seconds} 秒,尝试 ${attempts} 次`)
+  console.log(`最后一次 npm 原话:${readBackWithRetry.lastError}`)
+  const pass = result === null && attempts >= 8 && seconds >= 30
+  console.log(pass
+    ? '✓ 自测通过:确实重试到预算耗尽(不是一次就放弃)'
+    : `✗ 自测失败:期望 尝试≥8 且 用时≥30 秒,实际 尝试=${attempts} 用时=${seconds} 秒`)
+  process.exit(pass ? 0 : 1)
+}
 
 // ── 1. 前置 ────────────────────────────────────────────────────────────
 let who
@@ -108,10 +163,19 @@ if (dryRun) {
 }
 
 // ── 3. 从 registry 读回来核对 ──────────────────────────────────────────
-const back = npm(['view', pkg.name, 'version', 'dist.tarball', '--json'])
+// ⚠️ 刚发完的那几秒,registry 的**读**可能还看不到这个包(E404)—— 实测过:
+// 发布本身成功、校验却 404,于是脚本报"失败"。这只是传播延迟,不是发布失败,
+// 所以这里要轮询;而且"还没看到"必须与"看到了但版本不对"分开报。
+// ── 3. 从 registry 读回来核对 ──────────────────────────────────────────
+const info = await readBackWithRetry(pkg.name)
+if (info === null) {
+  console.error('\n✗ 发布命令成功了,但 registry 读不到这个包 —— 两种可能:')
+  console.error(`  ① 传播还没完(等一下重跑:npm view ${pkg.name} version --registry=${REGISTRY})`)
+  console.error('  ② 发布其实没落地。npm 的原话:' + readBackWithRetry.lastError)
+  process.exit(1)
+}
 console.log('\nregistry 上现在是这样:')
-console.log(back.trim())
-const info = JSON.parse(back)
+console.log(JSON.stringify(info))
 if (info.version !== pkg.version) {
   console.error(`✗ 发布后 registry 上的 version 是 ${info.version},与期望的 ${pkg.version} 不一致`)
   process.exit(1)
