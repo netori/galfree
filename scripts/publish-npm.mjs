@@ -15,8 +15,9 @@
  * `uploads.github.com`,资产传不上去(gh 会 DNS 失败)。那一步见
  * `docs/release-to-npm.md` 的手工命令(或换一台能直连的机器)。
  */
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 const REGISTRY = 'https://registry.npmjs.org/'
 const args = process.argv.slice(2)
@@ -26,16 +27,34 @@ const otp = args.find(a => a.startsWith('--otp='))?.slice('--otp='.length)
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 
 function run(command, commandArgs, options = {}) {
-  return execFileSync(command, commandArgs, { encoding: 'utf8', stdio: options.capture === false ? 'inherit' : 'pipe', ...options })
+  return execFileSync(command, commandArgs, { encoding: 'utf8', ...options })
 }
 
 /**
- * npm 在 Windows 上是 `npm.cmd`,Node 不套 shell 起不来(ENOENT ⇒ status=null),
- * 而那正好会被下面的登录检查**误读成"没登录"**。所以 npm 一律走 shell 调用;
- * git 是 .exe,不需要(也避免 shell 解析参数)。
+ * 跑一次 npm。
+ *
+ * 为什么不 `execFileSync('npm', …)` + `shell: true`:Windows 上 npm 是 `npm.cmd`,
+ * 不套 shell 起不来;而套了 shell 又会触发 Node 的 DEP0190(`args` 只拼接、不转义 ⇒
+ * 命令注入面)。所以这里绕开两头:**用 process.execPath 直接跑 npm 的 CLI 入口**,
+ * 无 shell、无 .cmd 解析、跨平台一致,也不依赖 PATH 上的 npm。
  */
-function npm(commandArgs, options) {
-  return run('npm', [...commandArgs, '--registry=' + REGISTRY], { shell: true, ...options })
+const NPM_CLI = join(process.execPath, '..', 'node_modules', 'npm', 'bin', 'npm-cli.js')
+
+function npm(commandArgs, options = {}) {
+  const result = spawnSync(process.execPath, [NPM_CLI, ...commandArgs, '--registry=' + REGISTRY], {
+    encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
+    ...options,
+  })
+  if (result.error !== undefined) throw result.error
+  if (result.status !== 0) {
+    const error = new Error(`npm ${commandArgs[0]} exited with ${result.status}`)
+    error.status = result.status
+    error.stdout = result.stdout
+    error.stderr = result.stderr
+    throw error
+  }
+  return result.stdout ?? ''
 }
 
 /**
