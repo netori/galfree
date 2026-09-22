@@ -52,21 +52,23 @@ npm run release:npm -- --otp=123456
 ② `npm publish`(官方 registry、public);
 ③ **从 registry 读回来核对版本号**(发完自检,不是相信退出码)。
 
-发成功后同一版还要挂一份到 GitHub Release(市场条目与"不发 npm 的人"用得到):
+发成功后同一版还要挂一份到 GitHub Release(市场条目与"不发 npm 的人"用得到)。
+**资产名带版本号、条目里的 `tarball:` 钉住 tag** —— 0.1.0 用的是"不带版本号 + `latest/download`"
+那种写法,0.1.1 起改成钉 tag:`latest/download` 会在 URL 不变的情况下换成后一版的字节,
+条目看起来没改却在装不同的代码,钉 tag 才审计得动(见条目 PR #5678 的说明)。
 
 ```powershell
 npm pack                                   # 产出 dsh-galfree-<version>.tgz
 gh release create v<version> .\dsh-galfree-<version>.tgz -R netori/galfree `
-  --title "dsh-galfree <version>" --notes-file market\release-notes-v0.1.0.md
+  --title "dsh-galfree <version>" --notes-file market\release-notes.md
+# 条目里的 tarball 同步改成:
+#   https://github.com/netori/galfree/releases/download/v<version>/dsh-galfree-<version>.tgz
+npm run check:market                       # 条目与 tarball 的绑定校验
 ```
 
-⚠️ 发布资产名要**不带版本号**,条目里的 `latest/download` 链接才不会随发版 404:
-
-```powershell
-# 包名里的版本去掉,再上传
-Move-Item .\dsh-galfree-<version>.tgz .\dsh-galfree.tgz
-gh release upload v<version> .\dsh-galfree.tgz -R netori/galfree --clobber
-```
+⚠️ 本机**传不上资产**:hosts 里的 GitHub 代理没覆盖 `uploads.github.com`(gh 会 DNS 失败)。
+绕法是 API 建 release + curl 用 IP 直连上传(见 git 历史里 0.1.0/0.1.1 两次的做法);
+或者干脆换一台能直连的机器传。
 
 ## 发完自检(别只看"发布成功")
 
