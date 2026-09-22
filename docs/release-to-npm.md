@@ -83,6 +83,20 @@ npm run check:market          # 条目与 tarball 的绑定校验
 pnpm add dsh-galfree    # 应秒装成功,node_modules/dsh-galfree/lib/index.js 就位
 ```
 
+⚠️ **刚发出去的那一版不要用裸包名验收** —— pnpm 11 的**新鲜发布保护**会静默替你选上一版
+(实测 2026-09-22:`pnpm add dsh-galfree` → 装到 **0.1.0**;`pnpm add dsh-galfree@0.1.1` → 装到 **0.1.1**)。
+判据因此要写**版本号**,否则"验过了"其实验的是上一版:
+
+```powershell
+pnpm add dsh-galfree@<version>     # 钉版本,绕开 hold
+node -e "console.log(require('dsh-galfree/package.json').version)"   # 核对装到的是不是那一版
+```
+
+**市场不会被这条 hold 影响**:它的 npm 目标会**自动钉到 registry 的 latest**
+(`sources.ts` 里那句 "pinned to the registry's latest, so pnpm's fresh-release hold
+cannot substitute an older version silently"),所以市场点安装拿到的是最新那一版。
+自己手敲 `dsh plugin add dsh-galfree` 的人则可能落在上一版上 —— 要哪一版就写哪一版。
+
 ## 两个已知边界
 
 - **npm 上的包带着 `prepare` 脚本**(仓库的 git 安装路径要靠它现场构建;`files` 没带
