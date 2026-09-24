@@ -78,8 +78,18 @@ console.log(`目标:${REGISTRY}(${pkg.publishConfig?.access ?? 'default'} access
  *
  * 不加这两条时,`npm view` 对一个不存在的包自己会重试到 ~42 秒才返回
  * (实测:4 次探测 = 228 秒)—— 外层的轮询预算因此完全失真。
- * 探测是"读一眼",不是"一定要读到",所以把 npm 自己的重试压到 1 次、超时 15 秒。 */
-const PROBE_ARGS = ['--fetch-retries=1', '--fetch-retry-maxtimeout=5000', '--fetch-timeout=15000']
+ * 探测是"读一眼",不是"一定要读到",所以把 npm 自己的重试压到 1 次、超时 15 秒。
+ *
+ * ⚠️ **`--fetch-retry-mintimeout` 必须一起给**(0.1.2 发版时踩到):npm 的默认
+ * `mintimeout` 是 **10000**,只给 `maxtimeout=5000` 会让 npm **自己报配置错**
+ * ("minTimeout is greater than maxTimeout")—— 于是每一次探测都失败,读回核对
+ * 把"明明发成功了"报成"registry 上读不到这个版本"。两个一起给才是有界的重试。 */
+const PROBE_ARGS = [
+  '--fetch-retries=1',
+  '--fetch-retry-mintimeout=1000',
+  '--fetch-retry-maxtimeout=5000',
+  '--fetch-timeout=15000',
+]
 
 /**
  * 轮询读一次 registry 视图,直到**这个版本**读得到为止。
@@ -221,10 +231,18 @@ if (dryRun) {
 const info = await readBackUntilVersion(pkg.name, pkg.version)
 if (info === null) {
   const saw = readBackUntilVersion.saw
-  console.error('\n✗ 发布命令没报错,但 registry 上读不到这个版本 —— 两种可能:')
+  console.error('\n✗ 发布命令没报错,但 registry 上读不到这个版本 —— 三种可能:')
   if (saw !== null) console.error(`  ① 读延迟:目前读到的是 ${saw.version}(要的是 ${pkg.version})—— 过几分钟再核对`)
   else console.error(`  ① 读延迟:连包都还没读到(${readBackUntilVersion.lastError})`)
   console.error('  ② 发布其实没落地 —— 去 https://www.npmjs.com/package/' + pkg.name + '?activeTab=versions 看一眼')
+  console.error('  ③ **被登记成 staged**(npm 新的两段式发布:自动化 token 只能"暂存",发布要人用 2FA 批准)')
+  console.error('     判据与下一步:')
+  console.error(`       npm view ${pkg.name}@${pkg.version} version   # 读得到 = 版本号已被占`)
+  console.error(`       npx npm@12 stage list ${pkg.name}            # 有暂存的话列在这里`)
+  console.error('       npx npm@12 stage approve <stage-id>          # 需要 6 位 2FA 码;批准后才真正可安装')
+  console.error('     实测(0.1.2):`npm publish` 打印 `+ pkg@version` 但 tarball 先 404 ——')
+  console.error('     那可能是 ③,也可能只是 **CDN 对刚发布的 tarball 还留着负缓存**(几分钟后自愈)。')
+  console.error('     分得清的办法:给 tarball URL 加一个随机查询串再取一次,200 就说明只是缓存。')
   process.exit(1)
 }
 console.log('\nregistry 上现在是这样:')

@@ -66,9 +66,10 @@ gh release create v<version> .\dsh-galfree-<version>.tgz -R netori/galfree `
 npm run check:market                       # 条目与 tarball 的绑定校验
 ```
 
-⚠️ 本机**传不上资产**:hosts 里的 GitHub 代理没覆盖 `uploads.github.com`(gh 会 DNS 失败)。
-绕法是 API 建 release + curl 用 IP 直连上传(见 git 历史里 0.1.0/0.1.1 两次的做法);
-或者干脆换一台能直连的机器传。
+⚠️ 本机**传不上资产**那条**已经过期**(2026-09-24 实测):`uploads.github.com` 在本机解析到
+代理的假 IP(`198.18.0.71`),但**经代理是通的** —— `gh release create v0.1.2 <tgz>` 一次就把
+351KB 的资产传上去了。真传不动时的兜底仍是:API 建 release + curl 用真实 IP 直连
+(`--resolve uploads.github.com:443:<ip>`,真实 IP 用 DoH 问 `https://1.1.1.1/dns-query`)。
 
 ## 发完自检(别只看"发布成功")
 
@@ -76,6 +77,23 @@ npm run check:market                       # 条目与 tarball 的绑定校验
 npm view dsh-galfree version dist.tarball --registry=https://registry.npmjs.org/
 npm run check:market          # 条目与 tarball 的绑定校验
 ```
+
+### 三条 0.1.2 发版时现学到的(都写进脚本/文档了,别再踩)
+
+1. **`npm publish` 打印 `+ dsh-galfree@0.1.2` 不等于装得上。** 刚发完那几分钟,
+   tarball URL 可能对着一个**负缓存**返回 404(实测:裸 URL 404,加一个随机查询串
+   `?cb=<random>` 就 200,几分钟后自愈)。判据别写成"tarball 200":
+   **加缓存串再取一次**,或者干脆 `npm install dsh-galfree@<version>` 试一次。
+2. **可能被登记成 staged**(npm 的两段式发布):自动化 token 只能"暂存",
+   真正发布要人用 2FA 批准。症状是 `npm publish` 成功、版本号被占住,
+   再发一次报 `E409 … Cannot publish over previously staged version`。
+   查/批准:`npx npm@12 stage list dsh-galfree` → `npx npm@12 stage approve <stage-id>`
+   (本机 npm 11.11 **没有** `stage` 子命令,用 `npx npm@12` 跑)。
+   ⚠️ 与第 1 条**长得一样**,先按第 1 条排掉缓存再判 staged。
+3. **探测用的 npm 参数两个都要给**(已在 `scripts/publish-npm.mjs` 修掉):
+   只给 `--fetch-retry-maxtimeout=5000` 会让 npm 自己报
+   `minTimeout is greater than maxTimeout`(默认 mintimeout 是 10000)——
+   每一次探测都失败,于是"明明发成功了"被读回核对报成"registry 上读不到"。
 
 再按"新用户视角"验收一次:在**冷 store、零 `allowBuilds`** 的干净目录里,
 
