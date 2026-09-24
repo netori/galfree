@@ -22,26 +22,40 @@
  * 换成"人在真界面里点一遍"就没人会点。
  */
 import { describe, expect, it } from 'vitest'
-import { GalfreeSettingsSchema } from './index.ts'
-import { SETTINGS_CARD_KEYS } from './client/settings-card.tsx'
+import { readFileSync } from 'node:fs'
+import { load, DEFAULT_SCHEMA, Type } from 'js-yaml'
+import { Config } from './index.ts'
+import {
+  SETTINGS_BUNDLE_PACKAGE,
+  SETTINGS_CARD_KEYS,
+  SETTINGS_ENTRY_ID,
+  apply as applySettingsPage,
+} from './client/settings-card.tsx'
 
 /**
- * **不由这张卡管的三个键** —— 各自有界面,且都**列出来**而不是"过滤掉":
+ * **不由这张卡管的三个键** —— 都**列出来**而不是"过滤掉"。
  *
- * | 键 | 归谁 |
- * |---|---|
- * | `enabled` | 插件总开关(宿主插件列表那张卡的启用开关) |
- * | `defaultProjectsRoot` | 工作台「新建项目」里那个父目录输入框(+ 目录选择器) |
- * | `sdkPath` | 工作台的 SDK 卡(供给与覆盖路径) |
+ * ⚠️ **T37 更正了这张表的口径(2026-09-24)**:这三行原来写的是"各自有界面"
+ * (插件列表的启用开关 / 新建项目表单 / SDK 卡)。**那在三处都不写设置** ——
+ * 它们只是**读**这三项(实测:`git grep defaultProjectsRoot src/client` 只有读,
+ * 全路由表里没有任何一条**写设置**的路由)。旧版能改它们,靠的是**宿主自己**给
+ * 已注册命名空间渲染的通用表单;0.1.7 起宿主不再渲染插件配置
+ * (`autoGenerate` 只是个描述字段,随包客户端没有消费者),**所以现在这三项
+ * 只能改 profile 的 `cordis.patch.yml`**(那一行 `id: galfree` 的 `config`)。
  *
- * 这份清单是**显式**的:哪天有个键既不属于这三处、也不在频道卡里,这条守卫就会红 ——
- * 而"某个设置没有任何界面"正是 T27 那次音频四键的真实缺口。
+ * 这不算把守卫作废:它守的仍是"schema 里的键要么有界面、要么**明确记录在案**"。
+ * 三条都**优雅降级**(`enabled` 默认 true;新建项目表单本来就让人显式选目录,
+ * 默认值只是方便;`sdkPath` 只在要覆盖钉版时才需要)—— 所以是"缺口记在案",
+ * 不是"功能坏了"。要真正补齐,就把它们做进这张卡(布尔开关 + 两个路径输入),
+ * 那是下一票的事,不是靠改这份清单。
  */
 const HANDLED_ELSEWHERE = ['enabled', 'defaultProjectsRoot', 'sdkPath'] as const
 
 describe('设置面板与 schema 的键一一对应(T27)', () => {
+  // T37:键的清单仍是 Host 半的 `Config`(0.1.7 里就是那个 volatile schema,
+  // 设置面按它决定"哪些字段可改")—— 只是不再有 `settings.register` 那个命名空间。
   it('schema 里的每个键,要么归频道卡,要么在"归别处"那份清单里(**没有第三种**)', () => {
-    const schemaKeys = Object.keys(GalfreeSettingsSchema.dict ?? {})
+    const schemaKeys = Object.keys(Config.dict ?? {})
     expect(schemaKeys.length).toBeGreaterThan(0)
     const orphans = schemaKeys.filter((key) =>
       !SETTINGS_CARD_KEYS.includes(key as never) && !(HANDLED_ELSEWHERE as readonly string[]).includes(key))
@@ -70,8 +84,80 @@ describe('设置面板与 schema 的键一一对应(T27)', () => {
   })
 
   it('面板不会管 schema 里不存在的键(否则保存时会被拒/静默丢)', () => {
-    const schemaKeys = new Set(Object.keys(GalfreeSettingsSchema.dict ?? {}))
+    const schemaKeys = new Set(Object.keys(Config.dict ?? {}))
     const extra = SETTINGS_CARD_KEYS.filter((key) => !schemaKeys.has(key))
     expect(extra, `这些键面板有但 schema 没有:${extra.join(', ')}`).toEqual([])
+  })
+})
+
+/**
+ * 设置面在 DSH 0.1.7 上的三条契约(T37)。
+ *
+ * 这一组是升级事故的回执:旧模型(`ctx.settings.register` + `settingsScope` +
+ * `settings.plugin.item`)在 0.1.7 里**一个都不存在**,插件因此整块装不上。
+ * 迁移后的形状有三件容易再错的事,每件都**静默**:
+ *
+ *  1. 某个设置字段忘了 `.volatile()` → `dsh-settings` 的 `describe()` 直接跳过这个 entry,
+ *     设置页里**整页不存在**(不是少一个输入框);
+ *  2. `configForms.get()` 传了**包名**而不是 Profile 行 id → 拿到的表永远 `unavailable`;
+ *  3. 页面注册回旧槽位(`settings.section` / `settings.plugin.item`)→ 0.1.7 里没人渲染它;
+ *     或注册时不问 `whileServed` → 宿主没服务这个命名空间时留下一页点不开的空壳。
+ */
+describe('设置面契约(T37 · DSH 0.1.7)', () => {
+  it('Config 的每个字段都声明了 volatile(少一个 = 那一页设置永远不会出现)', () => {
+    const dict = (Config.dict ?? {}) as Record<string, { meta?: { volatile?: boolean } }>
+    const keys = Object.keys(dict)
+    expect(keys.length).toBeGreaterThan(0)
+    const notVolatile = keys.filter((key) => dict[key]?.meta?.volatile !== true)
+    expect(notVolatile, `这些键没有 .volatile(),设置面上不会有它们:${notVolatile.join(', ')}`).toEqual([])
+  })
+
+  it('设置面问的是 **Profile 行 id**,不是包名:它必须与 cordis.patch.yml 的 insert id 逐字相同', () => {
+    // ⚠️ 这份 patch 里现在还有 preset 的 `config.plugins`(整份 standard 行表),
+    // 而那张表用 **Loader 自己的 YAML 方言**表达平台条件:`disabled: !!js process.platform === 'win32'`。
+    // 默认 schema 遇到这个 tag 会**抛**(`unknown tag !<tag:yaml.org,2002:js>`)——
+    // 用默认 schema 读它 = 这条守卫在解析阶段就红,而不是在断言阶段。
+    // 与 `src/preset.test.ts` 的 `CORDIS_SCHEMA` 同一份写法(那边也读同一批文件)。
+    const CORDIS_SCHEMA = DEFAULT_SCHEMA.extend([new Type('tag:yaml.org,2002:js', {
+      kind: 'scalar',
+      resolve: () => true,
+      construct: (data: unknown) => ({ js: data }),
+    })])
+    const patch = load(readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8'), { schema: CORDIS_SCHEMA }) as Array<{
+      insert?: Array<{ id?: string; name?: string }>
+    }>
+    const rows = patch.flatMap((entry) => entry.insert ?? [])
+    const row = rows.find((candidate) => candidate.name === SETTINGS_BUNDLE_PACKAGE)
+    expect(row, `cordis.patch.yml 里没有 name=${SETTINGS_BUNDLE_PACKAGE} 的行`).toBeDefined()
+    expect(row?.id, 'configForms.get() 认的是这一行的 id;两者不一致 = 设置页永远 unavailable').toBe(SETTINGS_ENTRY_ID)
+  })
+
+  it('页面注册到 Plugins 页的 plugins.bundle.config(key = bundle 包名),并**先问 whileServed**', () => {
+    const registrations: Array<Record<string, unknown>> = []
+    const served: string[][] = []
+    const ctx = {
+      configForms: {
+        get: () => { throw new Error('这一条只验注册,不读表单') },
+        whileServed: (namespaces: string[], register: (served: Set<string>) => () => void) => {
+          served.push(namespaces)
+          return register(new Set(namespaces))
+        },
+      },
+      slots: {
+        inject: (_name: string, build: () => () => void) => build(),
+        register: (options: Record<string, unknown>) => {
+          registrations.push(options)
+          return () => { /* disposer */ }
+        },
+      },
+    }
+
+    applySettingsPage(ctx as never)
+
+    expect(served).toEqual([[SETTINGS_ENTRY_ID]])
+    expect(registrations).toHaveLength(1)
+    // 槽位名与 key 都是"注册到哪儿"的一部分:换回 settings.section 会在 0.1.7 上静默消失。
+    expect(registrations[0]!.name).toBe('plugins.bundle.config')
+    expect(registrations[0]!.key).toBe(SETTINGS_BUNDLE_PACKAGE)
   })
 })

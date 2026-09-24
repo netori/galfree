@@ -6,9 +6,9 @@
  * 独占逻辑全部住在 src/service/ 之下,这里只做装配(ADR-0002)。
  */
 import type { Context } from '@deepseek-ai/cordis'
-import z from 'schemastery'
+import z from '@deepseek-ai/schemastery'
+import type { Volatile } from '@deepseek-ai/cosmokit'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import type {} from '@deepseek-ai/dsh-settings'
 // 只为类型:流程指引注册用的 section 形状与宿主那一份对齐(运行时不 import —— 席位按名取用)。
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { homedir } from 'node:os'
@@ -38,8 +38,13 @@ import { registerGalfreePlaybook, toolPresenceProbe, type ToolRegistrySeat } fro
 /** 稳定的 cordis 插件名(与 cordis.patch.yml 的 insert id 对齐)。 */
 export const name = 'galfree'
 
-/** 挂载工作台路由与设置所需的服务。 */
-export const inject = ['webServer', 'settings']
+/**
+ * 挂载工作台路由所需的服务。
+ *
+ * **只声明真依赖**:0.1.7 起设置不再需要席位(见 `apply` 里的说明),而 `webServer`
+ * 是路由的载体。工具面与系统提示面仍是懒注入的可选席位(理由见下)。
+ */
+export const inject = ['webServer']
 
 /**
  * agent 工具席位(可选):`dsh-tools` 在基础组合里总在,但工具是**可选席位** ——
@@ -104,30 +109,30 @@ function toolRegistrySeam(ctx: Context): ToolRegistrySeat | undefined {
 
 export interface Config {
   /** 主开关(路由;关闭后仅 /state 可读)。 */
-  enabled?: boolean
+  enabled: Volatile<boolean>
   /** 新建项目的默认父目录(空 = 每次显式传入)。 */
-  defaultProjectsRoot?: string
+  defaultProjectsRoot: Volatile<string>
   /** 既有 Ren'Py SDK 路径覆盖(空 = 用钉版自动供给)。 */
-  sdkPath?: string
+  sdkPath: Volatile<string>
   /**
    * 图像渠道(T14):OpenAI 兼容端点基址(如 `https://api.example.com/v1`)。
    * 空 = 没配渠道,出图动作如实拒绝(`no-image-channel`)。
    */
-  imageBaseUrl?: string
+  imageBaseUrl: Volatile<string>
   /**
    * 图像渠道密钥。**明文存在本机设置文档里**(ADR-0010 的知情选择,与 dsh-imagegen
    * 同风险面):它不进项目目录、不进快照、不进任务账本。
    */
-  imageApiKey?: string
+  imageApiKey: Volatile<string>
   /** 渠道名(只为在面板/账本里指认,随便填)。 */
-  imageChannelName?: string
+  imageChannelName: Volatile<string>
   /**
    * 模型目录(JSON 数组)。每个模型要**声明能力**(支不支持参考链/图生图/尺寸参数),
    * 因为"协议不合要如实降级"只能靠声明判断,猜就会静默发错请求。
    *
    * 形如:`[{"id":"gpt-image-1","label":"全能力","capabilities":{"textToImage":true,"imageToImage":true,"referenceChain":true,"aspectRatioParam":true,"b64Json":true}}]`
    */
-  imageModels?: string
+  imageModels: Volatile<string>
   /**
    * **音乐生成渠道**(T27 / ADR-0012):音乐与语音**各自一条**。
    *
@@ -138,9 +143,9 @@ export interface Config {
    *
    * 端点是**可填的**:聚合站 / 自建反代 / 本地服务走同一条路,插件不写死厂商域名。
    */
-  musicBaseUrl?: string
-  musicApiKey?: string
-  musicChannelName?: string
+  musicBaseUrl: Volatile<string>
+  musicApiKey: Volatile<string>
+  musicChannelName: Volatile<string>
   /**
    * 音乐模型目录(JSON 数组)。
    *
@@ -149,70 +154,105 @@ export interface Config {
    *
    * 形如:`[{"id":"V6","adapter":"async-task","capabilities":{"textToMusic":true,"instrumental":true}}]`
    */
-  musicModels?: string
+  musicModels: Volatile<string>
   /**
    * **语音(TTS)生成渠道**(T27 / ADR-0012):与音乐那条**分开配**。
    *
    * 典型形态是**本机服务**(IndexTTS 2.5 那类:`http://127.0.0.1:<端口>`)——
    * 与音乐那条八竿子打不着,共用一组端点只会让人两头都配不对。
    */
-  voiceBaseUrl?: string
-  voiceApiKey?: string
-  voiceChannelName?: string
+  voiceBaseUrl: Volatile<string>
+  voiceApiKey: Volatile<string>
+  voiceChannelName: Volatile<string>
   /**
    * 语音模型目录(JSON 数组)。
    *
    * 能力那一栏是 TTS 专有的:能不能克隆音色、能不能指定音色 id、收不收参考音频。
    * 本地服务的嗓子写在 `note` 里(如 `speaker=default;audio=参考音频.wav`)。
    */
-  voiceModels?: string
+  voiceModels: Volatile<string>
   /**
    * 发布输出目录(T18)。**留空 = 数据目录下的 `publish/<项目名>`**。
    * 每个项目在它下面各占一个子目录;配到项目源树里会被如实拒绝(产物不该混进快照)。
    */
-  publishDir?: string
+  publishDir: Volatile<string>
 }
 
-export const Config: z<Config> = z.object({
-  enabled: z.boolean().default(true),
-  defaultProjectsRoot: z.string().default(''),
-  sdkPath: z.string().default(''),
-  imageBaseUrl: z.string().default(''),
-  imageApiKey: z.string().default(''),
-  imageChannelName: z.string().default(''),
-  imageModels: z.string().default(''),
-  musicBaseUrl: z.string().default(''),
-  musicApiKey: z.string().default(''),
-  musicChannelName: z.string().default(''),
-  musicModels: z.string().default(''),
-  voiceBaseUrl: z.string().default(''),
-  voiceApiKey: z.string().default(''),
-  voiceChannelName: z.string().default(''),
-  voiceModels: z.string().default(''),
-  publishDir: z.string().default(''),
+/**
+ * 引用背后的**普通值** —— 接缝 / 路由 / 工具读的就是这一份。
+ *
+ * 与引用分开的理由:引用(`Volatile<T>`)是"活的值",只在需要现读现取的地方出现
+ * (`current()`);其余代码要的是此刻的一份快照,拿 `Volatile` 只会让每一层都被迫
+ * 知道设置模型长什么样。
+ */
+export type ConfigValues = { [K in keyof Config]: Config[K] extends Volatile<infer V> ? V : never }
+
+/**
+ * 插件配置(DSH 0.1.7 起的设置模型)。
+ *
+ * **每个字段都要 `.volatile()`**,这不是装饰:新版 `dsh-settings` 的界面只暴露
+ * 声明为 volatile 的字段("Forms expose only volatile fields from active, uniquely
+ * addressed profile entries"),而 volatile 引用正是 Loader 用来**不重启就改值**的
+ * 那条路 —— 插件原来那套 `ctx.settings.register(ns, schema, { base })` 的服务
+ * 在 0.1.7 里已经不存在了(`ctx.settings` 现在是 `SettingsForms`,只有
+ * `configure/describe/update/replace/mutate/write/schema`)。
+ *
+ * 于是"设置怎么读"变成了一条更直的路:`apply` 拿到的那份 config 里,每个字段是一个
+ * 稳定引用,`current()` 现读现取;人在设置页改一次,Loader 把新值提交进同一个引用
+ * (`Entry._commitVolatile`),下一次 `current()` 就是新值 —— 与旧的
+ * `settingsScope.get()` 同一个语义,只是不再需要一个命名空间。
+ *
+ * **这里刻意不写 `: z<Config>` 注解**(与仓库别处的显式风格不同,理由是实测的):
+ * `z<X>` 是 `Schema<X, X, 'plain'>`,即"输入类型 = 输出类型";而 volatile 字段的
+ * 输入是**普通值**、输出是**引用**(`Schema<ObjectS<X>, ObjectT<X>>`),两者不再相等 ——
+ * 硬写注解会让整棵 schema 与注解互不兼容(TS2322,`required(...).default` 那一串)。
+ * 于是类型交给推断,`Config` 这个**接口**继续管"apply 拿到什么"。
+ */
+export const Config = z.object({
+  enabled: z.boolean().default(true).volatile(),
+  defaultProjectsRoot: z.string().default('').volatile(),
+  sdkPath: z.string().default('').volatile(),
+  imageBaseUrl: z.string().default('').volatile(),
+  imageApiKey: z.string().default('').volatile(),
+  imageChannelName: z.string().default('').volatile(),
+  imageModels: z.string().default('').volatile(),
+  musicBaseUrl: z.string().default('').volatile(),
+  musicApiKey: z.string().default('').volatile(),
+  musicChannelName: z.string().default('').volatile(),
+  musicModels: z.string().default('').volatile(),
+  voiceBaseUrl: z.string().default('').volatile(),
+  voiceApiKey: z.string().default('').volatile(),
+  voiceChannelName: z.string().default('').volatile(),
+  voiceModels: z.string().default('').volatile(),
+  publishDir: z.string().default('').volatile(),
 })
 
-/** 设置命名空间(与 SDK 路径/渠道覆盖同一真相;spec User Story 25)。 */
-export const CONFIG_NAMESPACE = 'dsh-galfree'
-
-export const GalfreeSettingsSchema: z<Required<Config>> = z.object({
-  enabled: z.boolean().default(true),
-  defaultProjectsRoot: z.string().default(''),
-  sdkPath: z.string().default(''),
-  imageBaseUrl: z.string().default(''),
-  imageApiKey: z.string().default(''),
-  imageChannelName: z.string().default(''),
-  imageModels: z.string().default(''),
-  musicBaseUrl: z.string().default(''),
-  musicApiKey: z.string().default(''),
-  musicChannelName: z.string().default(''),
-  musicModels: z.string().default(''),
-  voiceBaseUrl: z.string().default(''),
-  voiceApiKey: z.string().default(''),
-  voiceChannelName: z.string().default(''),
-  voiceModels: z.string().default(''),
-  publishDir: z.string().default(''),
-})
+/**
+ * 把引用读成一份快照。
+ *
+ * **逐字段写出来是刻意的**:漏一个键的后果是"那一族渠道配了却读不到"
+ * (T27 拆渠道时音频四键就在这里丢过一半),而逐字段写能让类型检查替人数键。
+ */
+export function readConfig(refs: Config): ConfigValues {
+  return {
+    enabled: refs.enabled.get(),
+    defaultProjectsRoot: refs.defaultProjectsRoot.get(),
+    sdkPath: refs.sdkPath.get(),
+    imageBaseUrl: refs.imageBaseUrl.get(),
+    imageApiKey: refs.imageApiKey.get(),
+    imageChannelName: refs.imageChannelName.get(),
+    imageModels: refs.imageModels.get(),
+    musicBaseUrl: refs.musicBaseUrl.get(),
+    musicApiKey: refs.musicApiKey.get(),
+    musicChannelName: refs.musicChannelName.get(),
+    musicModels: refs.musicModels.get(),
+    voiceBaseUrl: refs.voiceBaseUrl.get(),
+    voiceApiKey: refs.voiceApiKey.get(),
+    voiceChannelName: refs.voiceChannelName.get(),
+    voiceModels: refs.voiceModels.get(),
+    publishDir: refs.publishDir.get(),
+  }
+}
 
 /** 宿主侧插件数据目录(注册表、钉版 SDK 等)。 */
 export function galfreeDataDir(): string {
@@ -230,7 +270,7 @@ export function galfreeDataDir(): string {
  *  - **模型目录是 JSON 文本**(能力声明按模型给),解析不了就当成"没配模型"并
  *    在渠道对象里留空 —— 面板会看到 0 个模型,比静默用一个错目录强。
  */
-export function channelFromSettings(settings: Required<Config>): ImageChannelSettings | null {
+export function channelFromSettings(settings: ConfigValues): ImageChannelSettings | null {
   if (settings.imageBaseUrl.trim() === '') return null
   return {
     baseUrl: settings.imageBaseUrl.trim(),
@@ -306,7 +346,7 @@ export function parseAudioModelCatalog(text: string): AudioModelDescriptor[] {
  * 差别只在读哪四个键与目录里那条模型该声明什么能力。各写一遍的话,将来加一个字段
  * (比如超时)就会漏掉一条线。
  */
-export function audioChannelFromSettings(settings: Required<Config>, purpose: AudioPurpose): AudioChannelSettings | null {
+export function audioChannelFromSettings(settings: ConfigValues, purpose: AudioPurpose): AudioChannelSettings | null {
   const baseUrl = (purpose === 'music' ? settings.musicBaseUrl : settings.voiceBaseUrl).trim()
   if (baseUrl === '') return null
   const apiKey = purpose === 'music' ? settings.musicApiKey : settings.voiceApiKey
@@ -393,29 +433,23 @@ export function parseModelCatalog(text: string): ImageModelDescriptor[] {
 }
 
 export function apply(ctx: Context, config?: Config): void {
-  // 组合里给的 config 值进 `base`(设置页的"尚未覆盖"那一层)。
-  // **三族渠道键一个都不能漏**:漏了的表现是"config 里配好了、设置页却显示没配" ——
-  // 而那正是拆渠道时最容易忘的地方(T27 那次的音频四键就在这里丢过一半)。
-  const base: Partial<Required<Config>> = {
-    enabled: config?.enabled ?? true,
-    defaultProjectsRoot: config?.defaultProjectsRoot ?? '',
-    sdkPath: config?.sdkPath ?? '',
-    imageBaseUrl: config?.imageBaseUrl ?? '',
-    imageApiKey: config?.imageApiKey ?? '',
-    imageChannelName: config?.imageChannelName ?? '',
-    imageModels: config?.imageModels ?? '',
-    musicBaseUrl: config?.musicBaseUrl ?? '',
-    musicApiKey: config?.musicApiKey ?? '',
-    musicChannelName: config?.musicChannelName ?? '',
-    musicModels: config?.musicModels ?? '',
-    voiceBaseUrl: config?.voiceBaseUrl ?? '',
-    voiceApiKey: config?.voiceApiKey ?? '',
-    voiceChannelName: config?.voiceChannelName ?? '',
-    voiceModels: config?.voiceModels ?? '',
-    publishDir: config?.publishDir ?? '',
-  }
-  const settingsScope = ctx.settings.register(CONFIG_NAMESPACE, GalfreeSettingsSchema, { base })
-  const current = () => settingsScope.get()
+  /**
+   * **设置的读法**(DSH 0.1.7 起换了一整套,这是本插件当初"装不上"的根因)。
+   *
+   * 旧模型:插件自己 `ctx.settings.register(ns, schema, { base })` 拿一个命名空间作用域,
+   * `scope.get()` 读值、设置页按命名空间找它。**0.1.7 里 `ctx.settings` 已经是
+   * `SettingsForms`**(只有 `configure/describe/update/replace/mutate/write/schema`),
+   * `register` 这个方法不存在 ⇒ `apply` 第一句就 `TypeError`,插件整块激活失败。
+   *
+   * 新模型:配置就是**本插件那一行 Loader entry 的 config**;要能被设置页改的字段
+   * 在 schema 上声明 `.volatile()`,Loader 把值提交进引用(`Entry._commitVolatile`),
+   * 插件读引用即可 —— 不再有命名空间,也不再需要 `settings` 席位。
+   *
+   * `config` 缺席时(裸 cordis / 单测:没有 Loader 来校验并造引用)自己按默认值过一遍
+   * schema —— 两条路得到**同一个形状**,于是后面只有一种读法。
+   */
+  const refs: Config = config ?? Config(undefined)
+  const current = (): ConfigValues => readConfig(refs)
 
   const dataDir = galfreeDataDir()
   const pinnedSdkDir = join(dataDir, 'sdk')

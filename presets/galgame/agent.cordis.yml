@@ -1,6 +1,12 @@
-# GALFree「Galgame 制作」agent preset —— 组装(agent 面)。
+# GALFree「Galgame 制作」agent preset —— 组装(agent 面),**给人读的那一份**。
 #
-# 这个文件 = 随包交付的 `standard` 组装(**逐行照抄**) + **两处改动**:
+# 它有两个身份,别混:
+#   ① 这个 preset 的**真相在人这边的可读副本**(行 + 注释;`preset.yml` 给展示元数据);
+#   ② `src/preset.test.ts` 的**对照物** —— 交付物 `cordis.patch.yml` 里 `preset-galgame`
+#      那一行的 `config.plugins` 必须与本文件**逐行深度相等**(抄错、漂了都会红)。
+#      运行时读的是 `cordis.patch.yml`,不读本文件;本文件也不随任何东西"生效"。
+#
+# 内容 = 随包交付的 `standard` 行表(**逐行照抄**) + **两处改动**:
 #   1. `persona` 行换成 galgame 制作的立场(其余 config 与 standard 一致);
 #   2. 末尾多一行 `galfree-guard`(我们自己带的前置检查,见 ./guard.mjs)。
 #
@@ -8,9 +14,10 @@
 # 砍掉哪一样都会在某一步卡住,而"这个模式与众不同"的价值不靠少给工具来体现 —— 靠 persona
 # 与 GALFree 插件注入的流程指引(见 README「它到底加了什么」)。
 #
-# **维护规则**:宿主升级 `@deepseek-ai/dsh-agent-presets` 之后,把随包的
-# `presets/standard/agent.cordis.yml` 与本文件 diff 一次,只保留上面那两处差异。
-# 随包的 `standard` 同时是**每行为什么这么写**的权威说明(本文件刻意不重复那些长注释)。
+# **维护规则**:宿主升级之后,把随包的那份重新取出来覆盖 `standard.reference.cordis.yml`
+# (0.1.7 起它在 `@deepseek-ai/dsh-web-app` 的 `presets/standard.patch.yml` 里,是
+# `preset-standard` 行的 `config.plugins`),跑 `npx vitest run src/preset.test.ts`,
+# 红出来的差异就是你要跟进的漂移;跟完再把同样的改动抄进 `cordis.patch.yml`。
 #
 # 规矩(宿主文档明写,与 standard 同):preset 会授予它所列插件的能力,当**受信任配置**对待;
 # 而注册表、沙箱/审批栈、持久化与模型路由**不在这里** —— 那些留在宿主组合里。
@@ -178,8 +185,8 @@
         backgroundMode: one-shot
         maxDepth: provider-managed
 
-    - id: workflow-worker-thread
-      name: '@deepseek-ai/dsh-workflow-worker-thread'
+    - id: workflow-ptc
+      name: '@deepseek-ai/dsh-workflow-ptc'
       config:
         provider: spawn
 
@@ -188,6 +195,7 @@
 
     - id: tool-ralph
       name: '@deepseek-ai/dsh-tool-ralph'
+      disabled: true
       config:
         subagentProvider: spawn
         maxRounds: 64
@@ -211,13 +219,29 @@
 - id: present
   name: '@deepseek-ai/dsh-tool-present'
 
-# ── 本模式的第二处改动:前置检查(我们自己带的,随 preset 目录一起走)────────
+# 0.1.7 的 standard 末尾多这一行:插件管理工具默认不装(要它得在 profile 里显式打开)。
+- id: tool-plugin-manager
+  name: '@deepseek-ai/dsh-plugin-manager/tools'
+  disabled: true
 
-# 为什么是**相对路径**行而不是 `name: 'dsh-galfree'`:preset 的健康检查从**宿主安装位置**
-# 解析包名(`harnessBase`),而第三方插件通常装在 **profile** 的 node_modules 里 ——
-# 那样命名会被报成 broken(即使插件其实装好了)。相对行的判定是"这个文件在不在",
-# 与谁装在哪无关,所以它在任何部署里都稳定;真正的前置判断交给 guard 自己做(见 guard.mjs)。
+# ── 本模式的第二处改动:前置检查(我们自己带的,随插件包一起走)──────────────
+
+# 为什么是**裸包名 + exports 子路径**(`dsh-galfree/guard`)而不是相对路径:preset 的
+# `plugins` 行由 registry 挂载时,**解析基准是声明这一行的 Loader 树的 baseUrl** ——
+# 而这一行声明在 profile 的根 include(`<profileDir>/cordis.yml`)里,于是基准是
+# **profile 目录**(`dsh-app-boot` 的 `boot()` 把 root ctx 的 baseUrl 设成配置文件所在目录,
+# `Include` 的构造函数设成同一个目录;registry 的 `mountPreset` 用 `record.context.baseUrl`
+# 建 preset 树)。本机 0.1.7-rc.2 实测:三个探针 preset 的同一行分别写成
+#   `./guard.mjs`                                        → broken "never started"(导入失败)
+#   `./node_modules/dsh-galfree/presets/galgame/guard.mjs` → 正常(⇒ 基准确实**是** profile 目录)
+#   `dsh-galfree/guard`                                   → 正常(⇒ 裸包名按 profile 的 node_modules 解析)
+# 结论:文件留在 `presets/galgame/guard.mjs`,靠 `package.json` 的 `exports["./guard"]` 露出来;
+# 相对路径在这里根本没有可用的形态(文件不在 profile 目录里,也不该为了它挪过去)。
 #
-# 也**不能**给这一行加 `disabled`:健康检查会跳过 disabled 行,那样就回到"静默少几个工具"了。
+# 也**不能**给这一行加 `disabled`:registry 挂载时的 `auditRows` 会跳过 disabled 行,
+# 那样就回到"静默少几个工具"了。
+#
+# guard 自己为什么要"等一会儿"再判工具在不在:宿主行是**并行激活**的,而 GALFree 的工具是在
+# `ctx.inject(['tools'])` 回调里补上的 —— 机制与实测记录在 guard.mjs 的文件头。
 - id: galfree-guard
-  name: './guard.mjs'
+  name: 'dsh-galfree/guard'

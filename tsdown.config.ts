@@ -46,15 +46,14 @@ const nodeConfig: UserConfig = {
   clean: false,
   deps: {
     // Host-shared packages must stay bare: bundling them would duplicate
-    // cordis Services and the settings seam.
+    // cordis Services and the schema library the Loader validates Config with.
     neverBundle: [
       '@deepseek-ai/cordis',
-      '@deepseek-ai/dsh-settings',
+      '@deepseek-ai/schemastery',
       '@deepseek-ai/dsh-tools',
       '@deepseek-ai/dsh-session',
       '@deepseek-ai/dsh-workspace',
       '@deepseek-ai/dsh-system-prompt',
-      'schemastery',
     ],
   },
 }

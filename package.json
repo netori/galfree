@@ -1,6 +1,6 @@
 {
   "name": "dsh-galfree",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "GALFree — Ren'Py galgame full-pipeline workbench plugin for DeepSeek Harness. Host-side project service (write gateway, git snapshots, dialect-subset parser, derived progress, review stamps, pinned SDK validation, playtest) behind one deep seam; the workbench is an embedded web panel consuming the same state.",
   "keywords": [
     "deepseek-harness",
@@ -27,6 +27,7 @@
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
+    "./guard": "./presets/galgame/guard.mjs",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
@@ -67,6 +68,7 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-tools": ">=0.1.5-0 <0.2.0-0",
+    "@deepseek-ai/schemastery": "~3.18.4",
     "react": "^18.3.1"
   },
   "peerDependenciesMeta": {
@@ -75,16 +77,27 @@
     }
   },
   "dependencies": {
-    "extract-zip": "^2.0.1",
-    "schemastery": "^3.18.0"
+    "extract-zip": "^2.0.1"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.1.5-alpha.2",
-    "@deepseek-ai/dsh-host-webserver": "^0.1.5-alpha.2",
-    "@deepseek-ai/dsh-settings": "^0.1.5-alpha.2",
-    "@deepseek-ai/dsh-system-prompt": "^0.1.5-alpha.2",
-    "@deepseek-ai/dsh-tools": "^0.1.5-alpha.2",
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/cosmokit": "^1.8.5",
+    "@deepseek-ai/dsh-agent": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-brand": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-invariants": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-llm": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-ptc-runtime": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-sandbox": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-sandbox-policy": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-scope": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-session": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-settings": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-user-approval": "^0.1.7-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.4",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.20.0",
     "@types/react": "~18.3.1",

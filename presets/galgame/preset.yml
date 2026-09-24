@@ -1,3 +1,12 @@
+# 「Galgame 制作」preset 的**展示元数据**(名字 / 描述 / 排序)。
+#
+# 注意:**宿主不读这个文件**。0.1.7 起 preset 是 `cordis.patch.yml` 里的一行声明
+# (`preset-galgame` 的 `config.name/description/order`),用户 preset 目录那套
+# (`$DSH_HOME/.agent-presets/<id>/preset.yml`)已经没有任何东西读它了
+# (`@deepseek-ai/dsh-agent-preset` 的 `skills/editing-cordis-compositions/SKILL.md`)。
+#
+# 留着它的理由只有一个,但足够:**元数据只写一遍**。这一行的值与 patch 里那一份由
+# `src/preset.test.ts` 钉成同一个(改一处不改另一处就红),id 就是这本目录的名字。
 name: Galgame 制作
 description: 用 GALFree 做一部 Ren'Py galgame 的专用模式：设定集 → 请人盖定稿戳 → 逐场生成 → 素材 → 音频 → 试玩 → 发布。需要已装 GALFree 插件（工具面与流程指引由它提供）。
 order: 5

@@ -3,6 +3,44 @@
 一个专用的 agent 模式:在一个会话里,用 GALFree 把一部 Ren'Py galgame 从**一句主题**做到
 **能发布的成品** —— 设定集 →(请人盖定稿戳)→ 逐场生成 → 补素材 → 接线音频 → 试玩 → 发布。
 
+## 怎么装:**不用装**
+
+**装了 `dsh-galfree` 这个插件,bundle 里就带着这个 preset。** 没有"再拷几个文件到
+`~/.dsh/.agent-presets/galgame/`"那一步了 —— 那个目录**已经没有任何东西在读**
+(0.1.7 起用户 preset 目录机制被删掉了:preset 现在是一行 Loader 声明,
+`@deepseek-ai/dsh-agent-preset` 的 `skills/editing-cordis-compositions/SKILL.md` 明写
+"Nothing reads that directory any more")。
+
+这个 preset 就是本包 `cordis.patch.yml` 里 `preset-galgame` 那一行,与插件本体
+(`galfree` 那一行)是**同一次 insert**:
+
+```yaml
+- insert:
+    - id: galfree
+      name: 'dsh-galfree'
+    - id: preset-galgame
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: galgame
+        name: Galgame 制作
+        description: …
+        order: 5
+        plugins: [ … standard 的行表 + 两处改动 … ]
+```
+
+所以:
+
+| 你想要 | 做什么 |
+|---|---|
+| 让它出现 | 装 `dsh-galfree`(插件市场装,或 profile 的 `dsh.profile.bundles` 加一行),**重启宿主** |
+| 升级它 | 升级 `dsh-galfree`;preset 跟着插件一起更新,不会各走各的 |
+| 卸掉它 | 卸掉 `dsh-galfree`;两行一起消失 |
+
+> **从旧版本升上来的话**:`~/.dsh/.agent-presets/galgame/` 那个旧目录(0.1.5 时代手工拷的
+> 四件套)**已经没用了**,留着不会生效,也不会冲突 —— 删掉即可。旧版"两种装法(A 插件装部署 /
+> B 插件交给 preset 授予)二选一"的纠结也随之消失:现在两样在同一个 bundle 里,
+> 不存在"preset 在、插件不在"的常规装法。
+
 ## 它到底加了什么(先说清楚,免得预期错位)
 
 | 东西 | 谁提供 |
@@ -11,91 +49,10 @@
 | **工具面**(`galfree_project_status` / `galfree_generate_scene` / `galfree_publish` … 共 16 个) | 同一个插件(T20) |
 | **板上的「下一步」**(`progress.nextActions[]`,带 `actor` 与跳转目标) | 同一个插件(T21);面板上也有一行 |
 | **skills** | 组装里保留了 standard 的 `skill-filesystem` + `tool-skill` 两行 ⇒ 这个模式能看到**部署里注册的全部 skill**(本机包括 `mattpocock-skills-dsh-zh` 那一套与技能市场的;写剧本要用的那个就在里面)。**没有额外挑**:挑哪些 skill 是部署的事,preset 只保证这套机制在场 |
-| **这个 preset 自己** | ① 一段**立场**(persona):galgame 制作现场、按指引走、只报事实、一次推进一环;② 一个**前置检查行**(`guard.mjs`):确认插件在场(工具名代表**版本下限**),不在就**带原因地拒绝**而不是静默少一堆工具 |
+| **这个 preset 自己** | ① 一段**立场**(persona):galgame 制作现场、按指引走、只报事实、一次推进一环;② 一个**前置检查行**(`galfree-guard` → `dsh-galfree/guard`):确认插件那一行**真的在跑**(工具名代表**版本下限**),不在就**带原因地拒绝**,而不是静默少一堆工具 |
 
-所以这个 preset 的姿态是**要求**插件在场,而不是**授予**插件能力 —— 为什么必须这样,见下面「两种装法」。
-
-> **插件从哪来**:GALFree 是部署级插件(本机是 profile 的 `dsh.profile.bundles` 里一行
-> `dsh-galfree`,指向本仓库的 checkout)。装法:插件市场里装,或者在 profile 的
-> `package.json` 的 `dsh.profile.bundles` 加一行(本机是 `"dsh-galfree": "link:<仓库路径>"`)
-> 再重启宿主。
-
-## 装进哪、怎么装
-
-preset 的规则很简单:**一个 preset = 一个目录,目录名就是 id**。用户 preset 放在
-`<dshHome>/.agent-presets/<id>/`(本机 `~/.dsh/.agent-presets/`),id 必须匹配
-`[a-z0-9][a-z0-9-]*`。
-
-**四个文件就是全部**(`preset.yml` / `agent.cordis.yml` / `guard.mjs` / `README.md`);
-`standard.reference.cordis.yml` 不要拷 —— 它只是仓库里的对照物,给 `src/preset.test.ts`
-检查"组装 = standard + 两处改动"用,preset 运行时用不到。
-
-### 从市场 / npm 装的用户:文件就在你装好的插件目录里
-
-市场装的是**插件**,preset 不是自动生效的 —— 但 `0.1.1` 起**那份 preset 随包一起发**,
-所以不必再来仓库取:
-
-```powershell
-# 从你装好的插件里拷出来(profile 名按你自己的改:web / desktop / …)
-$src = "$env:USERPROFILE\.dsh\profiles\web\node_modules\dsh-galfree\presets\galgame"
-$dst = "$env:USERPROFILE\.dsh\.agent-presets\galgame"
-New-Item -ItemType Directory -Force -Path $dst | Out-Null
-Copy-Item "$src\preset.yml", "$src\agent.cordis.yml", "$src\guard.mjs", "$src\README.md" -Destination $dst
-```
-
-用的是本仓库 checkout 就照原来那样从 `presets\galgame\` 拷:
-
-```powershell
-$dst = "$env:USERPROFILE\.dsh\.agent-presets\galgame"
-New-Item -ItemType Directory -Force -Path $dst | Out-Null
-Copy-Item presets\galgame\preset.yml, presets\galgame\agent.cordis.yml, presets\galgame\guard.mjs, presets\galgame\README.md -Destination $dst
-```
-
-复制完刷新宿主界面(或重启)。宿主界面里也能**从既有 preset 复制一份**再改 —— 那条路会替你
-挑一个不重名的 id,效果一样。
-
-> **别直接改随部署交付的 preset 目录**(宿主自带的那几个):升级会覆盖它。
-
-## 两种装法(二选一,**不能都装**)
-
-这个 preset 与 GALFree 插件的关系有两种摆法,选一种:
-
-### A. 插件装在**部署**里,preset 只加立场与前置检查(本机现状;先用这个)
-
-profile 的 `dsh.profile.bundles` 里已经有 `dsh-galfree`(本机就是),于是**每个会话**都有
-`galfree_*` 工具与那段指引;这个 preset 再给它一个专用立场 + 前置检查。
-
-- 好处:装完即可用,不动 profile。
-- 代价:`standard` 等别的会话也看得到那 16 个工具(它们不会被用到,但会占提示词)。
-
-### B. 把插件**交给 preset 授予**
-
-只有一种部署该这么写:插件**随宿主安装位置交付**(与 `@deepseek-ai/dsh-*` 那些包放在一起)。
-那时把组装末尾那一行换成裸包名:
-
-```yaml
-- id: galfree
-  name: 'dsh-galfree'
-```
-
-这样 `standard` 等会话就没有 GALFree,只有这个模式有。
-
-**为什么本机(profile 装法)不能这么写**:preset 的健康检查从**宿主安装位置**解析包名
-(`harnessBase` —— "a row's package name resolves against; the caller's own `ctx.baseUrl`,
-which is where the installed harness lives"),而 profile 的 `node_modules` 不在那条向上的路径上
-—— 于是插件明明装好了,这个 preset 也会被列成 **broken**("names a module that is not installed"),
-不可选、不可复制。
-
-**为什么两个地方都装绝对不行**:GALFree 插件会注册一个设置命名空间与一族 `/api/galfree/*` 路由,
-而这两处都是**重复即抛**:
-
-```
-settings namespace "dsh-galfree" is already registered
-webserver: duplicate GET route "/api/galfree/…"
-```
-
-宿主的规则是"重复注册即失败":preset 的组装会在会话创建时抛错并回滚(并指名出错的行)。
-换句话说 **A 与 B 是互斥的**;真要换成 B,先把 profile 的 bundles 里那一行去掉再重启。
+也就是说这个 preset 的姿态仍然是**要求**插件在场,而不是**授予**插件能力 —— 只不过现在
+"要求"变成了结构上的:两行在同一个 bundle 里,装了插件才有这个 preset。
 
 ## 手选,还是设成默认?
 
@@ -120,21 +77,40 @@ webserver: duplicate GET route "/api/galfree/…"
      `bible-not-final` 拒 —— 而不是自己往下生成,也不是把"要盖戳"当成自己的活;
    - 盖章之后继续按顺序推进(逐场生成 → 补素材 → 接线音频 → 试玩 → 发布),
      每一步都拿板上的字段当判据,并且**如实报**("lint 有 2 个 error"而不是"差不多好了")。
-4. 插件没装时:会话创建**失败**,并指名 `galfree-guard` 这一行,错误里带**缺了哪些工具**与怎么装
-   —— 不是少几个工具。
+4. 插件那一行被关掉 / 没激活成功时:preset 在名单里**带原因地显示成不可用**(指名
+   `galfree-guard` 这一行,并列出少了哪些工具、去哪儿开),不是少几个工具就放你进去。
 
 > 第 3 条里"建项目 / 写设定集由 agent 自己做"是 #28 之后的现状;早先的版本里这两步只能人点,
 > 如果你看到 agent 把这两步推给人,那就是它的信息过期了(先查 `galfree_*` 工具在不在)。
 
-## 维护
+## 维护(给改这个 preset 的人)
 
-- 本目录的 `agent.cordis.yml` 是随包 `standard` 组装的**逐行副本 + 两处改动**(persona、guard 行)。
-  测试会拿 `standard.reference.cordis.yml` 逐行比对,**多出来的行只许有 guard 那一行** ——
-  所以抄错、漂了、或者你顺手加了没声明的改动,都会红。
-- **那份参考副本是一份快照**(来源与版本写在其表头:`@deepseek-ai/dsh-agent-presets` **0.1.5-rc.1**)。
-  宿主升级之后:把随包的那份重新取出来覆盖它(它在宿主安装位置里,不在本仓库的 node_modules),
-  再跑 `npx vitest run src/preset.test.ts` —— 红出来的差异就是你要跟进的地方。
-  换句话说:**它把"看起来有没有漂"变成一次显式的动作**(升级后重新快照),
+本目录三个文件,分工是**一个真相三种形态**:
+
+| 文件 | 是什么 |
+|---|---|
+| `agent.cordis.yml` | **给人读的那一份**:行 + 注释标准(0.1.7 的 standard 行表 + 两处改动)。运行时**不读**它 |
+| `preset.yml` | **展示元数据**(name / description / order)。宿主**不读**它;它是 patch 那一行的元数据来源 |
+| `standard.reference.cordis.yml` | **快照**:0.1.7 随包 `standard` 的行表(来源与版本写在表头)。运行时**不读**它 |
+| `guard.mjs` | 前置检查插件的实现,经 `package.json` 的 `exports["./guard"]` 暴露给 preset 那一行 |
+
+**唯一"生效"的形态是 `cordis.patch.yml` 里的 `preset-galgame` 那一行**,它必须与
+`agent.cordis.yml` **逐行相等**(`src/preset.test.ts` 逐行深度比对,抄错、漂了就红)。
+
+- **宿主升级之后**:把随包的那份重新取出来覆盖 `standard.reference.cordis.yml`
+  (0.1.7 起它在 `@deepseek-ai/dsh-web-app` 的 `presets/standard.patch.yml` 里,是
+  `preset-standard` 行的 `config.plugins`;它在宿主安装位置里,不在本仓库的 node_modules
+  —— Windows 桌面版在 `resources/app.asar` 内,解包脚本见 `.scratch/asar-extract.mjs`),
+  跑 `npx vitest run src/preset.test.ts`:**红出来的差异就是你要跟进的漂移**,
+  跟完再把同样的改动抄进 `cordis.patch.yml`。
+  换句话说:它把"看起来有没有漂"变成一次显式的动作(升级后重新快照),
   而不是假装自己能看见宿主的当前版本。
-- `guard.mjs` 里那份"版本下限"的工具名与插件真实注册的名字由测试钉在一起(`src/preset.test.ts`):
+- **guard 行引用的形态不能随手改**:preset 的 `plugins` 行由 registry 挂载时,解析基准是
+  **profile 目录**(声明这一行的 Loader 树的 baseUrl),不是插件包目录 —— 本机实测
+  `./guard.mjs` 在真宿主里只会得到 `never started`。所以是
+  `dsh-galfree/guard`(`package.json` 的 `exports["./guard"]` + `files` 里的 `presets`)。
+  这三样(行名 / exports / files)由测试一起钉住。
+- **`guard.mjs` 里那份"版本下限"的工具名与插件真实注册的名字由测试钉在一起**:
   工具改名 → 测试红;而"查工具 ⇒ 指引也在"这条蕴含关系也有一条真宿主守卫盯着。
+  guard 为什么要"等一会儿"再判工具在不在(宿主行并行激活 + 本插件的工具走懒注入)、
+  以及本机实测到的现象,都写在 `guard.mjs` 的文件头里。

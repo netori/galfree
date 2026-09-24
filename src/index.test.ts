@@ -5,7 +5,7 @@
  * 也是"能力声明"进入系统的入口(参考链支不支持由它决定,而不是运行时猜)。
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { apply, channelFromSettings, parseModelCatalog, type Config } from './index.ts'
+import { apply, channelFromSettings, parseModelCatalog, type ConfigValues } from './index.ts'
 import { clearAudioAdapters, registeredAudioAdapters } from './service/audio-generation.ts'
 import { WORKFLOW_SECTION, type SystemPromptSeat } from './service/playbook.ts'
 import { cleanupTempDirs, makeTempDir } from './testing/tmp.ts'
@@ -13,7 +13,7 @@ import { collectPromptSections, type CollectedSection } from './testing/prompt-s
 import type { Context } from '@deepseek-ai/cordis'
 
 /** 一份填齐的设置文档(密钥明文,这是 ADR-0010 的知情选择)。 */
-function settings(overrides: Partial<Required<Config>> = {}): Required<Config> {
+function settings(overrides: Partial<ConfigValues> = {}): ConfigValues {
   return {
     enabled: true,
     defaultProjectsRoot: 'D:\\galgame',

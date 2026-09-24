@@ -1,16 +1,21 @@
 /**
- * 图像渠道设置界面(T14)—— 设置左侧导航里的一个独立分区「GALFree」。
+ * 渠道设置界面(T14;T37 迁到 DSH 0.1.7 的设置模型)。
  *
- * 为什么是独立分区,而不是挤进「插件配置」标签页:那个标签页把
- * `settings.plugin.item` 的注册表与**宿主自己的命名空间清单**交叉比对来决定渲染谁,
- * 插件拿不到那套过滤依据(实测:卡注册进去了,那个标签页里仍然不出现)。
- * 而宿主自己的功能页(「Agent 预设」等)走的是另一条路 —— 直接贡献一个
- * `settings.section`,设置左侧就多一项,**完全不依赖任何枚举**。本插件走这条。
+ * **旧模型已不存在**(升级后本插件"装不上"的那一半):`ctx.settingsScope` 这套镜像服务
+ * 与 `settings.plugin.item` / `settings.section` 那个位置在 0.1.7 的 asar 里**一次都搜不到**。
+ * 现在读写的正路是**客户端设置服务 `ctx.configForms`**:
  *
- * 写入走宿主既有的一套:读 `ctx.settingsScope.describe()` 的共享镜像拿
- * 「当前值 + revision」,保存时提交 `ctx.remote.settings.mutate(ns, ops, revision)`
- * —— revision 围栏保证并发改动被拒而不是被静默覆盖。**密钥明文**按 ADR-0010
- * 存本机设置文档:界面上如实写明这一点,不含糊。
+ *  - `ctx.configForms.get(entryId)` → 该 Loader entry 的共享表单(`getSnapshot/subscribe/mutate`);
+ *  - **entryId 是 Profile 里那一行的 id(`galfree`),不是包名**(`dsh-galfree`)——
+ *    设置面按行 id 认插件,拿包名去问会一直 "unavailable";
+ *  - 界面位置换成 Plugins 页的 `plugins.bundle.config`(按 bundle 包名 keyed);
+ *  - 只有**声明为 volatile 的字段**才会被设置面服务(`dsh-settings` 的 `volatileForm()`),
+ *    所以 Host 半那边的 `Config` 每个字段都 `.volatile()` —— 两边是一件事的两半。
+ *
+ * 写入仍然是"带 revision 围栏的一次 mutate":并发改动会被宿主拒(`settings/conflict`),
+ * 只是**客户端拿到的不是类型化异常,而是 `mutate()` 返回 `false`**(控制器自己重读镜像)——
+ * 所以这里说"没被接受(可能别处刚改过)",而不是回显一个不存在的错误码。
+ * **密钥明文**按 ADR-0010 存本机设置文档:界面上如实写明这一点,不含糊。
  */
 import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
@@ -19,27 +24,50 @@ import { AudioModelPicker } from './audio-model-picker.tsx'
 import { audioRowsFromCatalog, sameAudioRows, type AudioModelRow } from './audio-catalog.ts'
 import s from './settings-card.module.css'
 
-/** 与 Host 半 `CONFIG_NAMESPACE` 同一个命名空间(两端必须一致)。 */
-export const SETTINGS_NAMESPACE = 'dsh-galfree'
+/**
+ * **Profile 行 id**(`cordis.patch.yml` 里 `id: galfree`)—— 设置面认的就是它。
+ * 与包名 `dsh-galfree` 分开记着,免得下次又有人拿包名去 `configForms.get()`。
+ */
+export const SETTINGS_ENTRY_ID = 'galfree'
 
-/** 卡片渲染所需的宿主服务(运行时注入;此处按名取用,不引宿主内部包)。 */
+/** 注册设置界面的 bundle 包名(Plugins 页按它给这个 bundle 挂「配置」)。 */
+export const SETTINGS_BUNDLE_PACKAGE = 'dsh-galfree'
+
+/** 控制器快照(`ConfigFormController.getSnapshot()` 的形态,只取这里用到的字段)。 */
+interface ConfigFormSnapshot {
+  status?: 'loading' | 'ready' | 'unavailable'
+  value?: Partial<ChannelDraft>
+  user?: Partial<ChannelDraft>
+  revision?: number
+  writable?: boolean
+  mode?: 'host' | 'memory'
+}
+
+/** 一个 entry 的共享表单席位(`ConfigFormController` 的三个面)。 */
+interface ConfigFormSeat {
+  getSnapshot: () => ConfigFormSnapshot
+  subscribe: (listener: () => void) => () => void
+  mutate: (
+    ops: Array<{ op: 'set'; path: string[]; value: unknown } | { op: 'unset'; path: string[] }>,
+    revision?: number,
+  ) => Promise<boolean>
+}
+
+/**
+ * 设置面席位(`ctx.configForms`)。
+ *
+ * 按名取用、只用到三类方法:`get`(取某个 entry 的表单)、`whileServed`(宿主真在服务
+ * 这个 entry 时才挂页面)、以及表单自己的 `getSnapshot/subscribe/mutate`。
+ * 写入走的是服务提供者的 fiber,所以本插件**不需要**声明 `remote.settings`(旧模型的要求)。
+ */
 interface SettingsCardContext {
-  settingsScope: {
-    describe: () => {
-      getSnapshot: () => unknown
-      subscribe: (listener: () => void) => () => void
-      ensure: () => Promise<void> | void
-      acceptView: (view: unknown) => void
-    }
-  }
-  remote: {
-    settings: {
-      mutate: (
-        ns: string,
-        ops: Array<{ op: 'set'; path: string[]; value: unknown } | { op: 'unset'; path: string[] }>,
-        revision: number | undefined,
-      ) => Promise<{ ok: true; value: unknown } | { ok: false; error: unknown }>
-    }
+  configForms: {
+    get: (entryId: string) => ConfigFormSeat
+    /**
+     * 宿主**真的在服务**这些 entry 的设置面时才注册(`register` 拿到服务中的集合,
+     * 返回自己的 disposer);返回的 disposer 由调用方(注册那一步)用 `ctx.effect` 收口。
+     */
+    whileServed: (namespaces: string[], register: (served: Set<string>) => () => void) => () => void
   }
 }
 
@@ -140,6 +168,10 @@ const VOICE_MODEL_EXAMPLE = JSON.stringify([
   },
 ], null, 2)
 
+/**
+ * 本 entry 这一份设置的三层(与旧模型同形,便于组件其余部分一行不改):
+ * `value` = 生效值(base + 用户覆盖),`user` = 人真写下的那层,`revision` = 写围栏。
+ */
 interface NamespaceView {
   value?: Partial<ChannelDraft>
   user?: Partial<ChannelDraft>
@@ -154,15 +186,23 @@ interface ScopeState {
   view: NamespaceView | null
 }
 
-/** 从镜像快照里挑出本命名空间 + 可写性(镜像在 loaded=false 时还没答案)。 */
-function readScope(snapshot: unknown): ScopeState {
-  const shape = snapshot as { view?: { writable?: boolean; namespaces?: NamespaceView[] }; status?: string } | null
-  const view = shape?.view?.namespaces?.find((entry) => (entry as { ns?: string }).ns === SETTINGS_NAMESPACE) ?? null
+/**
+ * 控制器快照 → 本组件要的那几个判断。
+ *
+ * `unavailable` 有两种来路:进程内持久化(`mode: 'memory'`,非 loopback 页面)
+ * 与"这个 entry 根本没有 volatile 字段" —— 两种都不该假装能改,于是 `writable=false`
+ * 且 `loaded=true`(让人看到"这个部署把设置存成只读",而不是一直转圈)。
+ */
+function readScope(snapshot: ConfigFormSnapshot | undefined): ScopeState {
+  const status = snapshot?.status
+  const unavailable = status === 'unavailable'
   return {
-    loaded: shape?.view !== undefined,
-    writable: shape?.view?.writable !== false,
-    revision: view?.revision,
-    view,
+    loaded: status === 'ready' || unavailable,
+    writable: unavailable ? false : snapshot?.writable !== false,
+    revision: snapshot?.revision,
+    view: snapshot === undefined
+      ? null
+      : { value: snapshot.value, user: snapshot.user, revision: snapshot.revision, writable: snapshot.writable },
   }
 }
 
@@ -223,16 +263,14 @@ class SectionBoundary extends Component<{ children: ReactNode }, { error: string
 }
 
 export function ChannelSettingsCard({ ctx }: { ctx: SettingsCardContext }) {
-  // 依赖缺失时**不许白屏**:说清缺什么。设置分区是用户看得见的地方,
+  // 依赖缺失时**不许白屏**:说清缺什么。设置面是用户看得见的地方,
   // 一片空白会让人以为"功能没做",而真相是"装配缺了一个服务"。
   //
-  // 注意:这里必须用 try 包住 —— 宿主对**未声明**的子服务(如 `remote.settings`)
-  // 属性访问本身就是抛错(`cannot get property "remote.settings" without inject`),
-  // 直接读它做判断会把"缺依赖"变成"崩溃"。
+  // 注意:这里必须用 try 包住 —— 宿主对**未声明**的子服务属性访问本身就是抛错
+  // (`cannot get property "…" without inject`),直接读它做判断会把"缺依赖"变成"崩溃"。
   const missing: string[] = []
   try {
-    if ((ctx as { settingsScope?: unknown })?.settingsScope === undefined) missing.push('settingsScope')
-    if ((ctx as { remote?: { settings?: unknown } })?.remote?.settings === undefined) missing.push('remote.settings')
+    if ((ctx as { configForms?: unknown })?.configForms === undefined) missing.push('configForms')
   } catch (error) {
     missing.push(`访问服务时出错(${error instanceof Error ? error.message : String(error)})`)
   }
@@ -253,8 +291,9 @@ export function ChannelSettingsCard({ ctx }: { ctx: SettingsCardContext }) {
 }
 
 function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
-  const describe = ctx.settingsScope.describe()
-  const [scope, setScope] = useState<ScopeState>(() => readScope(describe.getSnapshot()))
+  // `get` 是记忆化的:同一个 entry 每次拿到同一个控制器,所以订阅/写入的队列只有一条。
+  const form = useMemo(() => ctx.configForms.get(SETTINGS_ENTRY_ID), [ctx])
+  const [scope, setScope] = useState<ScopeState>(() => readScope(form.getSnapshot()))
   const [draft, setDraft] = useState<ChannelDraft>(EMPTY_DRAFT)
   /** 模型选择器的状态:清单行(上游拉到的 + 手输的);目录 JSON 仍是唯一真相。 */
   const [choices, setChoices] = useState<ModelRow[]>(() => rowsFromCatalog(''))
@@ -282,12 +321,13 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
 
   useEffect(() => {
     let alive = true
-    const refresh = (): void => { if (alive) syncFromMirror(readScope(describe.getSnapshot())) }
-    const stop = describe.subscribe(refresh)
-    void Promise.resolve(describe.ensure()).then(refresh).catch(() => { /* 未加载就渲染缺失态 */ })
+    const refresh = (): void => { if (alive) syncFromMirror(readScope(form.getSnapshot())) }
+    const stop = form.subscribe(refresh)
+    // 控制器自己会在 `get()` 时让镜像 `ensure()`;这里同步读一次就够了 ——
+    // 没有旧模型那个 `ensure()` 要等(它现在是镜像内部的事)。
     refresh()
     return () => { alive = false; stop() }
-  }, [describe, syncFromMirror])
+  }, [form, syncFromMirror])
 
   /**
    * 把"设置里已保存的目录"带进模型选择器。
@@ -370,17 +410,19 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
         : { op: 'set' as const, path: [field], value: draft[field] }
     ))
     try {
-      const response = await ctx.remote.settings.mutate(SETTINGS_NAMESPACE, ops, scope.revision)
-      if (!response.ok) {
+      // 一次 mutate 带 revision 围栏:别处刚改过 → 宿主拒 → 这里拿到 `false`
+      // (控制器已经自己重读了镜像),如实说"没被接受",不假装保存成功。
+      const accepted = await form.mutate(ops, scope.revision)
+      if (!accepted) {
         setStatus('error')
-        setMessage(`设置没被接受(可能别处刚改过):${describeError(response.error)}`)
+        setMessage('设置没被接受(可能别处刚改过,或这个部署把设置存成只读)。请对照页面上的当前值再看一眼,然后重试。')
+        syncFromMirror(readScope(form.getSnapshot()))
         return
       }
-      describe.acceptView(response.value)
       dirty.current.clear()
       setStatus('saved')
       setMessage('已保存。渠道改动对下一次出图立刻生效(不用重启)。')
-      syncFromMirror(readScope(describe.getSnapshot()))
+      syncFromMirror(readScope(form.getSnapshot()))
     } catch (error) {
       setStatus('error')
       setMessage(`保存失败:${describeError(error)}`)
@@ -697,7 +739,7 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
                 dirty.current.clear()
                 setStatus('idle')
                 setMessage(null)
-                syncFromMirror(readScope(describe.getSnapshot()))
+                syncFromMirror(readScope(form.getSnapshot()))
               }}
             >
               放弃改动
@@ -723,13 +765,17 @@ function describeError(error: unknown): string {
 }
 
 /**
- * 注册成设置里的一个独立分区。
+ * 把这张卡挂到 **Plugins 页**上(T37:设置页在 0.1.7 里重构过)。
  *
- * 两条都必要:`settings.section` 让它出现在设置左侧导航;里面的表单本体由
- * 组件自己渲染。**不**注册 `settings.plugin.item` —— 那会让同一件事在两处
- * 界面里可改(第二配置面),而它恰恰又不显示,没必要。
+ * 三条都必要:
+ *  1. `plugins.bundle.config`(keyed,`key` = **bundle 包名**):Plugins 页按它给这个 bundle
+ *     挂「配置」入口并渲染这一页 —— 旧的 `settings.plugin.item` / `settings.section`
+ *     在本版 asar 里一次都搜不到;
+ *  2. `configForms.whileServed([...])`:宿主**真的在服务这个 entry 的设置面**时才注册
+ *     (没配 volatile 字段 / 没装载时,页面上不留一条点不开的痕迹);
+ *  3. 注册在 `ctx.effect` 里:`whileServed` 返回的 disposer 由调用方负责 —— 卸载要能摘掉。
  */
-export function apply(ctx: Context): void {
+export function apply(ctx: Context): () => void {
   const slots = (ctx as unknown as {
     slots: {
       inject: (name: string, build: () => () => void) => unknown
@@ -738,18 +784,14 @@ export function apply(ctx: Context): void {
   }).slots
 
   const settings = ctx as unknown as SettingsCardContext
+  const configForms = (ctx as unknown as { configForms: SettingsCardContext['configForms'] }).configForms
 
-  ctx.effect(
-    () => slots.inject('settings.section', () => slots.register({
-      name: 'settings.section',
-      id: 'galfree',
-      order: 40,
-      label: () => 'GALFree',
-    }, () => (
-      <SectionBoundary>
-        <ChannelSettingsCard ctx={settings} />
-      </SectionBoundary>
-    ))) as () => void,
-    'dsh-galfree: image channel settings section',
-  )
+  return (configForms.whileServed([SETTINGS_ENTRY_ID], () => slots.inject('plugins.bundle.config', () => slots.register({
+    name: 'plugins.bundle.config',
+    key: SETTINGS_BUNDLE_PACKAGE,
+  }, () => (
+    <SectionBoundary>
+      <ChannelSettingsCard ctx={settings} />
+    </SectionBoundary>
+  ))) as unknown as () => void) as unknown as () => void)
 }
