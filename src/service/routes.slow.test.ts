@@ -1140,9 +1140,18 @@ describe('路由适配层(/api/galfree)', () => {
       expect(ran.tasks.map((task) => task.outputPath).sort()).toEqual(['game/audio/bgm/agent.ogg', 'game/audio/bgm/panel.ogg'])
       expect(ran.tasks.every((task) => task.state === 'awaiting-review')).toBe(true)
       // 产物都落进了 game/(池是派生的,立刻有三条)。
+      //
+      // ⚠️ 后缀是 **`.mp3`,不是请求里那个 `.ogg`** —— 这不是笔误,是 T34 起的行为:
+      // 落盘后缀按**字节魔数**定,不按请求路径定(理由:Ren'Py 按扩展名选解码器,
+      // 把 mp3 字节写成 `.ogg`,那个文件在游戏里就是读不出来;实测教训在
+      // `audio-generation.ts` 的 `audioFormatOfBytes` 上写着)。这一条的上游
+      // (见上面 `download`)回的就是 mp3 字节,所以三条都换了后缀。
+      // 真实请求路径仍留在**任务账本**上(上一条断言),两处一起看才是全貌;
+      // T34 自己的守卫在 `audio-format.test.ts`(换后缀 + 在任务上如实记一笔)。
+      // 这条断言原先写的是 `.ogg` —— 它比 T34 早,没跟着改,2026-09-24 发版前跑慢带时红出来。
       const pool = await (await fetch(`${audioBase}/api/galfree/audio`)).json() as { files: Array<{ path: string }> }
       expect(pool.files.map((file) => file.path).sort())
-        .toEqual(['audio/bgm/agent.ogg', 'audio/bgm/panel-ran.ogg', 'audio/bgm/panel.ogg'])
+        .toEqual(['audio/bgm/agent.mp3', 'audio/bgm/panel-ran.mp3', 'audio/bgm/panel.mp3'])
     } finally {
       await audioService.dispose()
       await new Promise<void>((resolve) => audioServer.close(() => resolve()))
