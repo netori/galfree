@@ -306,3 +306,63 @@
   "指纹剔除 id 子句"的设计成立(否则每次盖章都要人重盖一遍,那条路根本没法用)。
   **教训**:一条链路的"函数都对、守卫都绿",不等于**它被接起来了**;
   要验的是**端到端那一次真的响了**——这正是作者试玩才能发现、而所有单测都发现不了的那一类。
+- **#43(T37)已交付(2026-09-24)**:**升级到 DSH 0.1.7-rc.2 的适配** —— 用户报"插件装不上/加载失败"。
+  查清后是**两半各断一处,而且都是删掉式的变更**(不是改名、没有兼容层):
+  - **Host 半**:`apply` 的第一句 `ctx.settings.register(ns, schema, { base })` —— 这个方法
+    在 0.1.7 里**不存在**了。`ctx.settings` 现在由 `@deepseek-ai/dsh-settings` 的
+    **`SettingsForms`** 提供,只有 `configure/describe/update/replace/mutate/write/schema`。
+    于是插件 fiber 激活失败,工具面、路由、流程指引**一起没有** —— 就是"装不上"的实况。
+  - **Client 半**:旧模型的两个名字在 0.1.7 的 asar 里**一次都搜不到**
+    (`settingsScope` 0 命中、`settings.plugin.item` 0 命中);写入用的 `remote.settings` 也不再
+    由插件声明(共享表单**经服务提供者的 fiber** 发请求)。
+  **新模型(两半的形状都变了)**:配置就是本插件那一行 Loader entry 的 config;要能被设置面改的
+  字段在 schema 上声明 **`.volatile()`**,Loader 把新值提交进**稳定引用**(`Entry._commitVolatile`),
+  插件 `current()` 现读现取 —— 不再有命名空间,也不再需要 `settings` 席位。
+  **设置面只认 Profile 行 id**(`cordis.patch.yml` 的 `id: galfree`),**不是包名**
+  (`dsh-galfree`;拿包名去 `configForms.get()` 会一直 `unavailable`);客户端页面挂在
+  **Plugins 页的 `plugins.bundle.config`**(按 bundle 包名 keyed),注册前先问
+  `configForms.whileServed([...])`(宿主真在服务这个 entry 才挂)。
+  **一条同源陷阱**:schema 库换成 **`@deepseek-ai/schemastery`**(宿主那份 fork 才有 `.volatile()`)。
+  两个 schemastery 同时装会让它们各自的 `declare global { namespace Schemastery }` **合并**,
+  于是 `z<Config>` 注解与整棵 schema 互不兼容(TS2322,报在 `meta.default` 上)——
+  实测症状极不像"装错库"。
+  **真机验收(不是单测)**:本机装的是 0.1.7-rc.2,用安装里的 CLI
+  (`ELECTRON_RUN_AS_NODE=1` + `app.asar/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js`)
+  建了个 scratch profile `galfree-verify`(link 本仓库)真起了一次宿主:
+  `--dump-config` 里 `- id: galfree` 在位且未 disabled;`/api/galfree/state`、`/progress`、
+  `/cast`、`/theme`、`/sdk` 全部 200(`/progress` 回 124KB 的推导板);
+  客户端的 `dsh-galfree` 在启动载荷的 `application` 批次里、`/plugins/??dsh-galfree/client.js` 200;
+  `--dump-config-schema` 里 16 个字段**逐个**带 `"x-cordis": { "volatile": true }`
+  (这是设置页存在的前提)。**没验到的**:浏览器里那张面板与设置页真渲染成什么样(本机没有浏览器控制)。
+  **三条新守卫**(`settings-card.test.ts` 的「设置面契约(T37)」,都变异验证过):
+  字段全 volatile(漏一个 = 设置页**整页不存在**)、行 id 与 `cordis.patch.yml` 逐字一致、
+  注册到 `plugins.bundle.config` 且先问 `whileServed`。
+- **T38(同一次适配的另一半)· galgame preset 的载体换了**:0.1.7 把
+  **`$DSH_HOME/.agent-presets/<id>/` 目录机制整个删掉**——随包 skill 的原话是
+  "**Nothing reads that directory any more**"(`editing-cordis-compositions/SKILL.md:70`),
+  注册表 README 也写明"neither scans directories nor accepts preset paths"。
+  所以旧装法(把四个文件拷进那个目录)**静默失效**:不报错、roster 里连诊断都没有。
+  新载体是**声明行**(`{ id: 'preset-galgame', name: '@deepseek-ai/dsh-agent-preset',
+  config: { id, name, description, order, plugins } }`),放在**插件自己的 bundle patch** 里 ——
+  装插件就有这个模式,不用再拷目录;旧版"插件装部署 / 插件交给 preset 授予"那个二选一
+  (两种都装会因设置命名空间与路由**重复即抛**)也随之消失。旧目录可以删。
+  顺带查出的漂移:随包 `standard` 从 0.1.5 起变了三处(新增 `tool-plugin-manager` 禁用行;
+  `delegation` 里 `workflow-worker-thread` → **`workflow-ptc`**,旧包名在 0.1.7 全树 0 条 ⇒
+  照旧文抄一定 import 失败;`tool-ralph` 加禁用),而 `standard.reference.cordis.yml` 是
+  0.1.5 的逐字副本(实测 body = 12928 字节 = 0.1.5 原件大小)。
+  **两条实测结论(都反直觉,别照旧文的结论办)**:
+  ① **相对行解析的基准是 profile 目录,不是插件包目录** —— `./guard.mjs` 在真机 roster 里是
+  `broken: "… never started"`;`./node_modules/dsh-galfree/presets/galgame/guard.mjs` 才解析得到。
+  所以 guard 行写**裸包名 + 导出子路径** `dsh-galfree/guard`(0.1.0 之前那条"相对路径更稳"的
+  结论**在这一版反过来了**:机制变了,结论跟着变)。
+  ② **行是并行激活的,而本插件的工具走懒注入** ⇒ preset 挂载那一刻工具目录可能还空着,
+  单次检查会抛,而"挂载时抛"是**永久失败**(roster 里 preset 直接 `broken` = 选不了,
+  尽管插件本身好好的、`/api/galfree/state` 200)。实测探针:`immediate=missing after3s=present`。
+  guard 改成**有界等待**(25ms 轮询,默认 5s,`config.waitMs` 可覆盖)后两条路都验过。
+  **一般化的教训**:任何"在挂载那一刻采样工具目录"的消费者都会撞上这条竞态 ——
+  要么等,要么在请求时现读(本插件的流程指引就是每次组装现问)。
+  **真机 roster 取证**:`POST /api/agentPresets/list`(RPC 信封
+  `{type:'client-request', rpcId, method, payload:{args}}`,先拿 `?token=` 换 cookie)——
+  返回里 `galgame` order 5、**无 `broken`**;同一条路也验了设置面:
+  `settings/describe` 里 `galfree` 在列(`autoGenerate=true` / `applies='live'` / 16 个字段齐全),
+  `settings/mutate` 写一次再 unset 回来(user 层与 revision 都对)。

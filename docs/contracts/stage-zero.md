@@ -1515,10 +1515,12 @@ interface NextAction {
   慢带里那条断言 `/progress` 带回的 `nextActions` 就是面板读的那份(带 actor)。
   点击 → 滚动 / 打开那一场,要在浏览器里点一次(与别的面板验收同一批)。
 
-## galgame 专用 agent preset(T22 / #30 之后追加)
+## galgame 专用 agent preset(T22 / #30 起;**T38 换了载体**)
 
 在仓库里交付一个**可复现**的 agent preset:`presets/galgame/`
 (`preset.yml` + `agent.cordis.yml` + `guard.mjs` + `README.md` + 一份 `standard` 参考副本)。
+**0.1.7 起它的交付形态变了**(见下面的「载体」与「名字为什么是 `dsh-galfree/guard`」),
+但"它加了什么""失败必须带原因"这两件事没变。
 
 ### 它到底加了什么(别预期错位)
 
@@ -1535,38 +1537,82 @@ interface NextAction {
 
 ### 组装 = 随包 `standard` + **两处**声明的改动(机器检查)
 
-`agent.cordis.yml` 逐行照抄随包 `standard` 组装,只改两处:persona、末尾加一行 guard。
+组装逐行照抄随包 `standard`,只改两处:persona、末尾加一行 guard。
 **这句话本身被守卫钉住**:`standard.reference.cordis.yml` 是那份参考副本(逐字保存),
-测试对它逐行**深度相等**比对,并断言"多出来的行有且只有 guard 一行"。
-所以:抄错一个字符、漂了、宿主升级后 standard 变了 —— 都会红。
+`agent.cordis.yml` 是给人读的同一份组装,而**交付形态**是 `cordis.patch.yml` 里
+`preset-galgame` 那一行的 `config.plugins`。三者必须**深度相等**(逐行比对),
+"多出来的行有且只有 guard 一行"。所以:抄错一个字符、漂了、宿主升级后 standard 变了
+—— 都会红。
 不做减法(不砍工具)的理由也写在文件头:**写 `.rpy` 与写代码要的是同一套工具**,
 "这个模式与众不同"不靠少给工具来体现。
 
-### 前置检查行为什么是**相对路径**,而不是 `name: 'dsh-galfree'`
+**0.1.7 的 standard 相对 0.1.5 漂了三处**(换参考副本时实测出来的,照旧文抄必红):
+`tool-plugin-manager` 新增(且 `disabled: true`);`delegation` 里
+`workflow-worker-thread` / `@deepseek-ai/dsh-workflow-worker-thread` 改名成
+**`workflow-ptc` / `@deepseek-ai/dsh-workflow-ptc`**(旧包名在 0.1.7 全树 0 条);
+`tool-ralph` 加了 `disabled: true`。
 
-这一条是本票最反直觉、也最要紧的结论(两条都对源码核实过):
+### 载体:随插件 bundle 的**声明行**(T38)
 
-1. preset 的**健康检查**从**宿主安装位置**解析包名 —— "a row's package name resolves against;
-   the caller's own `ctx.baseUrl`, which is where the installed harness lives"
-   (`dsh-agent-presets` 的 discovery 源码)。而第三方插件通常装在 **profile** 的 `node_modules` 里,
-   那条向上的路径够不着它 —— 于是插件明明装好了,`name: 'dsh-galfree'` 这一行也会被报成
-   **broken**(preset 不可选、不可复制)。
-2. 相对行(`./guard.mjs`)的判定是"这个文件在不在",与谁装在哪无关 ⇒ 任何部署里都稳定;
-   真正的前置判断交给 guard 自己做。
-3. guard **不能**加 `disabled`:健康检查会跳过 disabled 行,那就回到"静默少几个工具"了。
+0.1.5 那一代:preset = `$DSH_HOME/.agent-presets/<id>/` 目录,由用户手工拷进去。
+**0.1.7 把这条机制整个删了** —— 随包文档的原话是 "Nothing reads that directory any more"
+(`@deepseek-ai/dsh-agent-preset` 的 `skills/editing-cordis-compositions/SKILL.md`),
+注册表那一侧也写明它 "neither scans directories nor accepts preset paths"。
+旧装法于是**静默失效**:不报错、roster 里连诊断都没有(不是"加载失败",是"不存在")。
 
-### 两种装法(互斥,二选一)
+现在一个 preset = **一行声明**:
 
-| 摆法 | 怎么做 | 代价 |
-|---|---|---|
-| **A. 插件装在部署里**(本机现状) | profile 的 `dsh.profile.bundles` 里已有 `dsh-galfree`;preset 只加立场与前置检查 | 别的会话也看得到那 16 个工具(占提示词,不会被用到) |
-| **B. 插件交给 preset 授予** | 插件随**宿主安装位置**交付,组装里换成 `- {id: galfree, name: 'dsh-galfree'}` | 只有这个模式有 GALFree |
+```yaml
+- id: preset-galgame
+  name: '@deepseek-ai/dsh-agent-preset'
+  config: { id: galgame, name: …, description: …, order: 5, plugins: [ … ] }
+```
 
-**两种都装绝对不行**:插件要注册一个设置命名空间与一族 `/api/galfree/*` 路由,而
-`dsh-settings` 与 `dsh-host-webserver` 都是**重复即抛**
-(`settings namespace "dsh-galfree" is already registered` /
-`webserver: duplicate GET route …`);宿主的规则是"组装里拒绝的行会让会话创建失败并回滚、
-并指名那一行"。README 把这条与两种摆法一起写明了。
+本插件的这一行放在**插件自己的 bundle patch**(`cordis.patch.yml`)里 —— 谁装了
+dsh-galfree,谁就同时得到插件与这个 preset,于是"preset 要求插件在场"变成
+**结构上成立**,而不是靠人记得多拷一步。旧版那个"插件装在部署里 / 插件交给 preset 授予"
+的二选一(两种都装会因为设置命名空间与 `/api/galfree/*` 路由**重复即抛**)也随之消失:
+插件与 preset 在**同一个 patch 的相邻两行**,不会再各注册一遍。
+→ **旧目录 `~/.dsh/.agent-presets/galgame/` 可以删掉**(没人读它了)。
+
+两条容易混的地址:`preset-galgame` 是 **Loader 行的 id**(编辑这一行时用的地址);
+**会话真正保存的 preset 身份是 `config.id`(=`galgame`)**。
+
+### 前置检查行的名字为什么是 `dsh-galfree/guard`(实测,不是推的)
+
+| 这一行写什么 | roster 里的诊断(0.1.7 真机,profile `galfree-verify`) |
+|---|---|
+| `./guard.mjs` | `broken: "… (./guard.mjs): never started"`(import 失败) |
+| `./node_modules/dsh-galfree/presets/galgame/guard.mjs` | 无 `broken` ⇒ **解析基准是 profile 目录** |
+| **`dsh-galfree/guard`(采用)** | 无 `broken` |
+
+机制:`dsh-app-boot` 的 `boot()` 把根 ctx 的 `baseUrl` 设成 `<profileDir>/cordis.yml` 所在目录,
+`Include` 与 registry 的 `mountPreset` 都用它 —— 所以**相对行落到 profile 目录**,
+那里没有我们的文件;裸包名则按 profile 的 `node_modules` 解析,正是插件被装上的地方。
+于是 guard 文件留在 `presets/galgame/guard.mjs`,靠 `package.json` 的
+`exports["./guard"]` 露出来(`files` 本来就发 `presets/`;测试把 name + exports + files 钉在一起)。
+→ 旧的"相对路径在任何部署里都稳定"这条结论**在 0.1.7 反过来了**:机制变了,结论跟着变。
+
+guard **不能**加 `disabled`:registry 挂载时的 `auditRows` 会跳过 disabled 行,
+那就回到"静默少几个工具"了。
+
+### 一个会静默毁掉整个 preset 的竞态(实测 + 已修)
+
+宿主的行是**并行**激活的(`cordis-plugin-loader` 的 `EntryGroup.update()` → `Promise.all`),
+而本插件注册工具走的是**懒注入**(`ctx.inject(['tools'], …)`)—— 于是 preset 挂载那一刻,
+工具目录**可能还是空的**。原来的单次检查在这里抛,而"挂载时抛"是**永久失败**
+(那一行的 fiber rejected):roster 里 preset 直接 `broken` = 选不了,
+**而插件本身挂得好好的**(`/api/galfree/state` 200)。实测探针原话:
+`immediate=missing after3s=present` —— 是启动竞态,不是作用域问题。
+
+所以 `guard.mjs` 现在是**有界等待**(25ms 轮询,默认 5000ms,行 `config.waitMs` 可覆盖),
+等不到再带原因失败。两条路都在真机上验过:
+
+- 正常:roster 里 `galgame` 无 `broken`;
+- 把插件行改成 `disabled: true`:`broken: "galfree-guard (dsh-galfree/guard): … 等了 5000ms 仍未看到:…"`。
+
+**这条不只在 preset 上有意义**:任何"在挂载那一刻采样工具目录"的消费者都会撞上它 ——
+要么等,要么在请求时现读(本插件的流程指引就是每次组装现问)。
 
 ### AC5 的落点:失败**带原因**,不静默
 
@@ -1586,11 +1632,12 @@ interface NextAction {
 
 ### 已知边界
 
-- **AC1 的现场那一次要人做**:装进 `<dshHome>/.agent-presets/galgame/` → 新开一个**空**会话
+- **AC1 的现场那一次要人做**(现在不必再拷目录了):装好插件 → 重启宿主 → 新开一个**空**会话
   → 选「Galgame 制作」→ 只给一句主题,看它是否先 `galfree_project_status` 并按指引顺序推进。
-  仓库没有 DOM/宿主级自动化面能替这一步(与 T19 的 AC1 同一性质)。
+  仓库没有 DOM/宿主级自动化面能替这一步(与 T19 的 AC1 同一性质);
+  能机器验的到 "roster 里那一行不 broken"为止。
 - preset **不拥有**注册表 / 沙箱审批栈 / 持久化 / 模型路由 —— 有一条守卫按族名禁掉这些行
-  (`dsh-tools` / `dsh-settings` / `dsh-agent-presets` / `dsh-session*` / sandbox|approval / `dsh-llm` …)。
+  (`dsh-tools` / `dsh-settings` / `dsh-session*` / sandbox|approval / `dsh-llm` …)。
 
 ## 模板的界面层(T7 之后补齐的一块,实测换来的)
 **新建项目必须整份带上 SDK 的 GUI 模板**(`screens.rpy` / `gui.rpy` / `guisupport.rpy` / `testcases.rpy`),
@@ -1875,4 +1922,69 @@ agent:**`galfree_theme`**(`read` / `preview` / `apply`),`galfree_project_status`
 **换皮不覆盖它们**。所以"整套替换"指的是一套图里**非封面**的那些;那三张归 #38 的
 `galfree_cover_art`(AI 出图,走图像渠道)。反过来说:换主题时菜单底**不会**跟着变颜色
 —— 那是**有意留给人/工具的那三张**,想让它跟着主题走就重新出一张封面。
+
+## 设置面(DSH 0.1.7 起换了整套 · T37)
+
+**为什么单列一节**:这不是"换个方法名",是**两处删掉式的变更**,而且两处都**静默**
+(编译期不报、旧写法在别的地方看着还挺像新写法)。0.1.1 在 0.1.7 上"装不上"就是它。
+
+### Host 半:配置就是本插件那一行 entry 的 config
+
+| 0.1.5 那一代 | 0.1.7 |
+|---|---|
+| `ctx.settings.register(ns, GalfreeSettingsSchema, { base })` → `scope.get()` | **方法不存在**。`ctx.settings` 由 `@deepseek-ai/dsh-settings` 的 `SettingsForms` 提供,只有 `configure/describe/update/replace/mutate/write/schema` |
+| 插件自选命名空间(`dsh-galfree`) | 没有命名空间。设置面按 **Profile 行 id** 寻址 —— 我们这行是 `cordis.patch.yml` 的 `id: galfree`(**不是包名 `dsh-galfree`**) |
+| `base`(组合给定值)与用户覆盖两层由插件自己合 | Loader 校验那一行的 `config` 并把值交给 `apply`;设置页的写入落在 profile patch 的同一处 |
+
+**读法**:`Config` 每个字段声明 `.volatile()`;`apply(ctx, config)` 拿到的 `config` 里
+每个字段是一个**稳定引用**;`current()` 现读现取(`readConfig(refs)`)。
+人在设置页改一次 ⇒ Loader 把新值提交进**同一个引用**(`cordis-plugin-loader` 的
+`Entry._commitVolatile` → `updateVolatile(ref, value)`),下一次 `current()` 就是新值 ——
+与旧的 `scope.get()` 同一个语义。
+
+**`.volatile()` 不是装饰**:`dsh-settings` 的表单只取 schema 的 **volatile 子集**
+(`volatileForm()` / `isVolatilePath()`),而 `describe()` 会**跳过没有任何 volatile 字段的
+entry** ⇒ 漏一个字段都可能是"**整页不存在**"(不是少一个输入框)。守卫:
+`settings-card.test.ts` 的「设置面契约(T37)」逐字段查 `meta.volatile`。
+
+**`config` 缺席时**(裸 cordis / 单测)用 `Config(undefined)` 自己过一遍 schema 造引用 ——
+两条路得到同一形状,于是后面只有一种读法。
+
+### Client 半:读写走 `ctx.configForms`
+
+| 0.1.5 那一代 | 0.1.7 |
+|---|---|
+| `ctx.settingsScope.describe()` 的共享镜像 | `ctx.configForms.get('<行 id>')` → 该 entry 的 `ConfigFormController`(`getSnapshot/subscribe/mutate`) |
+| `ctx.remote.settings.mutate(ns, ops, revision)` | 同一个控制器的 `mutate(ops, revision) → Promise<boolean>`;**不需要**声明 `remote.settings`(共享表单经**服务提供者的 fiber** 发请求) |
+| 槽位 `settings.plugin.item` / `settings.section` | **都不存在**。配置面挂在 **Plugins 页的 `plugins.bundle.config`**(keyed,`key` = bundle 包名),注册前先问 `configForms.whileServed([...])` |
+
+**冲突的形态变了**:宿主仍然拒并发写(`settings/conflict`),但客户端拿到的是
+**`mutate()` 返回 `false`**(控制器自己重读镜像)—— 所以界面说"没被接受(可能别处刚改过)",
+不回显一个不存在的错误码。
+
+**`configForms` 走懒注入**(`ctx.inject`)而不是写进插件 `inject`:硬 inject 缺一个服务会让
+**整个客户端半不激活** ⇒ 侧边栏入口与面板一起消失。而"设置页画不出来"和"工作台打不开"
+是两件严重程度差很远的事,不该绑在一起。
+
+### 一条同源陷阱:schema 库
+
+配置 schema 必须来自宿主的 **`@deepseek-ai/schemastery`**(fork 才有 `.volatile()`;peer 写
+`~3.18.4`,运行时解析表里就有它)。**两个 schemastery 同时装**会让它们各自的
+`declare global { namespace Schemastery }` **合并**,于是 `z<Config>` 注解与整棵 schema
+互不兼容(TS2322 报在 `meta.default` 上,看着完全不像"装错库")。
+连带纪律:**不要写 `: z<Config>` 注解** —— volatile 字段的输入是普通值、输出是引用,两者不再相等。
+
+### 真机验收口径(这次实际跑的)
+
+用**安装里那份 CLI**(`ELECTRON_RUN_AS_NODE=1` + `app.asar/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js`)
+建一个 scratch profile(link 本仓库)真起宿主:
+
+- `--dump-config`:`- id: galfree` 在位、未 disabled、无 incompatible/skipped 警告;
+- `/api/galfree/state` `/progress` `/cast` `/theme` `/sdk` 全 200(`/progress` 回 124KB 推导板);
+- 启动载荷里 `dsh-galfree` 在 `application` 批次;`/plugins/??dsh-galfree/client.js` 200;
+- `--dump-config-schema`:16 个字段**逐个**带 `"x-cordis": { "volatile": true }`。
+
+**浏览器里渲染成什么样,这条口径**不**覆盖** —— 它证明"模块送达、注册按契约调用",
+不证明"人看见的那张卡是对的"。
+
 

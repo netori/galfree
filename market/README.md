@@ -107,7 +107,14 @@ script, which pnpm blocks until allowed — add the exact key pnpm printed above
 
   ⚠️ 连指南里那个 ✅ 例子都放行不了 `0.1.5-*`(它的比较符落在 `0.1.0` 元组上,而我们的
   版本在 `0.1.5` 元组)—— 规则的实质是"**每个元组各要一条带预发布标签的分支**"。
-  以后 harness 升到 `0.1.6-*` 时这一步**要跟着加一条分支**,否则又是一个静默 ERESOLVE。
+
+  **2026-09-24 复核(升到 DSH 0.1.7-rc.2 时)**:这条范围**不用再加分支**。harness 自己的
+  兼容性闸门用的是 `semver.satisfies(runtime, range, { includePrerelease: true })`
+  (`dsh-app-boot` 的 `evaluatePluginCompatibility`),实测
+  `satisfies('0.1.7-rc.2', '>=0.1.5-0 <0.2.0-0', {includePrerelease:true}) === true`,
+  而且真机装出来的行**没有被 deny**(`--dump-config` 里 `- id: galfree` 在位、未 disabled)。
+  ⚠️ 但上表那套"默认解析"的结论**只对 npm/pnpm 成立** —— 两把尺子不一样,别拿一张表套两处:
+  harness 闸门看的是**范围与运行时版本**,pnpm 看的是**这些 peer 在 profile 里装没装**。
 
 ## ⛔ 头号阻塞:仓库可见性
 

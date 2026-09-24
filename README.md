@@ -50,6 +50,18 @@
   T17–T18 音频接线与本地发布、T19–T22 工具面/指引/nextActions/preset、
   T23–T24 中文字体与试玩不卡人、T25–T32 三条生成线(图像已有;**音乐/语音各一条渠道**;
   语音的**声音锚** = 每个角色一份参考样本)+ 封面 + 界面换皮 + 快照回滚。
+- ✅ **T37(0.1.2)· 适配 DSH 0.1.7**:插件原来那套设置模型(`ctx.settings.register` +
+  客户端 `settingsScope` + `settings.plugin.item`)在 0.1.7 里被**整体删掉**,
+  于是 `apply` 第一句就抛 —— 表现就是"插件装不上"。现在:Host 半把 `Config` 每个字段
+  声明为 `.volatile()` 并现读现取引用;客户端走 `ctx.configForms` 把设置页挂在
+  **Plugins 页的 `plugins.bundle.config`** 上。schema 库随之换成宿主的
+  `@deepseek-ai/schemastery`。**要求宿主 ≥ 0.1.7**;在 0.1.7 上真机跑通过
+  (路由族全 200、客户端 bundle 进启动载荷、16 个字段逐个带 `volatile`),
+  细节与"没验到什么"见 [`docs/handoff-2026-09-24-t37.md`](docs/handoff-2026-09-24-t37.md)。
+- ✅ **T38 · 「Galgame 制作」preset 换了载体**:0.1.7 删掉了
+  `$DSH_HOME/.agent-presets/<id>/` 目录机制(随包文档原话:"Nothing reads that directory
+  any more"),旧的"拷四个文件进去"装法**静默失效**。preset 现在是随插件 bundle 一起发的
+  **声明行** —— 装插件就有这个模式,不用再拷任何东西。
 
 ## 工程
 
@@ -95,12 +107,17 @@ npm run build          # lib/index.js(ESM host)+ lib/client.js(web bundle)
 
 ### ① 从插件市场装 / 预构建包(不需要 git,也不需要构建授权)
 
-`v0.1.0` 起,发行物挂在 GitHub Release 上,资产名**不带版本号**,所以
-`latest/download` 这条链接不会随发版腐烂:
+发行物挂在 GitHub Release 上,资产名**带版本号**、链接**钉住 tag**
+(0.1.0 用的是"不带版本号 + `latest/download`"那种写法;两者都会在 URL 不变的情况下换成
+后一版的字节,条目看起来没改却在装不同的代码,所以 0.1.1 起改钉 tag):
 
 ```
-dsh plugin add https://github.com/netori/galfree/releases/latest/download/dsh-galfree.tgz
+dsh plugin --profile web add "https://github.com/netori/galfree/releases/download/v0.1.2/dsh-galfree-0.1.2.tgz"
 ```
+
+⚠️ **0.1.2 起要求宿主 ≥ DSH 0.1.7**。0.1.1 及更早那几版**在 0.1.7 上装不上**
+(设置模型被整体替换,`apply` 第一句就抛)—— 如果你是从旧版升上来的,升级插件即可,
+**项目数据与 `.studio/` 一个字节都不动**。
 
 实测(冷 store,桌面端自带的 pnpm 11.8.0):**768ms 装完**,`lib/index.js` /
 `lib/client.js` / `cordis.patch.yml` 全部就位,**不跑任何安装期构建** ——
@@ -214,9 +231,12 @@ npm install && npm run build   # 产出 lib/,宿主加载的就是它
 **改完必须重建 + 重启宿主**:宿主只在启动时载入 `lib/index.js`;面板是按需从磁盘取的,
 所以只重建不重启会出现"面板有按钮、宿主没路由"。
 
-设置命名空间 `dsh-galfree` 可配
-`defaultProjectsRoot`(新建项目默认父目录)与 `sdkPath`(既有 SDK 路径覆盖),
-以及图像渠道(T14):
+**设置的读法从 DSH 0.1.7 起换了** —— 插件的配置面长在 **Plugins 页**(侧边栏的「插件」)里
+本 bundle 的「配置」入口上,不再在「设置 → 插件配置」下;插件也不再注册自己的设置命名空间。
+原因是那套 API 已经不存在:`ctx.settings.register(ns, schema, {base})` 与客户端的
+`settingsScope` / `settings.plugin.item` 在 0.1.7 里**一次都搜不到**(这正是 0.1.1 在
+0.1.7 上"装不上"的根因 —— `apply` 第一句就抛,工具面与面板跟着一起没有)。
+字段与语义不变,三条渠道 + 发布目录全在这张配置页上:
 
 | 设置项 | 说明 |
 |---|---|
@@ -236,6 +256,12 @@ npm install && npm run build   # 产出 lib/,宿主加载的就是它
   { "id": "basic-model", "label": "只有文生图" }
 ]
 ```
+
+⚠️ **`enabled` / `defaultProjectsRoot` / `sdkPath` 这三项在 0.1.7 上不再是"别处可改"**:
+旧版能改是沾了"宿主给已注册命名空间自动渲染表单"的光,0.1.7 起宿主不再渲染插件的配置
+(`autoGenerate` 只是个描述字段)。三项都优雅降级(`enabled` 默认 true;新建项目表单本来
+就让人显式选目录;`sdkPath` 只在要覆盖钉版 SDK 时才有用),要改就去 profile 的
+`cordis.patch.yml` 里那一行 `id: galfree` 的 `config`。把三项做进那张卡是下一票的事。
 
 ## 硬约束(来自 ADR,改前先看契约文档)
 
