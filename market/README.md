@@ -1,43 +1,33 @@
 # 申请进入 DSH 插件市场的现状
 
-> ## 🔄 现状(2026-09-21 更新)
+> ## 🔄 现状(2026-09-25 更新)
 >
-> 1. ✅ **仓库已公开**、已加 `dsh-plugin` topic、创建满 1 天 —— 收录门槛全过;
-> 2. ✅ **条目早就在市场里了**(PR #5429,2026-09-19 合并)。但**市场给用户的安装命令
->    是从源码构建的那条**:
+> 1. ✅ **条目在市场里,而且走的是 npm**(PR #5429 收录 → #5572 加 `tarball:` → #5678 钉到 v0.1.1)。
+>    2026-09-24 起市场目录已经**自动采集到 npm 映射**,那条条目的 `install` 字段是:
 >
 >    ```
->    dsh plugin --profile web add github:netori/galfree
+>    dsh plugin --profile web add dsh-galfree
 >    ```
 >
->    于是每个用户都会撞上 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`(冷 pnpm store 上第一次必红,
->    要人手工往 `pnpm-workspace.yaml` 填一条**带 commit 哈希**的 allowBuilds key,
->    而且上游一 push 那个 key 就失效)—— 这就是"别人安装会报错"的真身。
-> 3. 🚀 **修法已提 PR**:
->    **[awesome-dsh-plugin#5572](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/5572)**
->    —— 往我们那条条目加一个 `tarball:` 字段,指向 `v0.1.0` Release 上的预构建资产。
->    合并后市场给的安装目标会变成那份 `.tgz`(参考同类条目,页面上的 `install` 字段会变成
->    `dsh plugin --profile web add "<tarball URL>"`),**不拉整仓、不跑安装期构建、
->    不需要 allowBuilds 授权**。
->
->    为什么这条正是 contributing.md 为这种情形留的路:它写着「不发 npm 也可以:把预构建 tarball
->    附加到 GitHub Release,并用可选的 `tarball:` 字段指向它」,**并注明"如果你的仓库根本无法
->    从源码安装,这一项是必需的"** —— 我们这种"仓库不带 `lib/`、靠 `prepare` 现场构建"的,
->    正是那一种。资产名**不带版本号**,所以 `latest/download` 不会随发版 404。
-> 4. ✅ **本地已把 CI 的判据跑过**:`validateEntries()` 全库 0 问题;`tarballProblem()` 通过
->    (`https` + `github.com` + 同 owner/repo + `/releases/` + `.tgz`);下载该 URL 的字节与上传的
->    资产 sha256 一致;用 `installTargetFor()` 的判定规则在**冷 store、零 allowBuilds** 的
->    干净目录里实测安装 **768ms** 成功、`lib/` 就位、宿主半 import 正常。
->    本地自检脚本:`npm run check:market`。
-> 5. 🟡 **npm 那条路已备好,但作者决定先不发**(2026-09-21):`package.json` 去掉了
->    `private` 并补了 `repository` / `publishConfig`(官方 registry + public),
->    仓库根 `.npmrc` 钉了官方源,`npm run release:npm` 是可用的发布脚本
->    (前置检查 → publish → 从 registry 读回来核对),流程写在 `docs/release-to-npm.md`。
->    **卡在哪**:`npm login` 是交互式的,只有人能跑(本机当前 `npm whoami` 是 `ENEEDAUTH`)。
->    发了 npm 就不必在 yml 里写任何字段 —— 映射从 registry 自动采集
->    (脚本实测:contributing 明确说**手写 `npm:` 会被校验拒绝**)。
->    发完那条路给用户的命令是 `dsh plugin --profile web add dsh-galfree`,与 `tarball:`
->    这条路等效(都不构建),只是多一个下载量数字。
+>    即**不拉整仓、不跑安装期构建、不需要 allowBuilds 授权**。原先那条
+>    `github:netori/galfree`(每个用户都会撞 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`)已经成为历史。
+> 2. ✅ **npm 已发**:`dsh-galfree@0.1.0 / 0.1.1 / **0.1.2**`(0.1.2 发布于 2026-09-24)。
+>    市场的安装目标既然解析到 npm 包名,用户拿到的就是 registry 的 `latest` ——
+>    **发 npm 就等于到市场,不需要"上传新版本"给市场**。
+>    而且市场安装会显式绕过 pnpm 的新鲜发布保护
+>    (`dshmarket/lib/install.js`:`RELEASE_AGE_OVERRIDE = '--config.minimum-release-age=0'`),
+>    所以刚发的版本立刻可装(自己手敲 `dsh plugin add` 才可能被静默换成上一版)。
+> 3. 🚀 **当前在提的 PR**:
+>    **[awesome-dsh-plugin#5859](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/5859)**
+>    —— 把兜底的 `tarball:` 从 v0.1.1 提到 **v0.1.2**。
+>    为什么值得提:v0.1.1 在 harness **0.1.7 上装不上**(0.1.7 换掉了整套设置模型,
+>    它的 `apply` 第一句就抛,于是工具面/路由/面板一起没有),而 npm 映射**存在时**
+>    `installTargetFor()` 优先用 npm、不看 `tarball:` —— 所以这一条改的是**兜底那条路的诚实性**,
+>    不是主路径。正文见 `market/pr-body-galfree-012.md`。
+> 4. ℹ️ 目录里那条 `version` 字段(抓取时是 `0.1.1`)是**目录自己的缓存**,周期性重建,
+>    下次爬取会变 0.1.2;**它不参与安装**,安装目标是 npm 包名。
+> 5. ✅ **仓库已公开、已加 `dsh-plugin` topic**(实测 API:`private: false`,`topics: ["dsh-plugin"]`),
+>    创建满 1 天 —— 收录门槛全过;下面那些"阻塞"小节都是历史记录。
 
 对照 `awesome-dsh-plugin/awesome-dsh-plugin` 的
 [contributing.md](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/blob/main/contributing.md)
@@ -46,11 +36,11 @@
 
 ## 一句话结论(2026-09-14 的原始记录,阻塞项见上面的更新)
 
-**代码这一侧全部达标。** 阻塞/待办共三类,都不是"写得对不对"的问题:
+**代码这一侧全部达标。** 当时列的三类阻塞/待办,**现在三项全部落地**:
 
-1. ⛔ **仓库是 `private`** —— 评审者读不到仓库,CI 也取不到 `package.json`(只有所有者能拍板);
+1. ✅ **仓库是 `private`** → 2026-09-19 前已公开(评审者读得到,CI 取得到 `package.json`);
 2. ✅ **能不能装上**(以前不能,已于 2026-09-14 修):见下节"安装可用性";
-3. 🟡 两件可选项:加 `dsh-plugin` topic、发 npm。
+3. ✅ 两件可选项:加 `dsh-plugin` topic(**已加**)、发 npm(**已发 0.1.0/0.1.1/0.1.2**)。
 
 ## 逐条核验
 
@@ -63,12 +53,12 @@
 | 活跃维护 | 121+ commits,持续提交 | ✅ |
 | **能从源码装上**(见下节) | 以前**不能**;加 `prepare` 后能 | ✅(已修) |
 | 官方 `@deepseek-ai/*` 走 peerDependencies | `@deepseek-ai/dsh-tools` 以前只是 devDependency(运行时却 import 它) | ✅(已修) |
-| peer 范围不静默排除预发布版 | 换成 `>=0.1.5-0 <0.2.0-0`(实测放行 `0.1.5-rc.2`) | ✅(已修) |
-| 加 `dsh-plugin` topic | **未加**(且私有仓库上没意义) | ⛔ 待办 |
+| peer 范围不静默排除预发布版 | 现为 `>=0.1.5-0 <0.2.0-0`。**复核(2026-09-25)**:默认语义下它放行 `0.1.5-rc.2` 与 `0.1.7`,但**放行不了 `0.1.7-rc.2`**(node-semver 要求范围里有一个与该版本元组相同、且自身带预发布标签的比较符;`0.1.5-0` 的元组是 0.1.5)。**没有静态范围能覆盖每个 0.1.x 元组** —— 那要每元组一条 `\|\|` 分支。harness 自己的闸门用 `includePrerelease: true`(`dsh-app-boot` 的 `evaluatePluginCompatibility`),实测放行且**没有把插件行 deny**;市场那份判定是**方向性**的(belowMin/aboveMax),落在区间内就是"无风险"。所以这是 pnpm 的一行 peer 警告,不是安装阻塞 | ⚠️ 已核实,保持 |
+| 加 `dsh-plugin` topic | 已加(API 实测 `topics: ["dsh-plugin"]`) | ✅ |
 | 描述如实、无营销词 | 只陈述功能(见 yml) | ✅ |
 | 分类贴合 | `dev`(全流程工作台,非 UI 主题) | ✅ |
 | 非纯聚合包(meta-package) | 自身做事,不是依赖清单 | ✅ |
-| 依赖指向原作者 | 依赖仅 `extract-zip` / `schemastery`,无他人包副本 | ✅ |
+| 依赖指向原作者 | 依赖仅 `extract-zip`(schema 库走 harness 的 peer),无他人包副本 | ✅ |
 | 一个 PR 最多 3 条 | 只投 1 条 | ✅ |
 
 ## ✅ 安装可用性(2026-09-14 修,这是当时的第二个硬阻塞)
@@ -116,7 +106,10 @@ script, which pnpm blocks until allowed — add the exact key pnpm printed above
   ⚠️ 但上表那套"默认解析"的结论**只对 npm/pnpm 成立** —— 两把尺子不一样,别拿一张表套两处:
   harness 闸门看的是**范围与运行时版本**,pnpm 看的是**这些 peer 在 profile 里装没装**。
 
-## ⛔ 头号阻塞:仓库可见性
+## ~~⛔ 头号阻塞:仓库可见性~~(已解决:2026-09-19 前仓库已公开,PR #5429 也据此合并)
+
+> 下面这段是当时(2026-09-14)的记录。**现在 API 实测 `private: false`、`topics: ["dsh-plugin"]`** ——
+> 阻塞已消,保留原文只为留档。
 
 ```
 "private": true    visibility: "private"    (netori/galfree,经 GitHub API 确认)
@@ -135,25 +128,30 @@ merging**」—— 私有仓库评审者打不开,CI 也取不到 `package.json`
 命中的只有测试夹具里的假值),所以公开仓库本身不会泄露它。
 但既然仓库要公开,值得顺手确认一次:那把 key 是否愿意继续以明文躺在设置文档里。
 
-## 还没做的两件(都不阻塞投稿)
+## 还没做的(都不阻塞)
 
 1. **`screenshots.json`(可选、推荐)**:contributing 建议在 `package.json` 旁边放
    1–8 张图,市场详情页会像 App Store 那样展示。
    本仓库**目前没有任何图片资产**,README 里也没有图 —— 不声明也能投(市场会退回
    从 README 抽图),只是详情页会空。
    要补的话,得先真的起一次工作台截图再放进来;**不要放占位图**。
-2. **发 npm(可选)**:能免掉用户的构建授权步骤,也让市场显示下载量。
-   与收录无关,不发照样能从 GitHub 装。
+2. ~~**发 npm**~~:**已发**(0.1.0 / 0.1.1 / 0.1.2),市场那条条目的安装目标已经是 npm 包名。
+3. **`description` 里的措辞**已经如实描述功能,但**没有**写"需要 harness ≥ 0.1.7" ——
+   contributing 只要求描述与代码一致,而版本要求属于安装体验;如果维护者问起,
+   口径是:0.1.2 适配的是 0.1.7 换掉的那套设置模型,更早的 harness 上跑不了。
 
-## 投稿步骤(公开之后)
+## 投稿步骤(公开之后 · 已于 2026-09-19 走完)
 
-1. 给 `netori/galfree` 加 `dsh-plugin` topic;
-2. fork `awesome-dsh-plugin/awesome-dsh-plugin`;
-3. 把 `market/netori__galfree.yml` 复制成 `data/plugins/netori__galfree.yml`
+1. ✅ 给 `netori/galfree` 加 `dsh-plugin` topic;
+2. ✅ fork `awesome-dsh-plugin/awesome-dsh-plugin`;
+3. ✅ 把 `market/netori__galfree.yml` 复制成 `data/plugins/netori__galfree.yml`
    (文件名 = `<owner>__<repo>.yml`;
    monorepo 子包会变成 `owner__repo--packages-xxx.yml`,我们不是这种);
-4. 开 PR(只加这一个文件)。
+4. ✅ 开 PR(只加这一个文件)。
    若 CI 报格式问题,在同一分支推修复即可,不用重开 PR。
+5. **后续更新条目**走同一套:改 `data/plugins/netori__galfree.yml` 那一个文件
+   (本地先在 `market/netori__galfree.yml` 改好、`npm run check:market` 跑一遍),
+   正文模板见 `market/pr-body-galfree-0*.md`。**只改自己那一条**。
 
 ## 评审会看什么(照 contributing 的原文)
 
