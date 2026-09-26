@@ -1,6 +1,8 @@
 .scratch/
 node_modules/
 lib/
+# CodeGraph 的本地索引库(每台机器各扫各的;它不是源码,也不该跟着仓库走)
+.codegraph/
 package-lock.json.bak
 *.vsix
 shot-*.png
