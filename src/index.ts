@@ -16,11 +16,12 @@ import { join } from 'node:path'
 import { createProjectService } from './service/project-service.ts'
 import { createNodeHttpClient, type ImageChannelSettings, type ImageModelDescriptor } from './service/images.ts'
 import type { AudioChannelSettings, AudioModelDescriptor, AudioPurpose } from './service/audio-generation.ts'
-import { registerAudioAdapter } from './service/audio-generation.ts'
+import { isAudioAdapterId, registerAudioAdapter } from './service/audio-generation.ts'
 import { createIndexttsAdapter } from './service/audio-adapter-indextts.ts'
 import { createOpenAiSpeechAdapter } from './service/audio-adapter-openai-speech.ts'
 import { createSunoAdapter } from './service/audio-adapter-suno-register.ts'
 import { createMusicRestAdapter } from './service/audio-adapter-music-rest.ts'
+import { createMimoChatTtsAdapter } from './service/audio-adapter-mimo-chat.ts'
 import { discoverModels } from './service/discovery.ts'
 import { discoverAudioModels } from './service/audio-discovery.ts'
 import { makeRoutes } from './routes.ts'
@@ -306,7 +307,10 @@ export function parseAudioModelCatalog(text: string): AudioModelDescriptor[] {
     // **认不出的用途/协议一律跳过该条**:猜一个默认值就等于"配置看着生效了、
     // 实际按错的协议发请求"(图像那条 catalog 也是这个态度)。
     if (candidate.purpose !== 'music' && candidate.purpose !== 'voice') continue
-    if (candidate.adapter !== 'sync-http' && candidate.adapter !== 'async-task' && candidate.adapter !== 'async-task-rest') continue
+    // **协议 id 不在这里手写清单**:这份白名单曾经手写成三条、漏掉 `openai-speech`,
+    // 于是"面板上能选、选了被静默丢掉"(适配器注册着却谁也用不上)。
+    // 现在唯一真相是 `AUDIO_ADAPTER_IDS`,由 `index.test.ts` 那条守卫钉住"注册的 = 解析得回来的"。
+    if (!isAudioAdapterId(candidate.adapter)) continue
     // 能力缺省 = **全 false**(没声明就是不能干,不靠默认值许诺)。
     const caps = candidate.capabilities ?? {}
     const on = (key: string): boolean => caps[key] === true
@@ -499,6 +503,13 @@ export function apply(ctx: Context, config?: Config): void {
   // 2026-09-13 的真机验收打出来的第二个音乐协议(同一家网关的图像走 OpenAI 兼容,
   // 音乐却是这套)—— 与 sunoapi 那套只是长得像,详见 `audio-adapter-music-rest.ts` 文件头。
   registerAudioAdapter(createMusicRestAdapter())
+  /**
+   * 小米 MiMo 那条(chat-completions 形状的 TTS,第五条协议)。
+   *
+   * 它的形状与上面四条都不同(文本放 assistant 消息、音频在响应的 base64 里),
+   * 所以按协议单列一条 —— 详见 `audio-adapter-mimo-chat.ts` 文件头(协议事实全部是实测的)。
+   */
+  registerAudioAdapter(createMimoChatTtsAdapter())
 
   /**
    * 音频生成子系统的出网端口(T27)。

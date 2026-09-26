@@ -28,6 +28,21 @@ import {
 import type { VoiceEmotion } from './characters.ts'
 import type { GenerationTaskState } from './tasks.ts'
 
+/**
+ * 上游协议适配器 id 的**运行时清单** —— 类型与校验只有这一处真相。
+ *
+ * 为什么要有它(这是实测出来的缺陷,不是"顺手加个常量"):设置里那段模型目录 JSON 由
+ * `parseAudioModelCatalog` 解析,它原先**手写**了一份白名单,而那份清单漏了
+ * `openai-speech`(客户端面板有四条可选,宿主只认三条)。于是**面板上能选、选了被静默丢掉**:
+ * 那条模型在解析后凭空消失,面板模型数变 0,而适配器本身是注册好的 ——
+ * 「注册了但谁也够不着」= 一条死代码,且不报任何错。
+ *
+ * 判据:适配器的**类型**、**解析器的白名单**、**注册表**三者必须同源;客户端的展示表
+ * (`src/client/audio-catalog.ts` 的 `AUDIO_ADAPTER_INFO`)逐项相等由守卫测试钉住
+ * (`src/index.test.ts` 那条 "每个已注册的协议都解析得回来")。
+ */
+export const AUDIO_ADAPTER_IDS = ['sync-http', 'openai-speech', 'async-task', 'async-task-rest', 'mimo-chat-tts'] as const
+
 /** 上游协议适配器 id(按**协议**收,不按厂商收)。 */
 export type AudioAdapterId =
   /** 同步返回:一次 POST 直接拿回音频(或它的 URL)。MiniMax `music_generation` 是这种。 */
@@ -56,6 +71,30 @@ export type AudioAdapterId =
    * (同一家网关的图像走 OpenAI 兼容,音乐却是这套;详见 `audio-adapter-music-rest.ts` 文件头)。
    */
   | 'async-task-rest'
+  /**
+   * **chat-completions 形状的 TTS**(小米 MiMo)。
+   *
+   * 单列一条是因为它与上面四条**三处都不同**:路径(`/chat/completions`)、
+   * 请求体(**要念的文本放在 `role:"assistant"` 的消息里**,不是 `input`/`text` 字段)、
+   * 响应(JSON,音频在 `choices[0].message.audio.data` 的 **base64**)。
+   *
+   * 名字按**形状**起(chat + tts),不按厂商起 —— ADR-0012 的修订把这条写成纪律:
+   * 用户看到的是模板标签上的域名,不是适配器 id。
+   *
+   * 协议细节全部来自 2026-09-26 的真机探针(见 `audio-adapter-mimo-chat.ts` 文件头)。
+   */
+  | 'mimo-chat-tts'
+
+/**
+ * 这个值是不是认得的协议 id(目录文本是**外部输入**,可能被手写/手改)。
+ *
+ * 与客户端那份 `isAudioAdapterId`(`src/client/audio-catalog.ts`)同一个判据 ——
+ * 那边是 `hasOwnProperty(AUDIO_ADAPTER_INFO, …)`。**两侧都必须认同一批 id**:
+ * 客户端认、宿主不认 = 上面注释里那个"选了被静默丢掉"的缺陷。
+ */
+export function isAudioAdapterId(value: unknown): value is AudioAdapterId {
+  return typeof value === 'string' && (AUDIO_ADAPTER_IDS as readonly string[]).includes(value)
+}
 
 /**
  * 用途:**音乐**还是**语音**。
