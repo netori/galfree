@@ -112,6 +112,27 @@
   text-decoration: underline;
 }
 
+/* ─── 渠道模板(点一下就填一组值,不是推荐位)────────────────────── */
+
+.templateRow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 0 3px;
+  border-top: 1px solid var(--dsw-alias-border-l3);
+}
+
+.templateButtons { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.templateMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
 /* ── 模型选择器(T14 续)────────────────────────────────────────────── */
 
 .modelList {

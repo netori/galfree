@@ -99,6 +99,14 @@ export const AUDIO_ADAPTER_INFO: Record<AudioAdapterChoice, { label: string; hin
     hint: '提交 → 任务 id → `GET …/tasks/{id}` 轮询(与上一条**不是**同一套形状:'
       + '体字段名与轮询 URL 都不同)。拿不准就翻服务商文档那一页,或先按上一条试一次看它回什么。',
   },
+  'mimo-chat-tts': {
+    label: 'chat 形状的语音(小米 MiMo)',
+    hint: '`POST {base}/chat/completions`,**要念的文本必须放在 `role:"assistant"` 的消息里**,'
+      + '`audio:{format, voice}`。响应是 JSON,音频在 `choices[0].message.audio.data`(**base64**)——'
+      + '既不是"响应体就是音频",也不是"给个 URL 再下载",所以单列一条。'
+      + '音色:预置音色填 id(`冰糖`),`-voicedesign` 填**这个角色的音色描述文字**。'
+      + '`-voiceclone` 那条路插件还没接(样本要每次请求重发,成本形状不同)。',
+  },
 }
 
 /** 六项能力全 false(目录里的能力是一份**全量快照**,写的时候必须给全)。 */

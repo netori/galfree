@@ -22,6 +22,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { ModelPicker, rowsFromCatalog, sameRows, type ModelRow } from './model-picker.tsx'
 import { AudioModelPicker } from './audio-model-picker.tsx'
 import { audioRowsFromCatalog, sameAudioRows, type AudioModelRow } from './audio-catalog.ts'
+import { CHANNEL_TEMPLATES, templateKeys, templatePatchFor, type ChannelTemplate, type TemplateChannel, type TemplateDraftLike } from './channel-templates.ts'
 import s from './settings-card.module.css'
 
 /**
@@ -129,6 +130,13 @@ const SECRET_FIELDS: ReadonlyArray<keyof ChannelDraft> = ['imageApiKey', 'musicA
  * 这里只列名字,**不做迁移**:那个端点原本该算音乐还是语音,只有人知道。
  */
 const LEGACY_AUDIO_KEYS = ['audioBaseUrl', 'audioApiKey', 'audioChannelName', 'audioModels'] as const
+
+/** 模板按渠道分组(面板上每条渠道的字段前面显示它自己那几条)。 */
+const TEMPLATES_BY_CHANNEL: Array<{ channel: TemplateChannel; title: string; items: ChannelTemplate[] }> = [
+  { channel: 'image', title: '图像', items: CHANNEL_TEMPLATES.filter((template) => template.channel === 'image') },
+  { channel: 'music', title: '音乐', items: CHANNEL_TEMPLATES.filter((template) => template.channel === 'music') },
+  { channel: 'voice', title: '语音(TTS)', items: CHANNEL_TEMPLATES.filter((template) => template.channel === 'voice') },
+]
 
 /** 模型目录示例:先给一条能跑的,人照着改(空目录会让建任务被拒)。 */
 const MODEL_EXAMPLE = JSON.stringify([
@@ -429,6 +437,33 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
     }
   }
 
+  /**
+   * 点一下模板:把**它声明的那三个键**铺进草稿。
+   *
+   * 三条纪律(对齐 ADR-0012 修订,守卫在 `channel-templates.test.ts`):
+   *  1. **只动端点 / 渠道名 / 模型目录** —— 别的渠道一个字不碰;
+   *  2. **密钥一律不碰**:模板若顺手把 key 清掉,人下次跑任务看到的失败原因是
+   *     "他刚点了一个看起来无害的按钮",那是帮忙帮成了事故;
+   *  3. **不自动保存**:填完让人自己看一眼再按「保存」—— 这一步是"给人看"的,不是"替人决定"。
+   */
+  const applyChannelTemplate = (template: ChannelTemplate): void => {
+    const patch = templatePatchFor(template.channel, template)
+    const keys = templateKeys(template.channel) as unknown as {
+      baseUrl: keyof ChannelDraft
+      channelName: keyof ChannelDraft
+      models: keyof ChannelDraft
+    }
+    setDraft((current) => ({
+      ...current,
+      [keys.baseUrl]: patch.baseUrl,
+      [keys.channelName]: patch.channelName,
+      [keys.models]: patch.models,
+    }))
+    for (const key of [keys.baseUrl, keys.channelName, keys.models]) dirty.current.add(key)
+    setStatus('idle')
+    setMessage(`已把「${template.site}」填进「${template.channel}」那一段(密钥没动)。核对后按「保存」生效。`)
+  }
+
   return (
     <section className={s.card} aria-label="GALFree 渠道设置">
       <header className={s.head}>
@@ -464,6 +499,38 @@ function ChannelSettingsForm({ ctx }: { ctx: SettingsCardContext }) {
               或「语音生成渠道」**对应那一段(搬完可以手改设置文档删掉旧的四个键;面板不会替你动它们)。
             </p>
           ) : null}
+
+          {/*
+            **渠道模板**那一行(点一下就填一组值)。
+
+            为什么放在整张卡的最上面:新手的问题不是"某个字段填错了",是**"我不知道该填什么"** ——
+            所以第一眼要看到的是"选一个站点"。它不填密钥、不自动保存、不构成推荐:
+            只是把一次已经跑通的配置(端点 + 模型目录 + 渠道名)抄进下面的输入框,
+            人核对一眼再按保存。点哪条、要不要用,始终是人的决定。
+          */}
+          <div className={s.templateRow}>
+            <span className={s.label}>从一条<b>已经跑通的配置</b>开始(可选)</span>
+            <div className={s.templateButtons}>
+              {TEMPLATES_BY_CHANNEL.map((group) => (
+                group.items.map((template) => (
+                  <button
+                    key={`${template.channel}-${template.site}`}
+                    type="button"
+                    className={s.button}
+                    onClick={() => applyChannelTemplate(template)}
+                    title={`填进「${group.title}」那一段:${template.note}\n(实测口径:${template.basis}  抄写于 ${template.capturedAt})`}
+                  >
+                    {group.title} · {template.site}
+                  </button>
+                ))
+              ))}
+            </div>
+            <span className={s.templateMeta}>
+              模板只填<b>端点 / 渠道名 / 模型目录</b>,<b>不碰密钥</b>、也不会自动保存;
+              插件与这些站点没有任何利益关系(<b>不带推广码</b>)。
+              上游会变,模板注明抄写日期,过期请以站点文档为准。
+            </span>
+          </div>
 
           <label className={s.field}>
             <span className={s.label}>端点(OpenAI 兼容基址)</span>
