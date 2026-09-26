@@ -236,14 +236,57 @@ npm install && npm run build   # 产出 lib/,宿主加载的就是它
 原因是那套 API 已经不存在:`ctx.settings.register(ns, schema, {base})` 与客户端的
 `settingsScope` / `settings.plugin.item` 在 0.1.7 里**一次都搜不到**(这正是 0.1.1 在
 0.1.7 上"装不上"的根因 —— `apply` 第一句就抛,工具面与面板跟着一起没有)。
-字段与语义不变,三条渠道 + 发布目录全在这张配置页上:
+字段与语义不变,**三条生成线各自一条渠道** + 发布目录,全在这张配置页上。
+每条渠道的字段是**同一套四件**(端点 / 密钥 / 渠道名 / 模型目录),只是前缀不同 ——
+所以下表按前缀分成三族;`镜像` 那一列指的是"音频两族与图像族逐字同义"。
 
-| 设置项 | 说明 |
-|---|---|
-| `imageBaseUrl` | OpenAI 兼容端点基址(如 `https://api.example.com/v1`);**留空 = 没配渠道**,出图动作会如实拒绝 |
-| `imageApiKey` | 渠道密钥。**明文存在本机设置文档里**(ADR-0010 的知情选择,与 dsh-imagegen 同风险面):它不进项目目录、不进快照、不进任务账本 |
-| `imageChannelName` | 渠道名(只在面板/账本里指认用) |
-| `imageModels` | 模型目录(JSON 数组),每个模型**要声明能力**,否则按保守缺省 |
+| 设置项 | 镜像 | 说明 |
+|---|---|---|
+| `imageBaseUrl` | — | 图像渠道端点(OpenAI 兼容基址,如 `https://api.example.com/v1`);**留空 = 没配那条渠道**,对应动作会如实拒绝(不假装能出),也不拖累别条 |
+| `imageApiKey` | — | 渠道密钥。**明文存在本机设置文档里**(ADR-0010 的知情选择,与 dsh-imagegen 同风险面):它不进项目目录、不进快照、不进任务账本 |
+| `imageChannelName` | — | 渠道名(只在面板/账本里指认用) |
+| `imageModels` | — | 模型目录(JSON 数组),每个模型**要声明能力**,否则按保守缺省 |
+| `musicBaseUrl` | 同 `imageBaseUrl` | **音乐生成**渠道端点(与图像那条**分开配**:上游与协议不重叠) |
+| `musicApiKey` | 同 `imageApiKey` | 音乐渠道密钥(明文存本机) |
+| `musicChannelName` | 同 `imageChannelName` | 音乐渠道名 |
+| `musicModels` | ⚠️ **多两栏必填** | 音乐的每条模型**必须写 `purpose: "music"` 与 `adapter`** —— 拼渠道会按 `purpose` 过滤,写错那一栏那条模型会被**静默滤掉**(表现是"配了、模型数是 0") |
+| `voiceBaseUrl` | 同 `imageBaseUrl` | **语音(TTS)**渠道端点(与音乐那条分开配) |
+| `voiceApiKey` | 同 `imageApiKey` | 语音渠道密钥(明文存本机) |
+| `voiceChannelName` | 同 `imageChannelName` | 语音渠道名 |
+| `voiceModels` | 同 `musicModels` | 语音的每条模型要写 `purpose: "voice"` 与 `adapter`(同上,写错会被静默滤掉) |
+| `publishDir` | — | 发布产物输出目录;**留空 = 数据目录下的 `publish/<项目名>`**。产物落在项目源树**之外** |
+
+**`adapter` 填什么**(按**协议形状**收,不按厂商收;先翻服务商文档那一页,或拉一次模型列表让面板推断):
+
+| 渠道 | `adapter` | 什么形状 |
+|---|---|---|
+| 图像 | (省略) | OpenAI 兼容的 `/images/generations`(默认) |
+| 图像 | `async-task` | 提交拿任务 id → 轮询(查询串里带 id),如 new-api 系的 `/v1/image/generations` |
+| 音乐 / 语音 | `async-task` | sunoapi.org 那套(查询串轮询) |
+| 音乐 / 语音 | `async-task-rest` | 资源式 REST:**任务 id 在路径里**(`GET …/tasks/{id}`) |
+| 语音 | `sync-http` | 本机 IndexTTS 那类:`POST {base}/tts` + `{speaker, audio, text, lang}`,回 JSON 再去取(**要同机读盘**) |
+| 语音 | `openai-speech` | OpenAI 兼容的 `/audio/speech`,**响应体直接是音频字节**(硅基流动 / OpenAI / 多数兼容网关) |
+| 语音 | `mimo-chat-tts` | 小米 MiMo 那类:**文本放 `role:"assistant"` 的消息里**,音频在 `choices[0].message.audio.data`(base64) |
+
+**不想从头填?配置页最上面有一排「渠道模板」** —— 点一下就把它那几个键填进对应的那一段
+(端点 / 渠道名 / 模型目录)。两条纪律:模板**不碰密钥**(缺 key 会如实拦住,不会假装配好了)、
+**不自动保存**(填完核对再按保存)。模板带抄写日期与"实测到什么程度",**不构成推荐或代销**;
+充值入口指向站点自己的页面、**不带推广码**。
+
+音频两条渠道的目录示例(音乐那族;语音把 `purpose` / 能力换成 `voice` 那套即可):
+
+```json
+[
+  { "id": "suno-generation", "purpose": "music", "adapter": "async-task-rest",
+    "label": "Suno 文生曲", "note": "model=suno;version=v6;format=mp3",
+    "capabilities": { "textToMusic": true, "instrumental": true } }
+]
+```
+
+⚠️ `note` 是**这家服务自己的参数**(分号分隔的键值),不进通用条目:`async-task-rest` 读
+`submit` / `poll` / `model` / `version` / `format`,`sync-http` 读 `speaker` / `audio` / `lang`,
+`openai-speech` 读 `voice` / `format` / `speed`,`mimo-chat-tts` 读 `voice` / `format` / `label`。
+音频的能力**缺省全为假**(与图像相反:图像缺省文生图为真)—— 没声明就是不能干,不靠默认值许诺。
 
 `imageModels` 示例(能力缺省口径:文生图/尺寸参数/b64 **为真**,参考链/图生图**为假** ——
 能力宁可少说,不能凭空许诺):
