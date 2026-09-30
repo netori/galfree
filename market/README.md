@@ -1,29 +1,32 @@
 # 申请进入 DSH 插件市场的现状
 
-> ## 🔄 现状(2026-09-25 更新)
+> ## 🔄 现状(2026-09-30 更新)
 >
-> 1. ✅ **条目在市场里,而且走的是 npm**(PR #5429 收录 → #5572 加 `tarball:` → #5678 钉到 v0.1.1)。
->    2026-09-24 起市场目录已经**自动采集到 npm 映射**,那条条目的 `install` 字段是:
+> 1. ✅ **条目在市场里,而且走的是 npm**(PR #5429 收录 → #5572 加 `tarball:` → #5678 钉 v0.1.1 → #5859 钉 v0.1.2),
+>    四条 PR 全部 **MERGED**。市场目录会从 registry **自动采集 npm 映射**,那条条目的 `install` 字段是:
 >
 >    ```
 >    dsh plugin --profile web add dsh-galfree
 >    ```
 >
->    即**不拉整仓、不跑安装期构建、不需要 allowBuilds 授权**。原先那条
->    `github:netori/galfree`(每个用户都会撞 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`)已经成为历史。
-> 2. ✅ **npm 已发**:`dsh-galfree@0.1.0 / 0.1.1 / **0.1.2**`(0.1.2 发布于 2026-09-24)。
->    市场的安装目标既然解析到 npm 包名,用户拿到的就是 registry 的 `latest` ——
->    **发 npm 就等于到市场,不需要"上传新版本"给市场**。
->    而且市场安装会显式绕过 pnpm 的新鲜发布保护
+>    即**不拉整仓、不跑安装期构建、不需要 allowBuilds 授权**,装的是 registry 的 `latest`。
+>    市场安装还会显式绕过 pnpm 的新鲜发布保护
 >    (`dshmarket/lib/install.js`:`RELEASE_AGE_OVERRIDE = '--config.minimum-release-age=0'`),
 >    所以刚发的版本立刻可装(自己手敲 `dsh plugin add` 才可能被静默换成上一版)。
-> 3. 🚀 **当前在提的 PR**:
->    **[awesome-dsh-plugin#5859](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/5859)**
->    —— 把兜底的 `tarball:` 从 v0.1.1 提到 **v0.1.2**。
->    为什么值得提:v0.1.1 在 harness **0.1.7 上装不上**(0.1.7 换掉了整套设置模型,
->    它的 `apply` 第一句就抛,于是工具面/路由/面板一起没有),而 npm 映射**存在时**
->    `installTargetFor()` 优先用 npm、不看 `tarball:` —— 所以这一条改的是**兜底那条路的诚实性**,
->    不是主路径。正文见 `market/pr-body-galfree-012.md`。
+> 2. ⏳ **npm 已发 0.1.0 / 0.1.1 / 0.1.2;0.2.0 正在发**(仓库侧已就绪:两条 commit 已推、
+>    typecheck 干净、快带 59 文件 / 640 测试全绿、`npm pack` 391,765 字节 / 13 文件)。
+>    **0.2.0 修的是"装上了却不见"**:0.1.2 声明 `@deepseek-ai/dsh-tools: ">=0.1.5-0 <0.2.0-0"`
+>    (registry 上读回来的原文,不是仓库里的),而 `0.2.0-rc.2` 落在范围外 ⇒
+>    宿主那条插件闸门把整条 entry 禁掉:工具面、`/api/galfree/*` 路由、工作台面板**一起没有**。
+>    上限放开到 `<0.3.0-0` 后,在**真 0.2.0-rc.2 宿主**上实测挂载成功、`/api/galfree/state` 200。
+> 3. 🚀 **待提的 PR**:把兜底的 `tarball:` 从 v0.1.2 提到 **v0.2.0**
+>    (正文见 `market/pr-body-galfree-020.md`)。与 #5859 同一个理由 ——
+>    npm 映射**存在时** `installTargetFor()` 优先用 npm、不看 `tarball:`,
+>    所以这一条改的是**兜底那条路的诚实性**:留着 0.1.2 等于把一个在 0.2.0 上加载不了的构建挂在条目上。
+> 4. ℹ️ 目录里那条 `version` 字段是**目录自己的缓存**,周期性重建,**它不参与安装**;
+>    安装目标是 npm 包名,所以**发 npm 就等于到市场,不需要"上传新版本"给市场**。
+> 5. ✅ **仓库已公开、已加 `dsh-plugin` topic**(实测 API:`private: false`,`topics: ["dsh-plugin"]`),
+>    创建满 1 天 —— 收录门槛全过;下面那些"阻塞"小节都是历史记录。
 > 4. ℹ️ 目录里那条 `version` 字段(抓取时是 `0.1.1`)是**目录自己的缓存**,周期性重建,
 >    下次爬取会变 0.1.2;**它不参与安装**,安装目标是 npm 包名。
 > 5. ✅ **仓库已公开、已加 `dsh-plugin` topic**(实测 API:`private: false`,`topics: ["dsh-plugin"]`),
