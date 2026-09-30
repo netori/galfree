@@ -26,7 +26,9 @@ The release also lands three things that were user-reported defects:
 
 ## Why this file, given the entry already installs from npm
 
-The entry carries an auto-collected `npm: dsh-galfree` mapping, and `installTargetFor()` prefers npm over `tarball:`, so storefront installs already resolve from the registry (`latest` moves when a version is published; market installs also pass `--config.minimum-release-age=0`, so the fresh-release hold cannot substitute the previous version). This change is about the **fallback staying honest**: the field is what a reader — or a client that has not applied the npm mapping — is offered, and leaving it on a build that cannot load would make the entry's own link the least useful thing on it.
+The entry carries an auto-collected `npm: dsh-galfree` mapping, and `installTargetFor()` prefers npm over `tarball:`, so storefront installs already resolve from the registry. `dsh-galfree@0.2.0` is live (`dist-tags.latest` → `0.2.0`, published 2026-09-30) — read back from the registry rather than from the publish command, whose exit code cannot tell a landed publish from a cached one. Market installs also pass `--config.minimum-release-age=0`, so the fresh-release hold cannot substitute the previous version.
+
+This change is about the **fallback staying honest**: the field is what a reader — or a client that has not applied the npm mapping — is offered, and leaving it on a build that cannot load would make the entry's own link the least useful thing on it.
 
 ## Verifications
 

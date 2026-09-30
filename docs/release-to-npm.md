@@ -95,6 +95,41 @@ npm run check:market          # 条目与 tarball 的绑定校验
    `minTimeout is greater than maxTimeout`(默认 mintimeout 是 10000)——
    每一次探测都失败,于是"明明发成功了"被读回核对报成"registry 上读不到"。
 
+### 四条 0.2.0 发版时现学到的(2026-09-30;账号的 2FA 从 TOTP 换成了安全密钥/指纹)
+
+0. **凭据挂在"网页登录"上**:密码忘了之后,`npm login --auth-type=web` 是免密码的恢复路
+   (浏览器里已登录就行)。它写进 `~/.npmrc` 的会话令牌**能读能查、但发不了包** ——
+   发版那一下会被回
+   `403 Two-factor authentication or granular access token with bypass 2fa enabled is required`。
+1. **2FA 是安全密钥时,发版必须让 npm 看见"真终端",否则它会放弃**。
+   依据是它自己的代码 —— `npm/lib/utils/auth.js` 的 `otplease()`:
+   ```js
+   if (!process.stdin.isTTY || !process.stdout.isTTY) throw err   // ← 自动化环境就死在这
+   if (err.code === 'EOTP' && err.body?.authUrl && err.body?.doneUrl) {
+     const { token: otp } = await webAuthOpener(...)   // 开浏览器 → 你按指纹 → 拿一次性口令
+     return await fn({ ...opts, otp })                 // 用它自动重发
+   }
+   ```
+   **放弃路径**打出来的认证地址是**打过码的**(经 `@npmcli/redact`,线上是 `***`);
+   而**正常路径**打印时是明确关掉打码的(`open-url.js`:`output.standard(…, { redact: false })`)。
+   绕法:一个几行的 **`.cjs` 包装**把 `process.stdin.isTTY` / `process.stdout.isTTY` 置真,
+   再 `require('…/npm/bin/npm-cli.js')` —— 这样浏览器认证、拿口令、重试、报错全是 npm 的原生逻辑
+   (存稿:`.scratch/npm-publish-web.cjs`)。`winpty` 在本机**不行**:它要求自己的 stdin 是 tty。
+2. **自己造这套协议要小心两个坑**(第一版就是这么翻的车):
+   ① 上游是**按客户端身份**决定给不给 `authUrl`/`doneUrl` 的 —— 手写请求必须把
+   `user-agent` 报成 `npm/<版本> node/… win32 x64 workspaces/false`,否则回你一句
+   `You must provide a one-time pass. Upgrade your client to npm@latest in order to use 2FA.`;
+   ② **`libnpmpublish.publish()` 从不校验是否落地** —— 它拿 `ignoreBody` 的响应直接 `return`,
+   所以"没抛异常"什么也证明不了。
+3. **发完的读回要耐心,别急着判死**(这次差点冤枉一次成功的发布):14:31 发布落地,
+   14:33 用带缓存串的 packument **仍然**读不到 0.2.0(版本 404、tarball 404),
+   14:35 才可见。所以判据要么"**等几分钟 + 多读几次**",要么用这条**最强的存在证明**:
+   **再发一次** —— 回 `You cannot publish over the previously published versions: <版本>`
+   就说明它已经在 registry 上了。
+4. 冷装验收照旧有效(钉版本):`pnpm add dsh-galfree@<version>` 1.3 秒装好、
+   `lib/index.js` / `lib/client.js` / `cordis.patch.yml` / `presets/galgame/*` 都在、**零构建授权**。
+
+
 再按"新用户视角"验收一次:在**冷 store、零 `allowBuilds`** 的干净目录里,
 
 ```powershell

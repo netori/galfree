@@ -13,15 +13,16 @@
 >    市场安装还会显式绕过 pnpm 的新鲜发布保护
 >    (`dshmarket/lib/install.js`:`RELEASE_AGE_OVERRIDE = '--config.minimum-release-age=0'`),
 >    所以刚发的版本立刻可装(自己手敲 `dsh plugin add` 才可能被静默换成上一版)。
-> 2. ⏳ **npm 已发 0.1.0 / 0.1.1 / 0.1.2;0.2.0 正在发**(仓库侧已就绪:两条 commit 已推、
->    typecheck 干净、快带 59 文件 / 640 测试全绿、`npm pack` 391,765 字节 / 13 文件)。
+> 2. ✅ **npm 已发 0.1.0 / 0.1.1 / 0.1.2 / **0.2.0**(2026-09-30 14:31 发布,`dist-tags.latest` → `0.2.0`)。
 >    **0.2.0 修的是"装上了却不见"**:0.1.2 声明 `@deepseek-ai/dsh-tools: ">=0.1.5-0 <0.2.0-0"`
 >    (registry 上读回来的原文,不是仓库里的),而 `0.2.0-rc.2` 落在范围外 ⇒
 >    宿主那条插件闸门把整条 entry 禁掉:工具面、`/api/galfree/*` 路由、工作台面板**一起没有**。
 >    上限放开到 `<0.3.0-0` 后,在**真 0.2.0-rc.2 宿主**上实测挂载成功、`/api/galfree/state` 200。
-> 3. 🚀 **待提的 PR**:把兜底的 `tarball:` 从 v0.1.2 提到 **v0.2.0**
->    (正文见 `market/pr-body-galfree-020.md`)。与 #5859 同一个理由 ——
->    npm 映射**存在时** `installTargetFor()` 优先用 npm、不看 `tarball:`,
+>    发版本身踩的坑(安全密钥 2FA 需要真终端、`libnpmpublish` 不校验落地、发布后几分钟的读回负缓存)
+>    都记在 [`docs/release-to-npm.md`](../docs/release-to-npm.md) 的「四条 0.2.0 发版时现学到的」。
+> 3. 🚀 **已提的 PR**:**[awesome-dsh-plugin#6196](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/6196)**
+>    —— 把兜底的 `tarball:` 从 v0.1.2 提到 **v0.2.0**(正文见 `market/pr-body-galfree-020.md`)。
+>    与 #5859 同一个理由 —— npm 映射**存在时** `installTargetFor()` 优先用 npm、不看 `tarball:`,
 >    所以这一条改的是**兜底那条路的诚实性**:留着 0.1.2 等于把一个在 0.2.0 上加载不了的构建挂在条目上。
 > 4. ℹ️ 目录里那条 `version` 字段是**目录自己的缓存**,周期性重建,**它不参与安装**;
 >    安装目标是 npm 包名,所以**发 npm 就等于到市场,不需要"上传新版本"给市场**。
