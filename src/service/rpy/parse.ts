@@ -25,7 +25,16 @@ const CALL_RE = /^call\s+([A-Za-z0-9_]+)(?:\s+from\s+[A-Za-z0-9_]+)?\s*$/
 const RETURN_RE = /^return(?:\s.*)?$/
 const WITH_RE = /^with\s+([A-Za-z0-9_]+)\s*$/
 const SHOW_BLOCK_RE = /^(show|scene|hide)\s+[A-Za-z0-9_]+[^:]*:\s*$/
-const SHOW_RE = /^(show|scene|hide)\s+([A-Za-z0-9_]+)((?:\s+[A-Za-z0-9_]+)*)\s*$/
+/**
+ * `show <tag> [属性…] [at <变换名>[, <变换名>…]] [with <转场>]`。
+ *
+ * 尾组允许**逗号**(T39):`at gf_left, gf_breath` 是 Ren'Py 的合法写法,而旧形态
+ * (`[A-Za-z0-9_]+` 以空白分隔)会把带逗号的行整个判成"认不出来" ⇒ **整场降级只读**。
+ * 那种失败很隐蔽:剧本没问题,是解析器太窄。
+ */
+const SHOW_RE = /^(show|scene|hide)\s+([A-Za-z0-9_]+)((?:\s+[A-Za-z0-9_,]+)*)\s*$/
+/** `show` 行里把属性与 `at` 子句分开的关键字(见过的第一个起,后面都归子句)。 */
+const SHOW_CLAUSE_KEYWORDS = new Set(['at', 'with', 'behind', 'zorder'])
 const PLAY_RE = /^play\s+(music|sound|voice)\s+"([^"]*)"\s*(loop)?\s*$/
 const STOP_RE = /^stop\s+(music|sound|voice)\s*$/
 /**
@@ -198,21 +207,30 @@ export function parseRpy(files: RpyFile[]): ParsedScript {
         index += 1
         while (index < lines.length && lines[index]!.indent > line.indent) index += 1
         applyStage(role, tag, [])
-        return { kind: 'image', role, tag, attributes: [], line: line.no }
+        return { kind: 'image', role, tag, attributes: [], at: [], line: line.no }
       }
       if ((m = SHOW_RE.exec(body)) !== null) {
-        // show/scene/hide:tag + 属性;排除 `at`/`with` 修饰词。
+        // show/scene/hide:tag + 属性 + 可选的 `at` 站位子句(`with <转场>` 一如既往只是噪声,
+        // 引擎自己会处理;要改转场请改整行)。
         const role = m[1] as 'show' | 'scene' | 'hide'
         const tag = m[2]!
-        const rest = (m[3] ?? '').split(/\s+/).filter((token) => token !== '')
+        const tokens = (m[3] ?? '').split(/[\s,]+/).filter((token) => token !== '')
         index += 1
         const attributes: string[] = []
-        for (const token of rest) {
-          if (token === 'at' || token === 'with' || token === 'behind' || token === 'zorder') break
-          attributes.push(token)
+        const at: string[] = []
+        let cursor = 0
+        for (; cursor < tokens.length; cursor += 1) {
+          if (SHOW_CLAUSE_KEYWORDS.has(tokens[cursor]!)) break
+          attributes.push(tokens[cursor]!)
+        }
+        if (tokens[cursor] === 'at') {
+          for (cursor += 1; cursor < tokens.length; cursor += 1) {
+            if (SHOW_CLAUSE_KEYWORDS.has(tokens[cursor]!)) break
+            at.push(tokens[cursor]!)
+          }
         }
         applyStage(role, tag, attributes)
-        return { kind: 'image', role, tag, attributes, line: line.no }
+        return { kind: 'image', role, tag, attributes, at, line: line.no }
       }
       if ((m = PLAY_RE.exec(body)) !== null) {
         index += 1

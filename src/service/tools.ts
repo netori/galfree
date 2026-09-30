@@ -1258,12 +1258,16 @@ export function registerGalfreeTools(
     name: 'galfree_voice_wiring',
     description: [
       '**语音接线检查/补课**(ADR-0013):查项目里那两条前提有没有落地,可选地补上。',
-      '要**同时**满足:① `define config.auto_voice = "voice/{id}.ogg"` 在项目里;',
-      '② 剧本每句对白带**显式 `id`**。缺任何一条,引擎都**静默无声**',
-      '(它会拿内容哈希去格式化文件名,找不到就当没这句语音)。',
-      '`action: "read"`(缺省)= 只读:配置在不在、哪些场景没盖全。',
-      '`action: "apply"` = 补上:给生成目录(`game/scenes/`)里没盖全的场景**逐条盖 id**',
-      '(幂等;**指纹剔掉了 id 子句,所以不会清掉人的审读戳**),并补上那行配置;一个写批 = 一个快照。',
+      '要**同时**满足:① 项目里有 `config.auto_voice`;② 剧本每句对白带**显式 `id`**。',
+      '缺任何一条,引擎都**静默无声**(它会拿内容哈希去格式化文件名,找不到就当没这句语音)。',
+      '那条配置**有两种形态**,报告会说出是哪一种:`form:"string"` 只认**一个**后缀',
+      '(写死了 `voice/{id}.ogg`)—— 磁盘上换了容器(小米 MiMo 只给 mp3/wav)引擎就**够不着**;',
+      '`form:"function"` 按磁盘上真有的后缀找,不同 TTS 可以混着用。',
+      '`unreachable.count > 0` = "有几个语音文件引擎找不到" —— 它**不报错,只是没声音**。',
+      '`action: "read"`(缺省)= 只读:配置在不在、是哪种形态、够不着的有几个、哪些场景没盖全。',
+      '`action: "apply"` = 补上:生成目录里没盖全的场景**逐条盖 id**',
+      '(幂等;**指纹剔掉了 id 子句,所以不会清掉人的审读戳**);配置缺席就写函数形态,',
+      '配置是字符串形态且**确实够不着**磁盘上的文件时,只把那一行升级成函数形态。一个写批 = 一个快照。',
       '手写文件(`script.rpy`)**只报不改** —— 生成器不越界。',
       '**先跑这个再配音**:不然文件配齐了也是白配。',
     ].join(' '),
@@ -1815,6 +1819,75 @@ export function registerGalfreeTools(
         }, null, 2)
       } catch (error) {
         return `界面换皮没成:${describe(error)}`
+      }
+    },
+  })))
+
+  /**
+   * 舞台层(T39)—— "剧本对了"与"画面对了"之间的那一步。
+   *
+   * 这条工具存在的理由是**两个实测过的真 bug**:素材图出了、剧本也引用了,可游戏里
+   * 背景是灰底占位(图片名从来没被定义过),两个立绘叠在同一处(剧本里没有站位子句)。
+   * 两者都是**生成物**能修的,所以给它一个 agent 入口 —— 否则每次都要请人点面板。
+   */
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'galfree_stage',
+    description: [
+      '舞台层:把"素材槽"翻译成 Ren\'Py 真认得的东西。**status** 读处境;**sync** 整备(写)。',
+      '整备做两件事,都是生成物(一个写批 = 一条快照):',
+      '(1) 为**磁盘上真有的**素材图写显式 `image <tag> 属性… = "images/….png"` 定义 ——',
+      '    现代 Ren\'Py 不再自动定义图片名,缺这一步的实测症状是"背景灰底占位"和',
+      '    "show 角色 表情 直接抛 Image does not accept attributes 把游戏打崩";',
+      '(2) 按"此刻台上有几个人"给剧本的 show 行机械补 `at` 站位子句 —— 缺这一步的症状是',
+      '    **两个立绘叠在同一处**。',
+      '改完剧本 / 出完图之后跑一次 sync,再跑一次试玩确认。已经是最新的就什么都不写。',
+    ].join(' '),
+    parameters: {
+      project: { type: 'string', description: '项目 id 或唯一 name;省略 = 当前激活项目' },
+      action: { type: 'string', required: true, description: 'status = 读处境(不改任何东西);sync = 整备(写生成物 + 补站位)' },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    async execute(args) {
+      const active = await resolveProject(service, args.project)
+      if (active === null) return '没有激活项目:先建一个(galfree_create_project)。'
+      const action = String(args.action ?? 'status')
+      try {
+        if (action === 'sync') {
+          const report = await service.stageSync(active, { via: 'agent' })
+          return JSON.stringify({
+            ok: true,
+            changed: report.changed,
+            files: report.files,
+            definitions: report.definitions,
+            slots: report.slots,
+            remaining: {
+              unplaced: report.report.unplaced,
+              overlaps: report.report.overlaps.map((entry) => `${entry.scene}:${entry.names.join('+')}`),
+              crowded: report.report.crowded,
+            },
+            next: report.changed
+              ? '舞台层写好了。**跑一次试玩**看看画面(背景不再是灰底、两个立绘不再叠在一起)。'
+              : '已经是最新的,什么都没写(不产生空快照)。',
+          }, null, 2)
+        }
+        if (action !== 'status') return `不认识的 action:${action} —— 只有 status / sync。`
+        const status = await service.stageStatus(active)
+        return JSON.stringify({
+          outOfSync: status.outOfSync,
+          slots: status.slots,
+          definitions: status.definitions,
+          unplaced: status.report.unplaced,
+          overlaps: status.report.overlaps.map((entry) => `${entry.scene}:${entry.names.join('+')}`),
+          crowded: status.report.crowded,
+          note: status.outOfSync
+            ? '生成物还没跟上(或这是第一次)—— 用 `galfree_stage` 的 sync 整备一次。'
+            : '生成物是最新的。',
+        }, null, 2)
+      } catch (error) {
+        return `舞台层没成:${describe(error)}`
       }
     },
   })))

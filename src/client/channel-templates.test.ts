@@ -127,6 +127,18 @@ describe('渠道模板(给个起点,不是推荐位)', () => {
     expect(() => templatePatchFor('image', music)).toThrow(/不能套到/)
   })
 
+  it('语音那一段**只有小米这一条**,而且它就是默认起点(2026-09-30 发起人定的)', () => {
+    // 为什么要钉死:面板每组渲染一行按钮,**第一条就是那一组的默认起点** ——
+    // 哪天有人"顺手再加一条"或调了顺序,用户看到的默认就变了,而这件事**不会自己报错**。
+    // 被删掉的是 seedance.nz 那条(`doubao-seed-audio-1.0`):它的 basis 当年就写着
+    // "这条语音我们没真跑过" —— 一个没人验过的起点比没有起点更坏。
+    const voice = templatesFor('voice')
+    expect(voice.map((template) => template.site)).toEqual(['xiaomimimo.com'])
+    expect(voice[0]!.baseUrl).toBe('https://api.xiaomimimo.com/v1')
+    // 默认起点至少要真的跑通过(不许是"照文档抄的"那一档)。
+    expect(voice[0]!.basis).toMatch(/真机|实测|闭环验证/)
+  })
+
   it('充值链接:https、不带推广码、且**只做指路**', () => {
     for (const template of CHANNEL_TEMPLATES) {
       if (template.consoleUrl === undefined) continue

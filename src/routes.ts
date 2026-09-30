@@ -135,6 +135,11 @@ const ROUTE_METHODS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['/progress', ['GET']],
   ['/stamps/scene', ['POST']],
   ['/stamps/slot', ['POST']],
+  // 一键全部认可(T39):一次的推导入参,一个写批(见 `stampPending` 的注释)。
+  ['/stamps/pending', ['POST']],
+  // 舞台层(T39):处境(推导)+ 整备(写生成物)。
+  ['/stage', ['GET']],
+  ['/stage/sync', ['POST']],
   ['/snapshots', ['GET']],
   ['/snapshots/diff', ['GET']],
   ['/snapshots/rollback', ['POST']],
@@ -361,6 +366,49 @@ async function dispatch(deps: RouteDeps, req: IncomingMessage, res: ServerRespon
     if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
     await service.stampSlot(typeof body.project === 'string' && body.project !== '' ? body.project : active.id, String(body.slot ?? ''), { via: 'human' })
     writeJson(res, 200, { ok: true })
+    return
+  }
+
+  /**
+   * 一键全部认可(T39)。**仍然只有人能走这条路**(路由写死 `via: 'human'`,接缝里还有
+   * 一道 `#requireHuman`)—— 它不是"把守卫放宽",是把人的**一次**决定写成**一个**写批。
+   * `kind` 可选(~ 只认可场景 / 只认可素材槽 / 只认可设定集),缺省全盖。
+   */
+  if (method === 'POST' && path === '/stamps/pending') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const kind = body.kind === 'scene' || body.kind === 'slot' || body.kind === 'bible' ? body.kind : 'all'
+    const report = await service.stampPending(
+      typeof body.project === 'string' && body.project !== '' ? body.project : active.id,
+      { via: 'human' },
+      { kind },
+    )
+    writeJson(res, 200, report)
+    return
+  }
+
+  // 舞台层处境(T39):站位报告 + 生成物新不新(与板上那一格同一份推导)。
+  if (method === 'GET' && path === '/stage') {
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    writeJson(res, 200, await service.stageStatus(active.id))
+    return
+  }
+
+  /**
+   * 整备舞台(T39):重算生成物 `game/zz_galfree_stage.rpy`(图片定义 + 立绘站位),
+   * 一个写批 = 一条快照。**没东西要改就不写**(`changed: false`,不产生空快照)。
+   */
+  if (method === 'POST' && path === '/stage/sync') {
+    const body = await readJsonBody(req)
+    const active = await service.getActiveProject()
+    if (active === null) return writeJson(res, 404, { error: '没有激活项目' })
+    const report = await service.stageSync(
+      typeof body.project === 'string' && body.project !== '' ? body.project : active.id,
+      { via: 'human' },
+    )
+    writeJson(res, 200, report)
     return
   }
 

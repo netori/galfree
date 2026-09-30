@@ -4,6 +4,7 @@
  * 模板 = 标准 Ren'Py 项目目录 + `.studio/` 契约骨架 + `.gitignore`。
  * 这里是纯数据:渲染不依赖任何上下文,便于接缝测试直接断言磁盘终态。
  */
+import { AUTO_VOICE_FUNCTION_RPY } from './voice-batch.ts'
 
 /** slug 校验:文件系统安全、跨平台可携带;拒绝路径注入与空格/非 ASCII。 */
 export const PROJECT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
@@ -232,7 +233,13 @@ export function renderTemplateFiles(project: TemplateProject): TemplateFile[] {
         //(`renpy/translation/__init__.py:337-357`),改一个字那句语音就找不到了,
         // 而本产品逐场重生成是常规动作。id 由生成侧盖(dialogue-id.ts 的 stampDialogueIds)。
         // 文件不存在时引擎静默跳过(`renpy/loadable` 那一步),所以还没配音的项目照旧能跑。
-        'define config.auto_voice = "voice/{id}.ogg"',
+        // 2026-09-30 起写的是**函数形态**(不再是 `define … = "voice/{id}.ogg"` 那个字符串):
+        // 不同的 TTS 给不同的容器(小米 MiMo 只给 wav/mp3/pcm,本地 IndexTTS 给 ogg),
+        // 字符串只能钉一个后缀 —— 钉错了就是"引擎不报错、试玩也照过、就是没声音"。
+        // 函数按磁盘上真有的后缀找,两种可以混着用。两种形态引擎都认
+        // (`renpy/common/00voice.rpy:364-367`);老项目由 `galfree_voice_wiring` 补课。
+        // 文本是 voice-batch.ts 里那一份 —— 模板与升级共用一个常量,免得两处分叉。
+        AUTO_VOICE_FUNCTION_RPY,
         // 窗口图标(T30 / #38)。**这一行与 `game/gui/window_icon.png` 是一对,顺序不能反**:
         // `config.window_icon` 指向的文件不存在时引擎**不兜底**
         // (`set_icon` 只 `except DownloadNeeded`;`renpy.loader.load` 抛 FileNotFoundError)

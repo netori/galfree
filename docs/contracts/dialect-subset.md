@@ -52,7 +52,20 @@
   (`<label>_0000` 起,**幂等**,改台词不掉 id);块构造里的行不碰(那些行本来就子集外)。
 - **慢带证据**:`dialogue-id.slow.test.ts` —— 真 `lint` 干净 + `renpy <项目> dialogue None`
   导出的标识符**就是我们盖的那个**(不是引擎的哈希)。
-| `scene <名…>` / `show <tag> [属性…] [at …] [with …]` / `hide <tag>` | image 引用(**素材槽派生输入**) |
+| `scene <名…>` / `show <tag> [属性…] [at <变换…>] [with …]` / `hide <tag>` | image 引用(**素材槽派生输入**);`at` 子句是**立绘站位**,见下 |
+
+### `at` 子句与舞台层(T39,2026-09-30)
+
+`at` 里的名字是 `transform` 的名字,**可以逗号分隔多个**。两条必须记住的事实:
+
+1. **引擎的 `at a, b` 是 a 在内层、b 在外层**(`renpy/exports/displayexports.py:494`:
+   `for i in at_list: img = i(child=img)`)。所以"动作 + 站位"要写
+   `at <动作>, <站位>` —— 站位在外,才算在**缩放之后**定位。
+2. **以 `gf_` 开头的站位名归插件管**:「整备舞台」会按"此刻台上有几个人"把它们重排。
+   要自己钉死位置,用引擎自带的 `left`/`center`/`right` 或你自己的 `transform` ——
+   那些一律不碰(`stage.ts` 的 `isManagedPlacement` 只认表里的名,判据刻意写得很窄)。
+
+定位名与效果定义在生成物 `game/zz_galfree_stage.rpy`(见「舞台层」小节)。
 | `menu:` 块 | 选项菜单;选项 = `"文案":` + 块体;菜单提示 = 纯字符串行 |
 | `jump <LABEL>` | 跳转边 |
 | `call <LABEL> [from …]` | 调用边 |
@@ -94,3 +107,35 @@
   —— 写进去的一直是引擎认的语法,只是我们以前不解析它。同批做掉的还有 `sceneFingerprint`
   剔除该子句(否则语音生成会让人重盖戳)。慢带证据 `dialogue-id.slow.test.ts`。
 - `.studio/` 账本对图像引用的挂账见 `stage-zero.md`(T7 收官时定稿的总契约)。
+
+## 舞台层(T39,2026-09-30)
+
+**它修的是两个用户实测报上来的 bug**,两条根因都不是"写错了",而是**少了一环**:
+
+| 现象 | 根因(实测) |
+|---|---|
+| 自动化创作跑完之后**打开游戏就报错**:`Exception: Image 'qiu_yan' does not accept attributes 'worried'` | 素材图从没被显式定义过图片名。现代 Ren'Py 的 `config.automatic_images` 是 `None`(SDK 的 `00obsolete.rpy`),8.5 的 `images/` 目录扫描只按**文件名字面**注册(`bg-ferry.png` → 名字 `bg-ferry`),而素材槽的口径是 `tag + 属性`(`bg ferry`)—— 两个名字对不上,引擎先找不到 `qiu_yan worried`、退到 `qiu_yan`,多出来的属性无处安放就抛。 |
+| **两个立绘同时出现时重叠** | 剧本里的 `show` 没有 `at` 子句,引擎把它们放在同一个默认位置。 |
+
+**做法**(纯推导,可全量重算):`stage.ts` 从 `.rpy` 的 show/scene 引用推出槽清单,再从磁盘看哪些素材真在,
+生成 `game/zz_galfree_stage.rpy`(**生成物,可弃可重算**):
+
+1. **图片定义** —— 只为**磁盘上真有的**图写(`image bg ferry = "images/bg-ferry.png"`)。
+   还没出的槽不写:写一个不存在的路径会让引擎在显示时读到报错屏,比"灰底占位 + 板上写着缺素材"糟。
+2. **站位变换** `gf_*` —— 按在场人数分档(1 人居中 / 2 人左右 / 3 人以上一起缩),
+   以及入场与演出动作(`gf_in_*` / `gf_focus` / `gf_recede` / `gf_shake` / `gf_breathe` / `gf_close`)。
+   缩放基准从**真立绘的像素高度**算(`gf_sprite_zoom = 屏高 / 立绘图高`),换出图尺寸自动跟上。
+3. **演出字色调色板 + 描边**(见 `src/service/text-color.ts`)。描边是彩色字的**安全网**:
+   官方文档写明 outlines 只对**整个** Text displayable 生效、对 text tag 无效,所以描边只能整行统一
+   —— 于是"彩色字 vs 描边色 ≥ 4.5:1"这条 WCAG 闸门与背景无关,可以机械判。
+
+**入口**:`galfree_stage`(agent)/ 面板「整备舞台」/ `POST /stage/sync`,**一个写批 = 一条快照**;
+已经是最新的**什么都不写**(不产生空快照)。`generateScene` / `editScene` 把它并进**同一个写批**
+(否则 git 历史里"生成这一场"会变成两条看不出关系的提交,而中间那一刻项目是坏的)。
+
+**派生**:`progress.stage`(`outOfSync` / `report.unplaced` / `report.overlaps` / `report.crowded`)
+与 `nextActions` 的 `stage-needs-sync` / `sprite-overlap` —— 板子说得出来,人不必猜。
+
+**边界**:只有 `game/scenes/**`(生成目录)会被重排站位;`script.rpy` 是人的文件,生成器不越界
+(与「搬家」同一条线)。但**报告看全项目** —— 手写文件里的重叠也照说。
+

@@ -124,6 +124,8 @@ export const GALFREE_WORKFLOW: readonly WorkflowStage[] = [
       'galfree_generate_image', 'galfree_reroll_image',
       'galfree_fill_missing_art', 'galfree_character_art', 'galfree_reference_chain',
       'galfree_cover_art', 'galfree_theme',
+      // 出完图必须整备一次,否则图在磁盘上、游戏里还是灰底占位(见"舞台"那一条)。
+      'galfree_stage',
     ],
     gate: {
       code: GATE.noImageChannel,
@@ -133,8 +135,20 @@ export const GALFREE_WORKFLOW: readonly WorkflowStage[] = [
     human: '出完图请人在素材板上盖槽戳(审读戳只有人能盖)',
   },
   {
+    name: '舞台',
+    what: '把"素材槽"翻译成 Ren\'Py 真认得的东西(生成物 `game/zz_galfree_stage.rpy` + 剧本里的 `at` 站位子句)。'
+      + '**这一步不做,游戏看得出来是坏的**:现代 Ren\'Py 不再自动定义图片名,所以 `scene bg ferry` 会变成灰底占位、'
+      + '`show 角色 表情` 会**直接抛异常把游戏打崩**;没有站位的两个立绘会**叠在同一处**。'
+      + '出完图 / 改完剧本之后跑一次 `galfree_stage` 的 sync(已经是最新的就什么都不写)。',
+    tools: ['galfree_stage'],
+    gate: {
+      what: '板上 `nextActions` 里出现 `stage-needs-sync`(生成物没跟上)或 `sprite-overlap`(**两个立绘会叠在一起**)时先整备,别急着试玩 —— 试玩会照出这两件事',
+    },
+    done: [{ path: 'stage.outOfSync', op: 'false' }],
+  },
+  {
     name: '音频',
-    what: 'BGM/SE 是**接进来的**,不是生成的:把音频文件放进 `game/`,再在场景里接线(引用是**相对 `game/` 的路径**);**语音**走"批量清单"那条路(导出 → 本地 TTS → 按 id 导回),不需要先有 API 渠道。**配音之前先跑 `galfree_voice_wiring`**:语音要响得**同时**满足两条前提(项目里有 `config.auto_voice`、剧本每句对白带**显式 id**)—— 缺任何一条都是**静默无声**(引擎不报错、试玩也照过),而这两条属于模板演进、**老项目永远缺**,所以先补课再配音。音乐与语音**各自一条生成渠道**(ADR-0012)—— 建任务前用 `galfree_audio_channel` 看两条渠道各配没配,**建任务用 `galfree_generate_audio`**(音乐与语音**共用这一条入口**:用途按目标路径判,`game/voice/` 下 = 语音;模型 id 必须属于**那条**渠道的目录),**读/跑/重 roll 用 `galfree_audio_queue`**。**每个角色的嗓子**由登记簿的**音色档案**锚住(T32):参考样本是**服务端音色库里的文件名**(不是项目内路径),建语音任务时按台词派生的说话人**自动带上** —— 所以别让某个角色缺档案,否则那几句会听起来跟别人一样(`galfree_voice_anchor` 一句话就能看出还差谁)。**成本**:音乐单次最贵、TTS 按台词行计费 —— 建与跑之前先看返回里的"这一跑会真发几条"',
+    what: 'BGM/SE 是**接进来的**,不是生成的:把音频文件放进 `game/`,再在场景里接线(引用是**相对 `game/` 的路径**);**语音**走"批量清单"那条路(导出 → 本地 TTS → 按 id 导回),不需要先有 API 渠道。**配音之前先跑 `galfree_voice_wiring`**:语音要响得**同时**满足两条前提(项目里有 `config.auto_voice`、剧本每句对白带**显式 id**)—— 缺任何一条都是**静默无声**(引擎不报错、试玩也照过),而这两条属于模板演进、**老项目永远缺**,所以先补课再配音。**第三条是后缀**:`auto_voice` 的老形态(字符串)只认一个后缀,而不同的 TTS 给不同的容器(小米 MiMo 只给 wav/mp3,本地 IndexTTS 给 ogg)—— 对不上时引擎**照样不报错、照样找不到**;报告里 `unreachable.count > 0` 就是这件事,`apply` 会把那一行升级成"按磁盘上真有的后缀找"的函数形态(两种可以混着用)。音乐与语音**各自一条生成渠道**(ADR-0012)—— 建任务前用 `galfree_audio_channel` 看两条渠道各配没配,**建任务用 `galfree_generate_audio`**(音乐与语音**共用这一条入口**:用途按目标路径判,`game/voice/` 下 = 语音;模型 id 必须属于**那条**渠道的目录),**读/跑/重 roll 用 `galfree_audio_queue`**。**每个角色的嗓子**由登记簿的**音色档案**锚住(T32):参考样本是**服务端音色库里的文件名**(不是项目内路径),建语音任务时按台词派生的说话人**自动带上** —— 所以别让某个角色缺档案,否则那几句会听起来跟别人一样(`galfree_voice_anchor` 一句话就能看出还差谁)。**成本**:音乐单次最贵、TTS 按台词行计费 —— 建与跑之前先看返回里的"这一跑会真发几条"',
     tools: ['galfree_wire_audio', 'galfree_voice_wiring', 'galfree_voice_batch', 'galfree_audio_channel', 'galfree_voice_anchor', 'galfree_generate_audio', 'galfree_audio_queue'],
     gate: { what: '池是派生的(文件丢进 `game/` 就有,不用登记),但**引用必须落地**:悬空的音频引用在板上是一条 error(定位到哪一场哪一行),发布前置也会被它拦下' },
     done: [{ path: 'audio.missing', op: 'empty' }],
@@ -215,6 +229,21 @@ export function workflowPlaybook(options: PlaybookOptions = {}): string {
     if (stage.human !== undefined) lines.push(`   - 人:${stage.human}`)
   })
   lines.push(
+    '',
+    '**演出(让画面动起来的那几个词)**:站位与动作都定义在生成物 `game/zz_galfree_stage.rpy` 里,剧本里只写名字。',
+    '- **站位**:`show <角色> <表情> at gf_solo`(一人在场)/ `gf_duo_left` `gf_duo_right`(两人)/ `gf_trio_left|center|right` / `gf_quad_*` / `gf_quint_*`。',
+    '  **没写站位也没关系** —— 整备会按"此刻台上有几个人"自动补;写了就按你写的(插件只接管 `gf_` 开头的那些名字)。',
+    '- **入场**:`at gf_in_left` / `gf_in_right` / `gf_in_center`(滑入 + 淡入,自带站位)。首次登场比"啪一下出现"生动得多。',
+    '- **动作**(组合时写在**前面**):`at gf_focus, gf_duo_left`(说话的人上前一步)、`gf_recede`(角落里的人退开)、',
+    '  `gf_shake`(受惊)、`gf_breathe`(idle 的呼吸感)、`gf_close`(特写,顶对齐放大 —— 别用站位,它自带)。',
+    '  Ren\'Py 的 `at a, b` 是 **a 在内层、b 在外层**,所以"动作 + 站位"的顺序是 `at <动作>, <站位>`;写反了位置会漂。',
+    '- **别为了动而动**:一次对话里塞三种动作会像 PPT 动画。一个节拍一个动作就够。',
+    '',
+    '**演出字色(要克制,而且只在演出场里用)**:`"他抬起头。{color=gf_c_warn}雨停了。{/color}"` —— 四个槽:',
+    '`gf_c_device`(装置/非人的声音,唯一允许整行着色的)、`gf_c_warn`(不安)、`gf_c_cold`(疏离)、`gf_c_accent`(关键词)。',
+    '规则:只在场景文件里标了 `# galfree:perf` 的**演出场**用;每 20 行对白最多 1 处;每场最多 2 种色;整行着色每场最多 1 行。',
+    '理由是机制上的:颜色只在**单色基线**上才有重音 —— 到处上色等于没上色。板上会按这几条给出警告(想清点就调 `galfree_project_status`)。',
+    '技术细节:正文里的 `[` 要写成 `[[`;演出行**照样要有显式 `id`**(靠 `galfree_generate_scene` 自动盖,手写文件请用 `galfree_voice_wiring` 补)。',
     '',
     `**谁来做**:审读戳(场景 / 素材槽 / 设定定稿)**永远只有人能盖** —— agent 侧根本没有这个入口,硬试会被 \`${GATE.stampForbidden}\` 拒。`,
     '所以:内容你改,戳请人盖;试玩的"玩过了、行"、"这一版发不发"也是人的事。校验通过、试玩技术通过、',

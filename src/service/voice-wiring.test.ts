@@ -17,12 +17,12 @@
  * 典型的"接缝已备、入口缺失"。这一组把那一步补上。
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
 import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
-import { AUTO_VOICE_LINE } from './voice-batch.ts'
+import { upgradeAutoVoice } from './voice-batch.ts'
 
 const SCENE = [
   'label scene_one:',
@@ -65,6 +65,91 @@ describe('语音接线(ADR-0013 的两条前提)', () => {
 
   it('新建项目就带 `config.auto_voice`(模板那一行)', async () => {
     expect(await readFile(optionsFile(), 'utf8')).toContain('config.auto_voice')
+  })
+
+  // ─── T39:两种形态 —— 字符串钉死后缀会**静默**够不着文件 ──────────────────
+
+  it('新模板写的是**函数形态**(字符串形态只能钉一个后缀,钉错了引擎不报错也找不到)', async () => {
+    const options = await readFile(optionsFile(), 'utf8')
+    const report = await service.voiceWiring('wire')
+    expect(report.autoVoice.present).toBe(true)
+    expect(report.autoVoice.form).toBe('function')
+    expect(options).toContain('config.auto_voice = _galfree_voice')
+    expect(options).toContain('renpy.loadable')
+    // 老那一行**不该**再出现(两份形态同时在 = 最后一个生效,谁读谁糊涂)。
+    expect(options).not.toMatch(/define\s+config\.auto_voice\s*=\s*"/)
+  })
+
+  it('盯着字符串形态:磁盘上是 mp3 而它钉的是 ogg ⇒ 如实报"引擎够不着这几个"', async () => {
+    // 把项目改成老形态(字符串)
+    const options = await service.readProjectFile('wire', 'game/options.rpy')
+    await service.writeProjectFiles('wire', [{
+      path: 'game/options.rpy',
+      content: `${options.content.replace(/\s*$/, '')}\n\ndefine config.auto_voice = "voice/{id}.ogg"\n`,
+      expectVersion: options.version,
+    }], { origin: 'agent', reason: 'edit' })
+    // 磁盘上放两个 **mp3**(小米 MiMo 给的就是 mp3)与一个 ogg
+    await mkdir(join(projectsRoot, 'wire', 'game', 'voice'), { recursive: true })
+    await writeFile(join(projectsRoot, 'wire', 'game', 'voice', 'a.mp3'), Buffer.from([0xff, 0xf3, 0x84, 0xc4]))
+    await writeFile(join(projectsRoot, 'wire', 'game', 'voice', 'b.mp3'), Buffer.from([0xff, 0xf3, 0x84, 0xc4]))
+    await writeFile(join(projectsRoot, 'wire', 'game', 'voice', 'c.ogg'), Buffer.from('OggS'))
+
+    const report = await service.voiceWiring('wire')
+    expect(report.autoVoice.form).toBe('string')
+    expect(report.autoVoice.extension).toBe('ogg')
+    expect(report.voiceFiles.count).toBe(3)
+    expect(report.unreachable.count).toBe(2)
+    expect(report.unreachable.extensions).toEqual(['mp3'])
+    expect(report.unreachable.hint).toContain('不报错也找不到')
+    expect(report.needsWiring).toBe(true)
+  })
+
+  it('apply 只在**真够不着**的时候升级那一行;后缀对得上就一个字都不动', async () => {
+    const options = await service.readProjectFile('wire', 'game/options.rpy')
+    const stringForm = `${options.content.replace(/\s*$/, '')}\n\ndefine config.auto_voice = "voice/{id}.ogg"\n`
+    await service.writeProjectFiles('wire', [{ path: 'game/options.rpy', content: stringForm, expectVersion: options.version }], { origin: 'agent', reason: 'edit' })
+
+    // ① 后缀对得上(磁盘上是 ogg)⇒ 不动它 —— `options.rpy` 是人的文件,能不动就不动
+    await mkdir(join(projectsRoot, 'wire', 'game', 'voice'), { recursive: true })
+    await writeFile(join(projectsRoot, 'wire', 'game', 'voice', 'x.ogg'), Buffer.from('OggS'))
+    const same = await service.voiceWiring('wire', { apply: true })
+    expect(same.changed).not.toContain('game/options.rpy')
+    let after = await readFile(optionsFile(), 'utf8')
+    expect(after).toContain('define config.auto_voice = "voice/{id}.ogg"')
+
+    // ② 磁盘上多了一个 mp3 ⇒ 那一行升级成函数形态(其余内容逐字保留)
+    await writeFile(join(projectsRoot, 'wire', 'game', 'voice', 'y.mp3'), Buffer.from([0xff, 0xf3, 0x84, 0xc4]))
+    const upgraded = await service.voiceWiring('wire', { apply: true })
+    expect(upgraded.changed).toContain('game/options.rpy')
+    expect(upgraded.autoVoice.form).toBe('function')
+    expect(upgraded.unreachable.count).toBe(0)
+    expect(upgraded.needsWiring).toBe(false)
+    after = await readFile(optionsFile(), 'utf8')
+    expect(after).toContain('config.auto_voice = _galfree_voice')
+    expect(after).not.toMatch(/define\s+config\.auto_voice\s*=\s*"/)
+    // 只换了那一行:文件里别的东西一个都没少
+    expect(after).toContain('define config.has_music = True')
+    expect(after).toContain('define build.name = "wire"')
+
+    // ③ 再跑一次是幂等的:什么都不用改了
+    const again = await service.voiceWiring('wire', { apply: true })
+    expect(again.changed).toEqual([])
+  })
+
+  it('升级是**纯函数**、只换那一行(找不到那一行就原样退回,不硬来)', () => {
+    const text = [
+      '# 注释',
+      'define config.has_music = True',
+      'define config.auto_voice = "voice/{id}.ogg"',
+      'define build.name = "x"',
+      '',
+    ].join('\n')
+    const { text: next, upgraded } = upgradeAutoVoice(text)
+    expect(upgraded).toBe(true)
+    expect(next).toContain('define config.has_music = True')
+    expect(next).toContain('define build.name = "x"')
+    expect(next).toContain('config.auto_voice = _galfree_voice')
+    expect(upgradeAutoVoice('没有那一行\n').upgraded).toBe(false)
   })
 
   it('**生成侧盖章**:generateScene 写出来的每一句对白都带显式 id', async () => {
@@ -126,9 +211,11 @@ describe('语音接线(ADR-0013 的两条前提)', () => {
 
     const after = await service.voiceWiring('wire', { apply: true })
 
-    // 配置补上了
+    // 配置补上了 —— 而且补的是**函数形态**(T39:字符串形态只能钉一个后缀,
+    // 小米 MiMo 给 mp3、本地 IndexTTS 给 ogg,钉错了就是"引擎不报错、就是没声音")。
     expect(after.autoVoice.present).toBe(true)
-    expect(await readFile(optionsFile(), 'utf8')).toContain(AUTO_VOICE_LINE)
+    expect(after.autoVoice.form).toBe('function')
+    expect(await readFile(optionsFile(), 'utf8')).toContain('config.auto_voice = _galfree_voice')
     // 场景盖章了
     expect(await readFile(sceneFile(), 'utf8')).toContain('id scene_one_0000')
     // 干净了

@@ -10,8 +10,8 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { GalfreeApi, GalfreeApiError } from './api.ts'
-import type { NextActionView, ProgressView, SdkView, StateView, StampTarget } from './types.ts'
-import { stampKey } from './types.ts'
+import type { NextActionView, ProgressView, SdkView, StageSyncReport, StampBatchReport, StampPendingKind, StateView, StampTarget } from './types.ts'
+import { STAGE_SYNC_KEY, STAMP_PENDING_KEY, stampKey } from './types.ts'
 import { Chip, Notice, Spinner, relativeTime } from './ui.tsx'
 import { StageBoard } from './stage-board.tsx'
 import { AssetBoard } from './asset-board.tsx'
@@ -49,6 +49,56 @@ const NOTHING_RUNNING_NOTICE = '此刻没有在跑的试玩(可能刚好自己�
 /** 取消没**问到**结果(网络 / 500):照实说,不冒充"没有在跑"。 */
 const CANCEL_UNKNOWN_NOTICE = '取消没问出结果(服务端没答上来):试玩可能还在跑,刷新一次看看。'
 
+/** 罗列名字的上限(几十项的时候别把提示条撑成一屏)。 */
+const NOTICE_LIST_LIMIT = 8
+
+function listNames(names: readonly string[]): string {
+  if (names.length <= NOTICE_LIST_LIMIT) return names.join('、')
+  return `${names.slice(0, NOTICE_LIST_LIMIT).join('、')} …(共 ${names.length} 个)`
+}
+
+/**
+ * 「全部认可」的回执说人话(T39)—— **`skipped` 一定要出现**。
+ *
+ * 那几十项里混着几个盖不上的(只读降级的场景 / 还没出图的槽),而"一键盖满"最坏的样子
+ * 就是悄悄漏掉几个、而你以为盖满了。所以条数与**每一条的原因**原样摆出来,一条都不吞。
+ */
+function describeStampBatch(report: StampBatchReport, kind: StampPendingKind): string {
+  const scope = kind === 'all' ? '' : `(${kind === 'scene' ? '只认可场景' : kind === 'slot' ? '只认可素材' : '只认可设定集'})`
+  const head = report.stamped.length === 0
+    ? `这一次没有盖上任何戳${scope}。`
+    : `已认可 ${report.stamped.length} 项${scope}:${listNames(report.stamped)} —— 一次写批 = 一条快照。`
+  if (report.skipped.length === 0) return head
+  const skipped = report.skipped.slice(0, NOTICE_LIST_LIMIT).map((entry) => `${entry.target}(${entry.message})`)
+  return `${head}另有 ${report.skipped.length} 项没盖上:${skipped.join(';')}${report.skipped.length > NOTICE_LIST_LIMIT ? ' …' : ''}`
+}
+
+/**
+ * 「整备舞台」的回执(T39):**写没写要分得出来** —— "已经是最新的,什么都没写"与
+ * "真写了 N 个文件(一条快照)"是两件事,混成一句会让人以为刚刚生成过。
+ * 剩下三件事实(还有会重叠的 / 台上人排不下的 / 还有几行没站位的)照实列在后面:
+ * 整备管不到手写文件,那些问题会一直在板上,不说出来就成了静默。
+ */
+function describeStageSync(report: StageSyncReport): string {
+  const facts = `图片定义 ${report.definitions} 张 · 剧本引用到的槽 ${report.slots} 个`
+  const lines = [
+    report.changed
+      ? `已整备舞台:写了 ${report.files.length} 个文件(${listNames(report.files)}),一条快照。${facts}`
+      : `舞台已经是最新的:什么都没写,也没有产生快照。${facts}`,
+  ]
+  if (report.report.overlaps.length > 0) {
+    const where = report.report.overlaps.map((entry) => `${entry.scene}(${entry.names.join('+')})`)
+    lines.push(`还有 ${report.report.overlaps.length} 处立绘会叠在一起:${listNames(where)} —— 那是人写死的站位或台上人太多,整备不碰`)
+  }
+  if (report.report.crowded.length > 0) {
+    lines.push(`台上超过 5 个立绘的场景:${listNames(report.report.crowded)}(站位表排不下,按序复用)`)
+  }
+  if (report.report.unplaced > 0) {
+    lines.push(`还有 ${report.report.unplaced} 行立绘没有站位子句 —— 多半住在手写文件里,生成器不越界(先搬进 game/scenes/)`)
+  }
+  return lines.join('\n')
+}
+
 export function WorkbenchPanel() {
   const api = useMemo(() => new GalfreeApi(), [])
   const [state, setState] = useState<StateView | null>(null)
@@ -71,6 +121,8 @@ export function WorkbenchPanel() {
   const [ensuring, setEnsuring] = useState(false)
   /** 点舞台板场景 → 打开场景编辑器定位到它(T11/T12 的联动)。 */
   const [focusScene, setFocusScene] = useState<string | null>(null)
+  /** 点结构问题 → 文件检视器打开那份文件定位到它(T39 的联动)。 */
+  const [focusFile, setFocusFile] = useState<string | null>(null)
 
   const noticeSeq = useRef(0)
   const pushNotice = useCallback((tone: 'bad' | 'warn', text: string) => {
@@ -80,11 +132,35 @@ export function WorkbenchPanel() {
   }, [])
 
   /**
+   * 把某一格带到眼前:滚到中间 + 程序化 focus(锚点都带 `tabIndex={-1}`,
+   * 所以"首屏阅读器会跟过去"不是空话)。
+   */
+  const reveal = useCallback((anchor: string) => {
+    const element = document.getElementById(anchor)
+    if (element === null) return
+    element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    if (element instanceof HTMLElement) element.focus({ preventScroll: true })
+  }, [])
+
+  /** 打开场景编辑器并滚过去(点舞台板场景 / 点结构问题都走这里)。 */
+  const openScene = useCallback((label: string) => {
+    setFocusScene(label)
+    reveal('gf-scene-workbench')
+  }, [reveal])
+
+  /** 在文件检视器里打开一份文件并滚过去(结构问题归不到某一场时走这条)。 */
+  const openFile = useCallback((path: string) => {
+    setFocusFile(path)
+    reveal('gf-file-inspector')
+  }, [reveal])
+
+  /**
    * 「下一步」上那颗按钮:把推导给的 `target` 翻译成"滚到哪一格 / 打开哪一场"(T21)。
    *
    * 面板**不判断该做什么**(那是 `nextActions` 的事),只负责把人带到他该看的地方:
    * 场景 / 音频 → 场景编辑器;槽 → 素材板;设定集 → 设定集卡;试玩 → 那颗按钮;
-   * 发布 → 发布卡。认不出的 kind **明说**,不静默什么都不做 —— 静默失败会让人以为界面坏了。
+   * 发布 → 发布卡;舞台层 → 舞台板上的「整备舞台」。认不出的 kind **明说**,
+   * 不静默什么都不做 —— 静默失败会让人以为界面坏了。
    */
   const jumpTo = useCallback((target: NextActionView['target']) => {
     if (target === undefined) return
@@ -96,17 +172,15 @@ export function WorkbenchPanel() {
       : target.kind === 'bible' ? 'gf-bible-card'
       : target.kind === 'publish' ? 'gf-publish-card'
       : target.kind === 'playtest' ? 'gf-playtest-button'
+      // 舞台层(T39):落到舞台板那颗「整备舞台」上 —— 它在卡片的操作区,滚过去就看得见。
+      : target.kind === 'stage' ? 'gf-stage-sync'
       : null
     if (anchor === null) {
       pushNotice('warn', `这一步没有可跳转的位置(${String(target.kind)})—— 在上面那条里照着做就行。`)
       return
     }
-    const element = document.getElementById(anchor)
-    if (element === null) return
-    element.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    // 锚点都带 `tabIndex={-1}`,所以程序化 focus 有意义(首屏阅读器会跟过去)。
-    if (element instanceof HTMLElement) element.focus({ preventScroll: true })
-  }, [pushNotice])
+    reveal(anchor)
+  }, [pushNotice, reveal])
 
   const refresh = useCallback(async (options?: { quiet?: boolean }) => {
     try {
@@ -219,6 +293,42 @@ export function WorkbenchPanel() {
       await refresh()
     } catch (error) {
       pushNotice('bad', `盖戳失败(${target.kind === 'scene' ? target.label : target.slot}):${describeError(error)}`)
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  /**
+   * 「全部认可」(T39):一次推导入参 = **一个写批 = 一条快照**。
+   *
+   * 这条路**只有人能走**(路由写死 `via: 'human'`,接缝里还有一道 `#requireHuman`)。
+   * 面板的责任分两半:确认行由舞台板先摆出来(将认可哪几类、各多少个,可以取消),
+   * 回执在这里**原样**报出去 —— `skipped` 尤其不许吞(见 `describeStampBatch`)。
+   */
+  const stampPending = async (kind: StampPendingKind): Promise<void> => {
+    setBusyKey(`${STAMP_PENDING_KEY}:${kind}`)
+    try {
+      pushNotice('warn', describeStampBatch(await api.stampPending(kind), kind))
+      await refresh()
+    } catch (error) {
+      pushNotice('bad', `全部认可失败:${describeError(error)}`)
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  /**
+   * 「整备舞台」(T39):重算生成物(图片定义 + 立绘站位),一个写批 = 一条快照。
+   * 没东西要改时接缝**不写**(回执 `changed: false`)—— 那句话照原样说出来,
+   * 别让"什么都没写"读成"刚刚生成了一遍"。
+   */
+  const stageSync = async (): Promise<void> => {
+    setBusyKey(STAGE_SYNC_KEY)
+    try {
+      pushNotice('warn', describeStageSync(await api.stageSync()))
+      await refresh()
+    } catch (error) {
+      pushNotice('bad', `整备舞台失败:${describeError(error)}`)
     } finally {
       setBusyKey(null)
     }
@@ -417,17 +527,21 @@ export function WorkbenchPanel() {
 
         <StageBoard
           progress={progress}
+          api={api}
           busyKey={busyKey}
           playing={playing}
           // 服务端那条事实兜住"agent 起的试玩"(面板自己没在等,但那一次真的在跑)。
           running={progress?.playtestRunning ?? false}
           cancelling={cancelling}
           onStamp={(target) => void stamp(target)}
+          onStampPending={(kind) => void stampPending(kind)}
           onPlaytest={() => void runPlaytest()}
           onPlaytestFrom={(label) => void runPlaytest(label)}
           onPlaytestCancel={() => void cancelPlaytest()}
           onRelocate={(label) => void relocate(label)}
-          onOpenScene={(label) => setFocusScene(label)}
+          onOpenScene={openScene}
+          onOpenFile={openFile}
+          onStageSync={() => void stageSync()}
           onJump={(target) => jumpTo(target)}
           hasProject={hasProject}
         />
@@ -503,6 +617,9 @@ export function WorkbenchPanel() {
           api={api}
           hasProject={hasProject}
           onNotice={pushNotice}
+          // 点结构问题 → 打开那份文件(与场景编辑器的 focus / onFocusHandled 同一套)。
+          focusPath={focusFile}
+          onFocusHandled={() => setFocusFile(null)}
         />
 
         <SdkCard sdk={sdk} ensuring={ensuring} onEnsure={() => void ensureSdk()} />

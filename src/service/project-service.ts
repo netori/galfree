@@ -6,7 +6,7 @@
  * 队列、快照、试玩)。agent 工具与工作台 Client 只是两个薄适配器,消费这里
  * 的状态,不另立真相源。
  */
-import { access, mkdir, readdir, readFile } from 'node:fs/promises'
+import { access, mkdir, open, readdir, readFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -18,21 +18,27 @@ import { commitSnapshot, fileDiff, fileHistory, rollbackFile, type SnapshotEntry
 import { PROJECT_NAME_RE, TEMPLATE_CJK_FONT, TEMPLATE_UI_FILES, TEMPLATE_UI_IMAGE_DIR, TEMPLATE_WINDOW_ICON, renderTemplateFiles, renderUiPatch, templateKeepFiles } from './template.ts'
 import { COVER_TARGETS, coverTargetOf, coverTargetIds } from './covers.ts'
 import { dialogueRowsOf, stampDialogueIds } from './dialogue-id.ts'
-import { AUTO_VOICE_LINE, isVoiceAudioFile, matchVoiceFiles, voiceTargetPath, type VoiceBatch, type VoiceBatchRow, type VoiceWiringReport, type VoiceWiringScene } from './voice-batch.ts'
+import { AUTO_VOICE_FUNCTION_RPY, isVoiceAudioFile, readAutoVoice, upgradeAutoVoice, matchVoiceFiles, voiceTargetPath, type VoiceBatch, type VoiceBatchRow, type VoiceWiringReport, type VoiceWiringScene } from './voice-batch.ts'
 import { FakeValidator } from './validation/template-validator.ts'
 import { deriveGraph, parseRpy } from './rpy/parse.ts'
 import { readRpyFiles } from './rpy/files.ts'
 import type { ParsedScript } from './rpy/dialect.ts'
 import type { BranchGraph } from './rpy/dialect.ts'
 import type { DialectProblem } from './rpy/dialect.ts'
-import { computeProgress, sceneFingerprint, slotAssetPath, type ProgressSnapshot } from './progress.ts'
-import { readStamps, sceneTarget, slotTarget, stampsDocument, withStamp, type StampRecord } from './stamps.ts'
+import { computeProgress, emptyStageProgress, sceneFingerprint, slotAssetPath, type ProgressSnapshot, type StageProgress } from './progress.ts'
+import { readStamps, sceneTarget, slotTarget, stampsDocument, withStamp, STAMPS_FILE, type StampRecord } from './stamps.ts'
 import {
   CHARACTERS_FILE, SLOTS_FILE, charactersDocument, readCharacters, readSlots, removeCharacter,
   removeSlot, slotsDocument, upsertCharacter, upsertSlot,
   type CharacterRecord, type SlotRecord, type VoiceEmotion,
 } from './characters.ts'
 import { deriveSlots } from './slots.ts'
+import { slotName } from './slot-naming.ts'
+import {
+  applyPlacements, emptyStageReport, imageDefinitions, planStage, renderStageFile, STAGE_FILE,
+  type PlacementEdit, type StagePlan, type StageReport,
+} from './stage.ts'
+import { deriveTextColor } from './text-color.ts'
 import { deriveAudio, poolViewOf, readAudioFiles, type AudioDerivation, type AudioPoolView } from './audio.ts'
 import { resolveReferenceChain, sortSlotsByReference, type ReferenceChainView } from './reference-chain.ts'
 import { buildVoiceAnchorBoard, resolveVoiceAnchor, type VoiceAnchorBoard, type VoiceAnchorView } from './voice-anchor.ts'
@@ -81,6 +87,50 @@ import { generateThemedImages, type ThemePorts } from './theme-runner.ts'
 import { WriteGateway, type ChangeEvent, type FileSnapshot, type GatewayError, type WriteLogEntry, type WriteOp, type WriteResult } from './write-gateway.ts'
 import type { WriteBatchReason } from './write-gateway.ts'
 import type { ValidationReport } from './validation/contract.ts'
+
+/**
+ * PNG 的像素高度(只读文件头 24 字节,不整份读进来)。
+ *
+ * 用途只有一个:立绘的缩放基准(`gf_sprite_zoom = 屏幕高 / 立绘图高`,见 `stage.ts`)。
+ * 读不到/不是 PNG 就返回 `null`,调用方退回缺省值 —— 一张坏图不该让整备整个失败。
+ */
+async function readPngHeight(path: string): Promise<number | null> {
+  let handle: Awaited<ReturnType<typeof open>> | null = null
+  try {
+    handle = await open(path, 'r')
+    const header = Buffer.alloc(24)
+    const { bytesRead } = await handle.read(header, 0, 24, 0)
+    if (bytesRead < 24) return null
+    // PNG 签名(8B)+ IHDR 长度/类型(8B),宽高落在 16..24。
+    if (header.readUInt32BE(0) !== 0x89504e47) return null
+    const height = header.readUInt32BE(20)
+    return height > 0 ? height : null
+  } catch {
+    return null
+  } finally {
+    if (handle !== null) await handle.close().catch(() => {})
+  }
+}
+
+/** 「全部认可」的回执:盖了哪些、以及**为什么有几个没盖上**(绝不静默漏)。 */
+export interface StampBatchReport {
+  /** 真盖上戳的目标(场景 label / 槽名 / 设定集)。 */
+  stamped: string[]
+  /** 盖不了的:带上稳定机器码与人话原因(面板原样显示)。 */
+  skipped: Array<{ target: string; code: string; message: string }>
+}
+
+/** 「整备舞台」的回执(一个写批 = 一个快照)。 */export interface StageSyncReport {
+  /** 真写了东西没有(已经是最新的 = false,不产生快照)。 */
+  changed: boolean
+  /** 这一次写批动到的文件(项目根的 POSIX 口径)。 */
+  files: string[]
+  report: StageReport
+  /** 生成物还是不是最新的(写完之后一般就是 false)。 */
+  outOfSync: boolean
+  slots: number
+  definitions: number
+}
 
 export interface ProjectInfo {
   id: string
@@ -541,9 +591,15 @@ export class ProjectService {
     const audio = await this.#deriveAudio(graph.scenes, entry.path)
     // 发布处境(T18):上次发布的产物在哪、还新不新(纯推导;没发布过 = null)。
     const publishLedger = await readPublish(entry.path)
+    // 舞台层(T39):与板上其它格子同一态度 —— 推导出来;读不出来就当"没有舞台层"
+    // (它不该让整块板跟着塌:一个坏了的生成物文件不该让人看不见场景清单)。
+    const stage = await this.#stageProgress(projectRef, parsed).catch(() => emptyStageProgress())
+    // 演出字色(T39):分寸是**推导出来的提醒**(不是硬拦)—— 密度、色数、调色板、
+    // 对比度、有没有用在演出场里。全部 warning,理由见 text-color.ts 的文件头。
+    const textColor = deriveTextColor(parsed)
     return computeProgress(entry.path, {
       scenes: graph.scenes,
-      problems: [...graph.problems, ...completeness.problems, ...derived.problems, ...audio.problems],
+      problems: [...graph.problems, ...completeness.problems, ...derived.problems, ...audio.problems, ...textColor.problems],
       derivedSlots: derived.slots,
       characters,
       definedCharacters: parsed.characters,
@@ -563,6 +619,7 @@ export class ProjectService {
         outlineRef: bible.outline === null ? null : { fingerprint: bible.outline.fingerprint },
       },
       playtest: { last: playtest?.last ?? null, currentFingerprint: contentFingerprint(graph) },
+      stage,
       // 运行时事实(不是从磁盘推的):面板那颗"取消"按钮据此显示。
       playtestRunning: this.playtestRunning(),
       theme,
@@ -838,7 +895,6 @@ export class ProjectService {
     await this.#putStamp(projectRef, sceneTarget(label), sceneFingerprint(scene))
   }
 
-  /** 人盖素材槽戳;槽未填(素材文件不存在)时拒绝(slot-not-filled)。 */
   /**
    * 人盖素材槽戳;槽未填(素材文件不存在)时拒绝(slot-not-filled)。
    */
@@ -848,6 +904,91 @@ export class ProjectService {
     const fp = await fileFingerprint(entry.path, slotAssetPath(slot))
     if (fp === ABSENT) throw new GalfreeError('slot-not-filled', `素材槽未填,不能盖审读戳:${slot}`)
     await this.#putStamp(projectRef, slotTarget(slot), fp)
+  }
+
+  /**
+   * **一次盖掉全部还在等人认可的**(T39;面板上的「全部认可」)。
+   *
+   * 为什么要做成接缝上的一个批量口,而不是让面板循环调 `/stamps/scene`:
+   *  1. 循环 N 次 = **N 个写批 = N 条快照**(一部 51 场的戏就是 51 条 git 提交,
+   *     而人只做了一个决定);
+   *  2. 中途失败会留下"盖了一半"的状态,调用方只看到最后那条错;
+   *  3. "哪些能盖"是**推导**出来的(`stampable` / `approvable`),不该由面板自己挑
+   *     —— 领域规则零 UI(ADR-0002)。
+   *
+   * 守卫一处都不放松:
+   *  - `#requireHuman` 照样在最前面 —— agent 走这条路一样 `stamp-forbidden`
+   *    (审读戳只能由人盖,ADR-0008);
+   *  - 盖不了的(场景只读降级 / 素材槽还没填)**如实列进 `skipped`**,不静默跳过、
+   *    更不假装成功 —— "一键全部"最坏的样子是"它悄悄漏掉了三个,而你以为盖满了"。
+   *
+   * 快照的原因写作 `stamp-batch`(不是 `stamp`):一堆一次性盖掉的戳与"刚读完这一场"的戳
+   * 在 git 历史里该分得出来 —— 前者是信任,后者是读过。
+   */
+  async stampPending(
+    projectRef: string,
+    actor: { via: 'human' | 'agent' },
+    options: { kind?: 'all' | 'scene' | 'slot' | 'bible' } = {},
+  ): Promise<StampBatchReport> {
+    this.#requireHuman(actor)
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const kind = options.kind ?? 'all'
+    const snapshot = await this.progress(projectRef)
+    const targets: Array<{ target: string; label: string; fingerprint: string }> = []
+    const skipped: StampBatchReport['skipped'] = []
+
+    if (kind === 'all' || kind === 'scene') {
+      // 指纹要用**解析出来的场景原文**(与 `stampScene` 同一份),所以这里拿的是图不是视图。
+      const graph = await this.branchGraph(projectRef)
+      const stateOf = new Map(snapshot.scenes.map((scene) => [scene.label, scene]))
+      for (const scene of graph.scenes) {
+        const state = stateOf.get(scene.label)
+        if (state === undefined) continue
+        if (state.stamp === 'approved') continue
+        if (!state.stampable) {
+          skipped.push({ target: `scene:${scene.label}`, code: 'not-stampable', message: state.stampableBlockedBy ?? '现在不能盖戳' })
+          continue
+        }
+        targets.push({ target: sceneTarget(scene.label), label: scene.label, fingerprint: sceneFingerprint(scene) })
+      }
+    }
+
+    if (kind === 'all' || kind === 'slot') {
+      for (const slot of snapshot.slots) {
+        if (slot.stamp === 'approved') continue
+        if (!slot.approvable) {
+          skipped.push({ target: `slot:${slot.slot}`, code: 'not-approvable', message: slot.approvableBlockedBy ?? '现在不能盖戳' })
+          continue
+        }
+        const fp = await fileFingerprint(entry.path, slotAssetPath(slot.slot))
+        if (fp === ABSENT) {
+          skipped.push({ target: `slot:${slot.slot}`, code: 'slot-not-filled', message: '素材槽未填,不能盖审读戳' })
+          continue
+        }
+        targets.push({ target: slotTarget(slot.slot), label: slot.slot, fingerprint: fp })
+      }
+    }
+
+    if (kind === 'all' || kind === 'bible') {
+      if (snapshot.bible.stamp !== 'approved') {
+        const doc = await this.bible(projectRef)
+        targets.push({ target: BIBLE_STAMP_TARGET, label: '设定集', fingerprint: bibleFingerprint(doc) })
+      }
+    }
+
+    if (targets.length > 0) {
+      const gateway = await this.#gatewayFor(projectRef)
+      const current = await gateway.read(STAMPS_FILE)
+      let next = await this.stampRecords(projectRef)
+      for (const target of targets) next = withStamp(next, target.target, target.fingerprint)
+      await gateway.writeBatch(
+        [{ path: STAMPS_FILE, content: stampsDocument(next), expectVersion: current.version }],
+        { origin: 'workbench', reason: 'stamp-batch' },
+      )
+    }
+
+    return { stamped: targets.map((target) => target.label), skipped }
   }
 
   // ─── 角色登记簿 + 素材槽账本(T8)─────────────────────────────────────
@@ -918,6 +1059,186 @@ export class ProjectService {
     )
   }
 
+  // ─── 舞台层(T39)────────────────────────────────────────────────────
+
+  /**
+   * 项目虚拟分辨率(读 `gui.rpy` 的 `gui.init(w, h)`)。
+   *
+   * 读不到就用基准分辨率 —— 舞台层是一格推导,不该因为一个**可选**的界面文件读不到而塌
+   * (与 `#themeView` 同一个态度)。
+   */
+  async #projectResolution(projectRef: string): Promise<{ width: number; height: number }> {
+    try {
+      const entry = await this.#resolve(projectRef)
+      return projectResolutionOf(await readFile(join(entry.path, 'game', GUI_CODE_FILE), 'utf8'))
+    } catch {
+      return { width: 1280, height: 720 }
+    }
+  }
+
+  /**
+   * 算出「舞台层」此刻该长什么样:图片定义 + 立绘站位(**纯推导**,可全量重算)。
+   *
+   * 输入没有一处是手写的:
+   *  - 槽清单从 `.rpy` 的 show/scene 引用推(`.rpy` 是唯一真相,ADR-0009);
+   *  - "图在不在"从磁盘看(和推导板同一个口径:文件真在才算填上);
+   *  - 缩放基准从**真立绘**的像素高度算(换了出图尺寸,整备一次自动跟上)。
+   */
+  async #stagePlan(projectRef: string, parsed: ParsedScript): Promise<{ plan: StagePlan; content: string; slots: string[]; existing: Set<string> }> {
+    const entry = await this.#resolve(projectRef)
+    const slots: string[] = []
+    const seen = new Set<string>()
+    for (const scene of parsed.scenes) {
+      for (const statement of scene.statements) {
+        if (statement.kind !== 'image' || statement.role === 'hide') continue
+        const name = slotName(statement)
+        if (name.trim() === '' || seen.has(name)) continue
+        seen.add(name)
+        slots.push(name)
+      }
+    }
+    const existing = new Set<string>()
+    let spriteHeight: number | null = null
+    for (const slot of slots) {
+      const assetPath = slotAssetPath(slot)
+      const absolute = join(entry.path, ...assetPath.split('/'))
+      if (!(await pathExists(absolute))) continue
+      existing.add(assetPath)
+      // 立绘(不是 `bg …`)的像素高度决定缩放基准;第一个够用了。
+      if (spriteHeight === null && !/^bg\s/.test(slot.trim())) spriteHeight = await readPngHeight(absolute)
+    }
+    const resolution = await this.#projectResolution(projectRef)
+    return {
+      plan: planStage(parsed),
+      slots,
+      existing,
+      content: renderStageFile({ slots, existing, spriteHeight, screenHeight: resolution.height }),
+    }
+  }
+
+  /** 舞台层的**推导处境**(给板子、路由、工具读同一份)。 */
+  async #stageProgress(projectRef: string, parsed: ParsedScript): Promise<StageProgress> {
+    const { plan, content, slots, existing } = await this.#stagePlan(projectRef, parsed)
+    const current = await (await this.#gatewayFor(projectRef)).read(STAGE_FILE)
+    return {
+      report: plan.report,
+      outOfSync: current.missing || current.content !== content,
+      slots: slots.length,
+      definitions: imageDefinitions({ slots, existing }).length,
+    }
+  }
+
+  /**
+   * 把一次生成/编辑的**新内容**也算进去再推舞台层。
+   *
+   * 为什么不让调用方"先落盘再整备":那会变成**两个写批 = 两条快照**,
+   * 而 git 历史里"生成这一场"会被拆成两个看不出关系的提交。这里在内存里换掉那一份文件,
+   * 推完舞台层之后**同一个写批**落盘 —— 一条快照,一次动作。
+   */
+  async #parseWith(projectRef: string, override: Map<string, string>): Promise<ParsedScript> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const files = await readRpyFiles(join(entry.path, 'game'))
+    const merged = files.map((file) => (override.has(file.name) ? { ...file, text: override.get(file.name)! } : file))
+    for (const [name, text] of override) {
+      if (!files.some((file) => file.name === name)) merged.push({ name, text })
+    }
+    return parseRpy(merged)
+  }
+
+  /**
+   * 舞台层的写批内容(`game/zz_galfree_stage.rpy` + 各场景要补的站位),**已经是最新的**就是空数组。
+   *
+   * 舞台文件的版本戳走网关的就地读 —— 内容一样就一个字节都不写(git diff 越安静越好)。
+   */
+  async #stageOps(projectRef: string, parsed: ParsedScript, extra: Map<string, string> = new Map()): Promise<WriteOp[]> {
+    const entry = await this.#resolve(projectRef)
+    const gateway = await this.#gatewayFor(projectRef)
+    const { plan, content } = await this.#stagePlan(projectRef, parsed)
+    const ops: WriteOp[] = []
+
+    const current = await gateway.read(STAGE_FILE)
+    if (current.missing || current.content !== content) {
+      ops.push({ path: STAGE_FILE, content, expectVersion: current.version })
+    }
+
+    // 站位按**文件**归拢:一个文件最多一条写 op(不然第二次写会撞自己刚写的版本戳)。
+    const byFile = new Map<string, PlacementEdit[]>()
+    for (const edit of plan.edits) {
+      byFile.set(edit.file, [...(byFile.get(edit.file) ?? []), edit])
+    }
+    for (const [file, edits] of byFile) {
+      // 生成/编辑那条路已经把新内容拿在手里了:在**内存里的那份**上补站位,
+      // 而且它已经作为一条 op 存在(版本戳必须用同一个)。
+      const already = extra.get(file)
+      const relative = gatewayPathOf(file)
+      if (already !== undefined) {
+        const patched = applyPlacements(already, edits)
+        extra.set(file, patched)
+        continue
+      }
+      const snapshot = await gateway.read(relative)
+      if (snapshot.missing) continue
+      const patched = applyPlacements(snapshot.content, edits)
+      if (patched === snapshot.content) continue
+      ops.push({ path: relative, content: patched, expectVersion: snapshot.version })
+    }
+    return ops
+  }
+
+  /** 舞台层的处境(给板子/路由/工具读):报告 + "生成物还是不是最新的"。 */
+  async stageStatus(projectRef: string): Promise<StageProgress> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    return await this.#stageProgress(projectRef, await this.#parseScript(projectRef))
+  }
+
+  /**
+   * 「整备舞台」—— 把生成物重算一遍:图片定义 + 立绘站位(**一个写批 = 一个快照**)。
+   *
+   * 什么时候需要它:出图之后(定义里多一张)、剧本加了人之后(站位要重排)、
+   * 老项目第一次打开(它从来没有过这个文件)。**板上的 `stage-out-of-sync` 说得出来**,
+   * 所以人不必猜。
+   */
+  async stageSync(projectRef: string, actor: { via: 'human' | 'agent' }): Promise<StageSyncReport> {
+    const entry = await this.#resolve(projectRef)
+    await this.#assertPresent(entry)
+    const parsed = await this.#parseScript(projectRef)
+    const gateway = await this.#gatewayFor(projectRef)
+
+    // 先把要改的场景在内存里读齐(补站位要按文件归拢,版本戳必须是同一份)。
+    const plan = planStage(parsed)
+    const touched = [...new Set(plan.edits.map((edit) => edit.file))]
+    const contents = new Map<string, string>()
+    for (const file of touched) {
+      const snapshot = await gateway.read(gatewayPathOf(file))
+      if (!snapshot.missing) contents.set(file, snapshot.content)
+    }
+    const ops = await this.#stageOps(projectRef, parsed, contents)
+    for (const [file, text] of contents) {
+      const relative = gatewayPathOf(file)
+      if (ops.some((op) => op.path === relative)) continue
+      const snapshot = await gateway.read(relative)
+      if (!snapshot.missing && snapshot.content !== text) {
+        ops.push({ path: relative, content: text, expectVersion: snapshot.version })
+      }
+    }
+
+    if (ops.length > 0) {
+      // 写批来源与别处同一口径(人的动作 = workbench,agent 的动作 = agent)。
+      await gateway.writeBatch(ops, { origin: actor.via === 'human' ? 'workbench' : 'agent', reason: 'stage' })
+    }
+    const status = await this.stageStatus(projectRef)
+    return {
+      changed: ops.length > 0,
+      files: ops.map((op) => op.path),
+      report: status.report,
+      outOfSync: status.outOfSync,
+      slots: status.slots,
+      definitions: status.definitions,
+    }
+  }
+
   // ─── 逐场剧本生成(T10)──────────────────────────────────────────────
 
   /**
@@ -977,9 +1298,21 @@ export class ProjectService {
     const stamped = stampDialogueIds(input.source, label)
     const composed = composeSceneFile(label, stamped, current.content, nextLabel)
 
-    // 一个写批 = 一个快照。
+    // 舞台层(T39)与这一笔**同一个写批 = 一条快照**:生成一场戏顺手把
+    //   · 图片定义(这一场引用到的槽里,图真在磁盘上的那些)
+    //   · 立绘站位(两个立绘同时在场时不会互相压住)
+    // 补齐。分成两个写批的话,git 历史里"生成这一场"会变成两条看不出关系的提交,
+    // 而中间那一刻项目是**坏的**(立绘会重叠)。
+    // `#stageOps` 会把补好的站位写回 `composed`(extras),所以下面用它落盘。
+    const extras = new Map<string, string>([[canonical, composed]])
+    const merged = await this.#parseWith(projectRef, extras)
+    const stageOps = await this.#stageOps(projectRef, merged, extras)
+
     await gateway.writeBatch(
-      [{ path: gatewayPath, content: composed, expectVersion: current.version }],
+      [
+        { path: gatewayPath, content: extras.get(canonical) ?? composed, expectVersion: current.version },
+        ...stageOps,
+      ],
       { origin: 'agent', reason: 'scene', scene: label },
     )
 
@@ -1086,8 +1419,17 @@ export class ProjectService {
       throw new GalfreeError('invalid-edit', editError instanceof Error ? editError.message : String(editError))
     }
 
+    // 舞台层(T39)与这一笔**同一个写批**:编辑可能加了一个立绘 / 改了引用,
+    // 图片定义与站位要跟着走。分开写的话中间那一刻项目是坏的(立绘重叠),而人只点了一次"存"。
+    const extras = new Map<string, string>([[scene.file, next]])
+    const merged = await this.#parseWith(projectRef, extras)
+    const stageOps = await this.#stageOps(projectRef, merged, extras)
+
     await gateway.writeBatch(
-      [{ path, content: next, expectVersion: current.version }],
+      [
+        { path, content: extras.get(scene.file) ?? next, expectVersion: current.version },
+        ...stageOps,
+      ],
       { origin: 'workbench', reason: 'edit', scene: input.label },
     )
     return this.#sceneEditReport(projectRef, input.label, path)
@@ -2437,13 +2779,21 @@ export class ProjectService {
    *
    * 语音能不能响,要**同时**满足两件事,缺一件都是**静默无声**(引擎不报错):
    *
-   *  1. 项目里得有 `define config.auto_voice = "voice/{id}.ogg"` —— 没有它引擎根本不找;
+   *  1. 项目里得有 `config.auto_voice` —— 没有它引擎根本不找;
    *  2. 剧本里每句对白得带**显式 `id`** —— 不给时 Ren'Py 用的标识符是**内容哈希**
    *     (`renpy/translation/__init__.py:337-357`),`auto_voice` 就会去格式化一个
    *     不存在的文件名(`renpy/common/00voice.rpy:364-372`)。
    *
    * 这两条都是**模板演进的一部分**,而"新建时才写"意味着**老项目永远缺**
    * (同 `build.name` / 界面补丁那两处)。这个入口就是给老项目补课的。
+   *
+   * **第三条(2026-09-30 追加)**:那条配置有**两种形态**。字符串形态
+   * (`"voice/{id}.ogg"`)只能钉**一个**后缀 —— 而不同的 TTS 给不同的容器
+   * (小米 MiMo 只给 wav/mp3/pcm:实测向它要 ogg 会被回 `Unsupported audio format: ogg`;
+   * 本地 IndexTTS 给 ogg)。后缀对不上时**引擎不报错、试玩也照过、就是没声音** ——
+   * 与 9/19 那次"655 个文件一个不差、一句都不响"同一个形状。所以这里多做两件事:
+   * 报告里**读出形态**并数清"引擎够不着的文件有几个";`apply` 时**只在够不着的时候**
+   * 把那一行升级成函数形态(函数按磁盘上真有的后缀找,两种可以混着用)。
    *
    * `apply: false`(缺省)只读:`apply: true` 才写,而且**一个写批 = 一个快照**。
    * 盖章是**幂等**的,且指纹剔掉了 `id` 子句 —— 所以**不会清掉人的审读戳**。
@@ -2456,10 +2806,20 @@ export class ProjectService {
     const gateway = await this.#gatewayFor(projectRef)
     const configPath = 'game/options.rpy'
     const config = await gateway.read(configPath)
-    const autoVoiceLine = AUTO_VOICE_LINE
-    const configPresent = config.missing ? false : config.content.includes('config.auto_voice')
 
     const parsed = await this.#parseScript(projectRef)
+
+    // 那条配置是**哪种形态**、钉死了哪个后缀(`readAutoVoice` 是唯一出处)。
+    const autoVoice = readAutoVoice(config.missing ? '' : config.content)
+    // `game/voice/` 下真有哪些后缀(推导:扫磁盘)—— 字符串形态够不够得着,就看这个。
+    const voiceExtensions = await this.#voiceFileExtensions(join(entry.path, 'game', 'voice'))
+    const unreachableExtensions = autoVoice.form === 'string' && autoVoice.extension !== null
+      ? voiceExtensions.filter((item) => item.extension !== autoVoice.extension)
+      : autoVoice.form === 'string'
+        // 后缀都没读出来(比如写成了 `"voice/{id}"`)⇒ 一个后缀都匹配不上。
+        ? voiceExtensions
+        : []
+    const unreachableCount = unreachableExtensions.reduce((sum, item) => sum + item.count, 0)
 
     const scenes: VoiceWiringScene[] = []
     for (const scene of parsed.scenes) {
@@ -2493,12 +2853,20 @@ export class ProjectService {
         ops.push({ path, content: stamped, expectVersion: current.version })
         changed.push(item.file)
       }
-      if (!configPresent) {
+      // 配置缺席 → 直接写成**函数形态**(新模板那一份);已经是字符串形态、但**够不着磁盘上的文件**
+      // → 把那一行升级成函数形态。两种都是"只在确实需要时动这一行"。
+      if (autoVoice.form === 'absent') {
         const next = config.missing
-          ? `${autoVoiceLine}\n`
-          : `${config.content.replace(/\s*$/, '')}\n\n${autoVoiceLine}\n`
+          ? `${AUTO_VOICE_FUNCTION_RPY}\n`
+          : `${config.content.replace(/\s*$/, '')}\n\n${AUTO_VOICE_FUNCTION_RPY}\n`
         ops.push({ path: configPath, content: next, expectVersion: config.version })
         changed.push(configPath)
+      } else if (unreachableCount > 0) {
+        const upgraded = upgradeAutoVoice(config.content)
+        if (upgraded.upgraded) {
+          ops.push({ path: configPath, content: upgraded.text, expectVersion: config.version })
+          changed.push(configPath)
+        }
       }
       if (ops.length > 0) {
         await gateway.writeBatch(ops, { origin: 'agent', reason: 'edit' })
@@ -2510,11 +2878,62 @@ export class ProjectService {
     }
 
     return {
-      autoVoice: { present: configPresent, file: configPath, line: autoVoiceLine },
+      autoVoice: {
+        present: autoVoice.form !== 'absent',
+        file: configPath,
+        line: autoVoice.line,
+        form: autoVoice.form,
+        extension: autoVoice.extension,
+      },
+      voiceFiles: {
+        count: voiceExtensions.reduce((sum, item) => sum + item.count, 0),
+        extensions: voiceExtensions,
+      },
+      unreachable: {
+        count: unreachableCount,
+        extensions: unreachableExtensions.map((item) => item.extension),
+        hint: unreachableCount === 0
+          ? ''
+          : `磁盘上有 ${unreachableCount} 个语音文件的容器与配置钉死的后缀(.${autoVoice.extension ?? '?'})对不上 —— `
+            + '引擎按扩展名找,**不报错也找不到**。apply 一次会把那一行升级成函数形态(按磁盘上真有的后缀找),'
+            + '不同 TTS 的容器就可以混着用。',
+      },
       scenes,
       changed,
-      needsWiring: !configPresent || scenes.some((scene) => scene.needsStamp),
+      needsWiring: autoVoice.form === 'absent' || unreachableCount > 0 || scenes.some((scene) => scene.needsStamp),
     }
+  }
+
+  /**
+   * `game/voice/` 下**真有哪些后缀、各几个**(推导:扫磁盘,不靠登记)。
+   *
+   * 只数文件名,不读内容:这里回答的是"引擎按后缀找得到几个",不是"这些文件是什么。"
+   * 目录不存在 = 空数组(还没配音的项目就是这么个处境,不该报错)。
+   */
+  async #voiceFileExtensions(voiceDir: string): Promise<Array<{ extension: string; count: number }>> {
+    const counts = new Map<string, number>()
+    const walk = async (dir: string): Promise<void> => {
+      let entries
+      try {
+        entries = await readdir(dir, { withFileTypes: true })
+      } catch {
+        return
+      }
+      for (const item of entries) {
+        if (item.isDirectory()) {
+          await walk(join(dir, item.name))
+          continue
+        }
+        if (!item.isFile() || !isVoiceAudioFile(item.name)) continue
+        const extension = /\.([A-Za-z0-9]+)$/.exec(item.name)?.[1]?.toLowerCase()
+        if (extension === undefined) continue
+        counts.set(extension, (counts.get(extension) ?? 0) + 1)
+      }
+    }
+    await walk(voiceDir)
+    return [...counts.entries()]
+      .map(([extension, count]) => ({ extension, count }))
+      .sort((a, b) => a.extension.localeCompare(b.extension))
   }
 
   /**
@@ -2784,8 +3203,33 @@ export class ProjectService {
     const gateway = await this.#gatewayFor(projectRef)
     const current = await gateway.read(path)
     const replacedFingerprint = current.missing ? undefined : current.version
+
+    /**
+     * **配音的那一刻就把接线修好**(T39 追加)。
+     *
+     * 上游给的是 mp3(小米就是给 mp3),而项目里那条 `config.auto_voice` 还钉着 ogg 时,
+     * **引擎不报错、只是没声音** —— 而人刚刚为这一句付过一次 TTS 的钱。
+     * 所以在这一笔里顺手把那一行升级成函数形态(同一个写批 = 一条快照):
+     * "文件落盘"与"引擎找得到它"是同一件事的两个面,不该分两步让人去记。
+     */
+    const wiringOps: WriteOp[] = []
+    let wiringUpgraded = false
+    if (task.purpose === 'voice' && actual !== null) {
+      const options = await gateway.read('game/options.rpy')
+      if (!options.missing) {
+        const auto = readAutoVoice(options.content)
+        if (auto.form === 'string' && auto.extension !== null && auto.extension !== actual) {
+          const upgraded = upgradeAutoVoice(options.content)
+          if (upgraded.upgraded) {
+            wiringOps.push({ path: 'game/options.rpy', content: upgraded.text, expectVersion: options.version })
+            wiringUpgraded = true
+          }
+        }
+      }
+    }
+
     const result = await gateway.writeBatch(
-      [{ path, content: bytes, expectVersion: current.version }],
+      [{ path, content: bytes, expectVersion: current.version }, ...wiringOps],
       { origin: 'agent', reason: 'queue' },
     )
     const note = mismatch
@@ -2793,7 +3237,9 @@ export class ProjectService {
         + '(Ren\'Py **按扩展名选解码器**,扩展名对不上就是"有文件但没声音")。'
         + `要 .${expected} 得先转格式(本插件不做转码);`
         + (task.purpose === 'voice'
-          ? '而语音还要对上 `config.auto_voice` 的模板后缀,否则引擎根本找不到它。'
+          ? (wiringUpgraded
+              ? '语音还要对上 `config.auto_voice` —— **已经顺手把那一行升级成函数形态**(按磁盘上真有的后缀找),所以这一句引擎找得到。'
+              : '而语音还要对上 `config.auto_voice` 的模板后缀,否则引擎根本找不到它。')
           : '或者把模型目录里声明的输出格式与目标路径写成一致。')
       : actual === null
         ? `上游给的字节**认不出容器格式**(content-type:${contentType ?? '(没给)'})—— 已按目标路径原样落盘;`

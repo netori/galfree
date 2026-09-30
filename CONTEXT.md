@@ -366,3 +366,107 @@
   返回里 `galgame` order 5、**无 `broken`**;同一条路也验了设置面:
   `settings/describe` 里 `galfree` 在列(`autoGenerate=true` / `applies='live'` / 16 个字段齐全),
   `settings/mutate` 写一次再 unset 回来(user 层与 revision 都对)。
+- **T39(2026-09-30)· 舞台层 + 演出字色 + 一键认可 + DSH 0.2.0-rc.2 适配**:
+  - **0.2.0-rc.2 的断点只有一处,而且不是 API**:所有 `@deepseek-ai/*` 接缝的
+    `lib/index.js` 与 `.d.ts` 与 0.1.7-rc.2 **逐字节相同**;真正把插件拦在门外的是
+    `package.json` 里 `dsh-tools: ">=0.1.5-0 <0.2.0-0"` 这个**上界** ——
+    `dsh-app-boot` 会拿运行时版本对每个 `@deepseek-ai/dsh-*` peer 做 `semver.satisfies`
+    (`app-boot/lib/index.js:286-300`),`0.2.0-rc.2 ∉ <0.2.0-0` ⇒ 整行 entry 被 `disabled`,
+    preset 跟着一起死(`agent-preset-registry` 走同一条检查)。`peerDependenciesMeta.optional`
+    **不能豁免**(代码根本不读它)。改成 `<0.3.0-0` 之后组合树里 `galfree` 与 `preset-galgame`
+    都在位(在 scratch profile 上真跑过 `--dump-config` / `--dump-config-schema`)。
+    调研报告在 `.scratch/dsh-0.2.0-rc.2-api-diff.md`。devDependencies 同步钉到 `0.2.0-rc.2`
+    (`package-lock.json` 要重生成:旧锁会把 0.1.7 的树钉住,`npm install` 直接 ERESOLVE)。
+  - **两个用户报的 bug 是同一类**:素材图出了、剧本也引用了,但**中间少一环**。
+    ① 现代 Ren'Py 的 `config.automatic_images` 是 `None`,8.5 的 `images/` 目录扫描只按
+    **文件名字面**注册(`bg-ferry.png` → 名字 `bg-ferry`,`renpy/exports/displayexports.py:67`
+    只按空白切),而素材槽的口径是 `tag + 属性` ⇒ `scene bg ferry` 变灰底占位、
+    `show 角色 表情` 直接抛 `Image '…' does not accept attributes '…'` 把游戏打崩
+    (实测 traceback 在 `迎神/game/scenes/s18_two_outsiders.rpy:27`);
+    ② 剧本里的 `show` 没有位置子句 ⇒ 两个立绘落在**同一个默认位置**(重叠)。
+    **修法是 `stage.ts` 的舞台层**:从 `.rpy` 的 show/scene 引用推槽,只为**磁盘上真有的**图写
+    `image <tag> 属性… = "…"`(还没有的槽不写 —— 那会变成引擎的报错屏),并按"在场人数"
+    机械补 `at` 站位。生成物 `game/zz_galfree_stage.rpy` 可弃可重算,**一个写批 = 一条快照**;
+    `generateScene` / `editScene` 把它并进**同一个写批**(分开写的话 git 历史里"生成这一场"
+    会变成两条看不出关系的提交,而中间那一刻项目是坏的)。
+    **三条实测事实**(别照直觉办):`at a, b` 里 **a 在内层、b 在外层**
+    (`displayexports.py:494` 的 `for i in at_list: img = i(child=img)`),所以"动作 + 站位"
+    要写 `at <动作>, <站位>`;一个 `show` 行的 `at` 从这一行一直管到那个 tag 再次 show —
+    于是**一行只挑一个位**,挑的是"**人最多的那一刻**"(一个人偏左只是不好看,两个人叠在一起是 bug);
+    退场**不回写**先前那一行(实测踩到:回写会让先上场的角色居中,与第二个人的右位撞上)。
+    **加 `at` 不改审读戳**:`sceneTextForFingerprint` 与剔除 id 子句同一态度,把
+    **插件管理的**站位名一起剔掉(人写的 `at left`/`my_transform` 照旧算内容)——
+    在真项目上验过:35 个文件改了、指纹**逐字相同**。
+  - **演出字色**(用户:"要适度,素晴日用得比较好"):**素晴日那条前提没能证实** ——
+    官方商店页能看清文本框的两张截图里是白字 + 深色描边、不同说话人**没有配色差异**,
+    其余说法一条一手来源都找不到(调研在 `.scratch/research-text-color.md`,分级标注了
+    实测/源码/推断/未验证)。所以规则不建立在传闻上,只用能立住的一条机制解释
+    (**单色基线 + 稀有偏离**):四个槽各一个语义(`gf_c_device` 装置金 / `gf_c_warn` 不安红 /
+    `gf_c_cold` 疏离蓝 / `gf_c_accent` 主题青),**只在标了 `# galfree:perf` 的演出场用**,
+    每 20 行对白最多 1 处、每场最多 2 色、整行着色每场最多 1 行且只准装置色 ——
+    **全部是 warning**(分寸建议,不拦发布)。硬度落在能机械判的那几条:调色板外的颜色、
+    未知文本标签(引擎运行时抛)、与描边色对比度 < 4.5:1(WCAG SC 1.4.3 Note 5:描边可计入)。
+    **描边是彩色字的安全网**:官方文档写明 outlines 只对**整个** Text displayable 生效、
+    对 text tag 无效 ⇒ 只能整行统一,于是对比度判定**与背景无关**。顺带补上
+    `gui.history_allow_tags` 里的 `color`(默认界面会在历史记录里把颜色过滤掉)。
+  - **「全部认可」**:`stampPending` 一次算清"还有谁在等人",**一个写批**盖完
+    (循环调 N 次 = N 条快照;51 场戏就是 51 条 git 提交,而人只做了一个决定)。
+    守卫一处不放松:路由写死 `via:'human'`、接缝里还有 `#requireHuman`;
+    盖不了的(只读降级 / 槽没填)**逐条列进 `skipped`** —— "一键全部"最坏的样子是
+    "它悄悄漏了三个,而你以为盖满了"。快照原因写作 `stamp-batch`(与"刚读完这一场"分得出来)。
+  - **入口**:面板「整备舞台」/「全部认可」、路由 `POST /stage/sync`、`GET /stage`、
+    `POST /stamps/pending`、agent 工具 `galfree_stage`(第 25 个)。流程指引多了一环
+    "舞台"(板上的 `stage.outOfSync`)与一段演出写法(站位 / 入场 / 动作 / 字色分寸)。
+  - **真机证据**:钉版 SDK 的 `lint` 在真项目副本上从 ~40 条 `'…' is not an image`
+    降到 **2 条**(剩下的那个 `ke` 角色**根本没有图** —— 板上的 `missing-slots` 正指着它);
+    生成物本身零 lint 问题。真项目「迎神」已整备:22 条图片定义 + 35 个剧本文件补站位、
+    0 处重叠、一条快照 `stage:stage batch#1`、审读戳一个没动。
+- **T39b(2026-09-30,当天追加)· `config.auto_voice` 改成函数形态 + 本地安装进 desktop profile**:
+  - **起因是一次真机复验**:小米 MiMo TTS 通了(预置音色与 voicedesign 两条都 200、
+    ffprobe 认成 24kHz 单声道 mp3),但顺手试出**它不给 ogg** —— 上游原话
+    `Unsupported audio format: ogg. Supported formats: wav, mp3, pcm, pcm16`。
+    而 ADR-0013 当年把接线口径钉成**字符串** `define config.auto_voice = "voice/{id}.ogg"`,
+    **只能认一个后缀** ⇒ 用小米配音时文件会落成 `.mp3` 而引擎去找 `.ogg`:
+    **不报错、试玩也照过、就是没声音**(与 2026-09-19 那次"655 个文件一个不差、一句都不响"同形)。
+  - **改成函数形态**(ADR-0013 已批准修订):模板写
+    `init python: def _galfree_voice(voice_id):` 按磁盘上真有的后缀依次探
+    (ogg→oga→opus→mp3→wav→m4a→flac),都没有退回 `.ogg`。整段文本的唯一出处是
+    `voice-batch.ts` 的 `AUTO_VOICE_FUNCTION_RPY`(模板与升级共用一份)。
+    **引擎认这一条**:`renpy/common/00voice.rpy:364-367` —— 字符串就 `format(id=tlid)`,
+    **否则当可调用对象调**(所以函数返回的仍是相对 `game/` 的路径)。
+    真机证据:把升级函数用在「迎神」副本上,钉版 SDK 的 `lint` **零条**相关报错(init 块真被执行过)。
+  - **三处入口,都只在需要时动**:
+    ① `galfree_voice_wiring` 的 read **读出形态**、数清"引擎够不着的文件有几个"
+    (`unreachable.count`,字符串形态下后缀对不上的那些);`apply` 则**只在真够不着时**
+    把那一行升级(后缀对得上 = **一个字都不动**,`options.rpy` 是人的文件);
+    ② **配音那一刻就修好**:`#landAudioBytes` 发现上游容器与配置钉的后缀对不上时,
+    把 `options.rpy` 的升级并进**同一个写批**(一条快照)—— "文件落盘"与"引擎找得到它"
+    是同一件事的两个面,不该分两步让人去记;
+    ③ 任务上的 `degradation.notes` 照旧写清"产物落在哪、原目标写的是什么"。
+    新模板直接就是函数形态,所以**新项目天生免疫**。
+  - **守卫**:`voice-batch.test.ts`(形态识别 / 后缀提取 / 升级是纯函数)、
+    `voice-wiring.test.ts`(读得出形态 / 够不着几个 / apply 只在该升级时升级 / 幂等)、
+    新增 `voice-auto-upgrade.test.ts`(**端到端**:真适配器 + 假上游 → 字节按魔数落成 `.mp3`
+    → 接线在同一写批里升级 → 板上 `unreachable.count` 归零)。快带 59 文件 / 639 测试全绿。
+  - **本地安装**:用户此前一直"没装插件"——查清是**桌面 App 用的是 `desktop` profile,
+    而插件只装在 `web` profile** 里;desktop 那边甚至**留着 GALFree 的配置行**(三个渠道都配了)
+    却**没有包**,所以从来没加载过。已按 `.scratch/install-to-desktop.mjs` 的三步装回去
+    (`dependencies` link + `bundles` + `node_modules` junction),并用 App 自带 pnpm
+    `install --offline` 收敛(锁文件过供应链策略检查)。
+    **顺手修了那个脚本的两个坑**:①往 `pnpm-lock.yaml` 插条目时没跳过"名字行下面的 8 空格子行",
+    插到了 `dsh-bash-native:` 与它自己的 `specifier:` 中间、把 YAML 弄成半截(第一次跑就中招,
+    从备份还原后改成"整块跳过 + 写完用 YAML 解析自证");②`rmSync(recursive)` 删旧链接时
+    **会跟着 junction 进仓库** —— 改成"是链接就只摘、不是才递归删"。
+    真机验证:把 desktop profile 克隆到 scratch DSH_HOME,dump 出来 `- id: galfree` **只有一条**、
+    渠道配置**逐字还在**、`preset-galgame` 与 `galfree-guard` 在位、无 `skipping`。
+  - **渠道模板收敛到三条**(2026-09-30,发起人定的):语音那一段**只留小米 MiMo**,
+    被删的是 seedance.nz 的 `doubao-seed-audio-1.0`(「Seed Audio(豆包语音)」)——
+    它的 `basis` 当年就写着"⚠️ 这条语音我们没真跑过",**一个没人验过的起点比没有起点更坏**。
+    面板每组渲染一行按钮、**第一条即该组的默认起点**,所以"默认 MiMo"就是"语音那组只剩它"。
+    守卫钉死了这件事(`channel-templates.test.ts`:语音组的站点列表恰好是 `['xiaomimimo.com']`,
+    且它的 basis 必须落在"真机/实测"那一档)—— 哪天有人顺手加一条或调顺序,它会红。
+    想再用 Seed Audio:`adapter: 'async-task-rest'` + `/v1/audio/generations`(终态 `SUCCESS` + `data.result_url`),
+    手工填进语音那一段即可(注释里留了这一行,免得以后没人知道它当年是什么形状)。
+
+
+

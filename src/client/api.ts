@@ -6,6 +6,10 @@
 // 构建时被擦掉,产物里不会多出服务端代码。
 import type { AudioPurpose } from '../service/audio-generation.ts'
 import type { NextActionCode, NextActionTarget } from '../service/progress.ts'
+// 「全部认可」与「整备舞台」的回执直接引用接缝那一份(同上面两个联合的理由:手抄一份的代价
+// 是接缝改了这里不报错,面板只会静默少显示几个字段)。
+import type { StageSyncReport, StampBatchReport } from '../service/project-service.ts'
+export type { StageSyncReport, StampBatchReport }
 
 export interface ProjectView {
   id: string
@@ -530,6 +534,36 @@ export interface NextActionView {
   target?: NextActionTarget
 }
 
+/**
+ * 舞台层处境(T39):站位报告 + 生成物新不新(与接缝的 `StageProgress` 同形)。
+ *
+ * 它回答"**画面对不对**"—— 与"剧本对不对"是两件事:背景是灰底占位(图片名没被定义)、
+ * 两个立绘叠在同一处,都属于前者,而板上其余每一格可能全绿。所以舞台板把它单独摆一格,
+ * 并挂在那颗「整备舞台」上。
+ */
+export interface StageView {
+  report: {
+    /** 立绘 `show` 里还没有站位子句的行数。 */
+    unplaced: number
+    /** 同一时刻落在同一个站位上的立绘 —— 那就是"会真的叠在一起"。 */
+    overlaps: Array<{ scene: string; file: string; line: number; names: string[] }>
+    /** 台上超过 5 个立绘的场景(站位表排不下)。 */
+    crowded: string[]
+  }
+  /** 生成物 `game/zz_galfree_stage.rpy` 还是不是最新的(与推算出来的全文逐字比)。 */
+  outOfSync: boolean
+  /** 剧本引用到的素材槽数。 */
+  slots: number
+  /** 其中**文件真在磁盘上**、因而写进了图片定义的张数。 */
+  definitions: number
+}
+
+/**
+ * 「全部认可」的范围(与 `/stamps/pending` 路由接受的 `kind` 同义)。
+ * `all` = 场景 + 素材槽 + 设定集;另外三个是分组。
+ */
+export type StampPendingKind = 'all' | 'scene' | 'slot' | 'bible'
+
 export interface ProgressView {
   scenes: SceneProgressView[]
   /** 素材板:`.rpy` 派生的槽清单(挂账本 + 推导状态)。 */
@@ -542,6 +576,8 @@ export interface ProgressView {
   completeness: CompletenessView
   /** 音频文件池与引用处境(T17)。 */
   audio: AudioPoolView
+  /** 舞台层处境(T39):立绘站位 + 生成物新不新。 */
+  stage: StageView
   problems: DialectProblemView[]
   lint: { ok: boolean; errors: number; warnings: number }
   playtest: { at: string; state: 'pass' | 'fail' | 'stale'; exitCode: number; technicalPass: boolean; traceback: string | null; from: string | null; timedOut: boolean; elapsedMs: number; killed: boolean } | null
@@ -1188,6 +1224,42 @@ export class GalfreeApi {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ slot }),
+    }))
+  }
+
+  /**
+   * **一键认可全部还在等人的**(T39;面板上的「全部认可」)。
+   *
+   * 与 `stampScene` / `stampSlot` 是**同一条守卫路**(路由写死 `via: 'human'`,接缝里还有
+   * 一道 `#requireHuman`)—— 它省掉的是"盖 51 场戏 = 51 条快照",不是"人得先看一眼":
+   * 这是人的**一次性**认可,所以调用方必须先把"将盖哪些、多少个"摆出来(面板上的确认行)。
+   *
+   * `skipped` 是回执里最要紧的一栏:盖不上的(只读降级 / 槽还没图)带稳定码与人话原因列在这里,
+   * **不许默默丢掉** —— "一键盖满"最坏的样子就是悄悄漏掉几个,而你以为盖满了。
+   */
+  async stampPending(kind: StampPendingKind = 'all'): Promise<StampBatchReport> {
+    return readJson<StampBatchReport>(await fetch('/api/galfree/stamps/pending', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind }),
+    }))
+  }
+
+  // ─── 舞台层(T39):生成物 `game/zz_galfree_stage.rpy` ────────────────
+  //
+  // 只加动作面这一条:处境(站位报告 / 生成物新不新)已经随 `/progress` 的 `stage` 字段
+  // 一起到了面板上,再挂一个 `stage()` 就是同一份事实的第二条读法(死代码)。
+
+  /**
+   * **整备舞台**:重算 `game/zz_galfree_stage.rpy` —— 磁盘上真有的素材写图片定义、
+   * 立绘按此刻台上人数补 `at` 站位,**一个写批 = 一条快照**。
+   * **没东西要改就不写**(`changed: false`,不产生空快照)。
+   */
+  async stageSync(): Promise<StageSyncReport> {
+    return readJson<StageSyncReport>(await fetch('/api/galfree/stage/sync', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
     }))
   }
 

@@ -15,6 +15,27 @@ import type { DerivedSlot, SlotOrigin } from './slots.ts'
 import type { AudioPoolView } from './audio.ts'
 import type { PublishView } from './publish.ts'
 import type { ThemeView } from './theme.ts'
+import type { StageReport } from './stage.ts'
+
+/**
+ * 舞台层处境(T39)—— 板上的"画面对不对"那一格。
+ *
+ * 三项都是推导:站位报告与"生成物新不新"来自 `stage.ts` 的纯函数,
+ * `unplaced` 是 `report.unplaced` 的别名(单独留一份是因为面板/工具读它的地方更多)。
+ */
+export interface StageProgress {
+  report: StageReport
+  /** 生成物 `game/zz_galfree_stage.rpy` 还是不是最新的(与推算出来的全文逐字比)。 */
+  outOfSync: boolean
+  /** 剧本引用到的素材槽数 / 其中**文件真在磁盘上**、因而写进了图片定义的张数。 */
+  slots: number
+  definitions: number
+}
+
+/** 还没有项目/还没算过时的舞台处境(空报告 + 不标过期:没东西可说)。 */
+export function emptyStageProgress(): StageProgress {
+  return { report: { unplaced: 0, overlaps: [], crowded: [] }, outOfSync: false, slots: 0, definitions: 0 }
+}
 
 export type StampState = 'none' | 'pending' | 'approved' | 'stale' | 'missing'
 
@@ -145,6 +166,9 @@ export type NextActionCode =
   | 'playtest-stale'
   | 'scenes-awaiting-review'
   | 'art-awaiting-review'
+  /** 舞台层过期 / 立绘站位还没排(T39):不修的话背景是灰底、两个立绘会叠在一起。 */
+  | 'stage-needs-sync'
+  | 'sprite-overlap'
   | 'publish-ready'
   | 'publish-stale'
   | 'publish-failed'
@@ -157,6 +181,8 @@ export type NextActionTarget =
   | { kind: 'audio'; scene: string; line: number }
   | { kind: 'playtest' }
   | { kind: 'publish' }
+  /** 舞台层(生成物)—— 面板滚到舞台板那颗「整备舞台」。 */
+  | { kind: 'stage' }
 
 /**
  * 板上的一条「下一步」。
@@ -207,6 +233,8 @@ export function deriveNextActions(input: {
   lint: { ok: boolean; errors: number }
   playtest: PlaytestView | null
   publish: PublishView | null
+  /** 舞台层处境(T39):站位报告 + 生成物新不新(缺省 = 没有舞台层,不产生动作)。 */
+  stage: StageProgress
 }): NextAction[] {
   const actions: NextAction[] = []
   const errors = input.problems.filter((problem) => problem.severity === 'error')
@@ -290,6 +318,30 @@ export function deriveNextActions(input: {
       label: `让音频引用落地(${input.audio.missing.length} 处悬空)`,
       detail: `${listOf(input.audio.missing.map((reference) => `${reference.ref}(${reference.scene}:${reference.line})`))} —— 改成池里已有的路径,或请人把文件放进 game/`,
       target: { kind: 'audio', scene: first.scene, line: first.line },
+    })
+  }
+
+  // ── 舞台层(T39):"剧本对了"不等于"画面对了" ────────────────────────
+  // 这一条排在这里的理由与缺素材同一级:不整备的话,游戏**看得出来是坏的** ——
+  // 背景是灰底占位(图片名没被定义),两个立绘会叠在同一处。它不难,但没人做就一直在。
+  if (input.stage.report.overlaps.length > 0) {
+    const first = input.stage.report.overlaps[0]!
+    actions.push({
+      code: 'sprite-overlap',
+      actor: 'agent',
+      label: `立绘站位重了(${input.stage.report.overlaps.length} 处会叠在一起)`,
+      detail: `${listOf(input.stage.report.overlaps.map((entry) => `${entry.scene}:${entry.names.join('+')}`))} —— 点「整备舞台」按在场人数机械重排,或自己在剧本里写 \`at\` 子句`,
+      target: { kind: 'stage' },
+    })
+  } else if (input.stage.outOfSync) {
+    actions.push({
+      code: 'stage-needs-sync',
+      actor: 'agent',
+      label: '整备舞台(图片定义 + 立绘站位是生成物,还没跟上)',
+      detail: input.stage.report.unplaced > 0
+        ? `还有 ${input.stage.report.unplaced} 行立绘没有站位子句 —— 不整备的话它们会落在同一个默认位置(重叠)`
+        : '剧本引用到的素材图变了,或这是第一次整备 —— 整备一次就会写出 game/zz_galfree_stage.rpy',
+      target: { kind: 'stage' },
     })
   }
 
@@ -457,6 +509,11 @@ export interface ProgressSnapshot {
   /** 音频文件池与引用处境(T17):池是派生的,悬空引用已经并进 problems。 */
   audio: AudioPoolView
   /**
+   * 舞台层处境(T39):立绘站位 + 生成物新不新。
+   * 它回答的是"**画面对不对**"—— 与"剧本对不对"是两件事(背景灰底、立绘重叠都属于前者)。
+   */
+  stage: StageProgress
+  /**
    * 发布处境(T18):上次发布的产物与新鲜度(没发布过 = null)。
    * 与试玩同一套:事实记在 `.studio/`,推导只回答"还代表当前这一版吗"。
    */
@@ -618,6 +675,13 @@ export interface ProgressInputs {
   }
   /** 音频文件池与引用处境(T17;池是派生的,悬空引用已经并进 problems)。 */
   audio: AudioPoolView
+  /**
+   * 舞台层处境(T39):立绘站位报告 + 生成物新不新。缺省 = 还没算过(当成"没有舞台层")。
+   *
+   * 少了它会怎样:"剧本对了但游戏看得出来是坏的"这件事**没有位置可说** ——
+   * 背景是灰底占位(图片定义缺)、两个立绘叠在一起(没有站位),而板上一切绿灯。
+   */
+  stage?: StageProgress
   /** 发布处境(T18;没发布过 = null)。 */
   publish?: PublishView | null
   /** 试玩事实(账本 last + 当前内容指纹);缺省视为未跑过。 */
@@ -810,6 +874,9 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
     endingReachable: inputs.completeness?.endingReachable ?? true,
   }
 
+  // 舞台层处境(T39):调用方没给就当成"没有舞台层"(不产生动作,也不谎报有站位问题)。
+  const stageProgress: StageProgress = inputs.stage ?? emptyStageProgress()
+
   // 「下一步」(T21):与上面同一份推导结果算出来的行动清单 —— 纯函数、无写、顺序固定。
   const nextActions = deriveNextActions({
     bible,
@@ -820,6 +887,7 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
     lint: { ok: lintErrors === 0, errors: lintErrors },
     playtest,
     publish: inputs.publish ?? null,
+    stage: stageProgress,
   })
 
   const summary: ProgressSummary = {
@@ -842,6 +910,7 @@ export async function computeProgress(root: string, inputs: ProgressInputs): Pro
     // 池与引用处境原样带出去(它是推导输入,不是这里算的):板上与面板读同一份。
     // **不给"缺省空池"**:空池 ≠ 没音频,静默绿灯比报错坏(缺省由调用方显式给)。
     audio: inputs.audio,
+    stage: stageProgress,
     // 发布处境同理:没发布过就是 null(如实),不是"发过了但是空的"。
     publish: inputs.publish ?? null,
     problems,

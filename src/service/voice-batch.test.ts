@@ -19,7 +19,7 @@ import { join } from 'node:path'
 import { createProjectService, type ProjectService } from './project-service.ts'
 import { cleanupTempDirs, makeTempDir } from '../testing/tmp.ts'
 import { fakeUiTemplate, makeFakeSdk } from '../testing/sdk-fixture.ts'
-import { renderVoiceBatchCsv, renderVoiceBatchJson, matchVoiceFiles, VOICE_BATCH_HEADER } from './voice-batch.ts'
+import { AUTO_VOICE_FUNCTION_RPY, AUTO_VOICE_LINE, readAutoVoice, upgradeAutoVoice, renderVoiceBatchCsv, renderVoiceBatchJson, matchVoiceFiles, VOICE_BATCH_HEADER } from './voice-batch.ts'
 
 const SCRIPT = [
   'define e = Character("小棠")',
@@ -167,5 +167,38 @@ describe('本地 TTS 批量清单(T29)', () => {
       expect(matched.duplicates.map((entry) => entry.name)).toEqual(['a_0001.mp3'])
       expect(matched.unknown).toEqual([])
     })
+  })
+})
+
+/**
+ * T39 追加:`config.auto_voice` 的**两种形态**。
+ *
+ * 起因是实测:小米 MiMo 只给 wav/mp3/pcm(向它要 ogg 会被回 `Unsupported audio format: ogg`),
+ * 而字符串形态只能钉一个后缀 —— 后缀对不上的表现是**引擎不报错、试玩也照过、就是没声音**。
+ * 所以"读出形态"这件事本身要有守卫:报告一旦分不清形态,那条静默无声就没人说得出来。
+ */
+describe('auto_voice 的形态(字符串 / 函数)', () => {
+  it('读得出三种处境,并把字符串钉死的后缀取出来', () => {
+    expect(readAutoVoice('define config.has_music = True\n')).toEqual({ form: 'absent', extension: null, line: '' })
+    expect(readAutoVoice('define config.auto_voice = "voice/{id}.ogg"')).toMatchObject({ form: 'string', extension: 'ogg' })
+    // 后缀换一个也读得出来(mp3 那条正是小米给的东西)
+    expect(readAutoVoice('define config.auto_voice = "voice/{id}.mp3"')).toMatchObject({ form: 'string', extension: 'mp3' })
+    // 写死了路径、没有 {id} —— 后缀照读,但调用方要知道它钉的是谁
+    expect(readAutoVoice('define config.auto_voice = "voice/line.ogg"')).toMatchObject({ form: 'string', extension: 'ogg' })
+    // 后缀都读不出来 ⇒ 如实给 null(不猜一个)
+    expect(readAutoVoice('define config.auto_voice = "voice/{id}"')).toMatchObject({ form: 'string', extension: null })
+  })
+
+  it('函数形态认得出来(而且不会把它误判成字符串)', () => {
+    expect(readAutoVoice(AUTO_VOICE_FUNCTION_RPY)).toMatchObject({ form: 'function', extension: null })
+    expect(readAutoVoice('init python:\n    config.auto_voice = my_voice\n')).toMatchObject({ form: 'function' })
+  })
+
+  it('模板那一份与升级那一份是**同一段文本**(两处各写一遍必然分叉)', () => {
+    expect(AUTO_VOICE_FUNCTION_RPY).toContain('config.auto_voice = _galfree_voice')
+    // 老那一行必须能被升级函数认出来(否则老项目永远升不了)
+    const upgraded = upgradeAutoVoice(`${AUTO_VOICE_LINE}\n`)
+    expect(upgraded.upgraded).toBe(true)
+    expect(upgraded.text).toContain('config.auto_voice = _galfree_voice')
   })
 })

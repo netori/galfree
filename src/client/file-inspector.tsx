@@ -6,17 +6,23 @@
  *
  * 回滚是**写**:它经接缝的 snapshotRollback 走网关落盘,并自动产生一条回滚快照
  * (ADR-0004/0011)。界面上必须说清这一点,并且要人确认 —— 它会覆盖磁盘上的当前内容。
+ *
+ * 外部也能要求"给我打开这份文件"(`focusPath`):点舞台板上某条结构问题(它归不到
+ * 某一场景)就走到这里 —— 与场景编辑器的 `focus` / `onFocusHandled` 是同一套约定。
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { GalfreeApi, SnapshotEntry, TreeNode } from './api.ts'
 import { Chip, DiffView, Spinner, relativeTime } from './ui.tsx'
 import s from './panel.module.css'
 
-export function FileInspector({ tree, api, hasProject, onNotice }: {
+export function FileInspector({ tree, api, hasProject, onNotice, focusPath, onFocusHandled }: {
   tree: TreeNode[]
   api: GalfreeApi
   hasProject: boolean
   onNotice: (tone: 'bad' | 'warn', text: string) => void
+  /** 外部要求打开的文件(项目根相对路径);null / 缺省 = 没有要求。 */
+  focusPath?: string | null
+  onFocusHandled?: () => void
 }) {
   const [filter, setFilter] = useState('')
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
@@ -65,6 +71,23 @@ export function FileInspector({ tree, api, hasProject, onNotice }: {
     }
   }
 
+  /**
+   * 外部要求打开一份文件(点结构问题里那条归不到某一场的)。
+   *
+   * 顺手把它的父目录展开:不然选中的那一行藏在折叠的目录里,人看到的就是"点了没反应"。
+   * `focusPath` 只在**换了一份文件**时变,处理完立刻由 `onFocusHandled` 清掉。
+   */
+  useEffect(() => {
+    if (focusPath === null || focusPath === undefined || focusPath === '') return
+    setExpanded((current) => {
+      const next = new Set(current)
+      for (const dir of ancestorDirs(focusPath)) next.add(dir)
+      return next
+    })
+    void select(focusPath)
+    onFocusHandled?.()
+  }, [focusPath, onFocusHandled])
+
   const showDiff = async (entry: SnapshotEntry, previous: SnapshotEntry): Promise<void> => {
     if (selected === null) return
     setDiffLabel(`${previous.commit.slice(0, 8)} → ${entry.commit.slice(0, 8)}`)
@@ -91,7 +114,7 @@ export function FileInspector({ tree, api, hasProject, onNotice }: {
   }
 
   return (
-    <section className={s.card} aria-label="文件">
+    <section className={s.card} id="gf-file-inspector" tabIndex={-1} aria-label="文件">
       <div className={s.cardHead}>
         <span className={s.cardTitle}>文件</span>
         <span className={s.cardCount}>点文件名看内容与快照;点目录展开</span>
@@ -244,6 +267,17 @@ export function FileInspector({ tree, api, hasProject, onNotice }: {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * 一个项目根相对路径的祖先目录(`game/scenes/a.rpy` → `game`、`game/scenes`)。
+ * 只看路径本身、不去树里找:树里没有这个目录时,多展开一个不存在的 key 也无害。
+ */
+function ancestorDirs(path: string): string[] {
+  const parts = path.split('/')
+  const dirs: string[] = []
+  for (let i = 1; i < parts.length; i += 1) dirs.push(parts.slice(0, i).join('/'))
+  return dirs
 }
 
 function filterTree(nodes: TreeNode[], query: string): TreeNode[] {

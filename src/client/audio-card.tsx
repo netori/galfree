@@ -408,7 +408,7 @@ export function AudioCard({ purpose, api, hasProject, onNotice, onChanged }: {
                     待生成
                   </Chip>
                   <span className={s.emptyHint} style={{ flex: 1 }}>
-                    清单 {voice.rows} 行 · id **就是文件名**(`game/voice/&lt;id&gt;.ogg`,与 `config.auto_voice` 同口径)
+                    清单 {voice.rows} 行 · id **就是文件名**(`game/voice/&lt;id&gt;.&lt;后缀&gt;`,与 `config.auto_voice` 同口径 —— 后缀看 TTS 给什么:小米给 mp3、IndexTTS 给 ogg)
                   </span>
                   <button type="button" className={s.button} disabled={busy} onClick={() => void exportVoice()}>
                     导出清单(CSV)

@@ -6,17 +6,17 @@
  * 没有第二处真相。
  */
 import type {
-  BibleChapterView, BibleProgressView, BibleView, BranchGraphView, CharacterBoardEntryView, GenerationAttemptView, GenerationTaskView,
+  BibleChapterView, BibleProgressView, BibleView, BranchGraphView, CharacterBoardEntryView, DialectProblemView, GenerationAttemptView, GenerationTaskView,
   ImageChannelView, NextActionView, ProgressView,
   SceneFormView, SceneProgressView, SceneRowView, SdkView, SlotBoardEntryView, SlotLedgerView,
-  SlotProgressView, SnapshotEntry, StateView, TreeNode,
+  SlotProgressView, SnapshotEntry, StageSyncReport, StageView, StampBatchReport, StampPendingKind, StateView, TreeNode,
 } from './api.ts'
 
 export type {
-  BibleChapterView, BibleProgressView, BibleView, BranchGraphView, CharacterBoardEntryView as CharacterBoardEntry,
+  BibleChapterView, BibleProgressView, BibleView, BranchGraphView, CharacterBoardEntryView as CharacterBoardEntry, DialectProblemView,
   GenerationAttemptView, GenerationTaskView, ImageChannelView, NextActionView,
   ProgressView, SceneFormView, SceneProgressView, SceneRowView, SdkView, SlotBoardEntryView as SlotBoardEntry,
-  SlotLedgerView, SlotProgressView, SnapshotEntry, StateView, TreeNode,
+  SlotLedgerView, SlotProgressView, SnapshotEntry, StageSyncReport, StageView, StampBatchReport, StampPendingKind, StateView, TreeNode,
 }
 
 /** 盖戳目标:场景与素材槽共用一个判别联合,替代散落的 `scene:${x}` 魔法串。 */
@@ -27,6 +27,16 @@ export type StampTarget =
 export function stampKey(target: StampTarget): string {
   return target.kind === 'scene' ? `scene:${target.label}` : `slot:${target.slot}`
 }
+
+/**
+ * 两个批量动作在 `busyKey` 里的 key —— 主面板设置、舞台板读它显示"忙在哪一件事上"。
+ * 常量只有这一处:两处各写一遍字面量,迟早一处改了名,另一处的 spinner 就不转了。
+ *
+ *  · `STAMP_PENDING_KEY`:完整 key = `stamp-pending:<kind>`(kind = all / scene / slot / bible)。
+ *  · `STAGE_SYNC_KEY`:整备舞台同时只可能有一个在跑。
+ */
+export const STAMP_PENDING_KEY = 'stamp-pending'
+export const STAGE_SYNC_KEY = 'stage-sync'
 
 export interface NoticeItem {
   id: number

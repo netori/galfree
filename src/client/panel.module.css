@@ -212,24 +212,88 @@
 .slotChip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 2px;
   font-family: var(--gf-mono);
   font-size: 11px;
-  padding: 2px 8px;
+  padding: 1px 4px 1px 8px;
   border-radius: 6px;
   background: var(--gf-hover);
   color: var(--gf-text-2);
   border: 0;
   max-width: 100%;
 }
-button.slotChip { cursor: pointer; }
-button.slotChip:hover { background: var(--gf-active); color: var(--gf-text); }
-button.slotChip:focus-visible { outline: 2px solid var(--gf-accent); outline-offset: 1px; }
-button.slotChip:disabled { opacity: 0.5; cursor: default; }
 .slotMissing { color: var(--gf-warn); background: rgba(210, 153, 34, 0.1); }
 .slotFilled { color: var(--gf-success); background: rgba(63, 185, 80, 0.09); }
-.slotText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 槽名 = **看**这张图(与右边那颗「印」是两个动作:想看一眼不该顺手把戳盖上)。 */
+.slotName {
+  background: none;
+  border: 0;
+  padding: 2px 2px;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slotName:hover { text-decoration: underline; }
+.slotName:focus-visible { outline: 2px solid var(--gf-accent); outline-offset: 0; border-radius: 4px; }
+
+/* 盖戳 = 那颗印。disabled 完全照接缝给的 `approvable`(不可盖时它就是灰的)。 */
+.slotStamp {
+  background: none;
+  border: 0;
+  padding: 1px 5px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--gf-text-4);
+  cursor: pointer;
+  border-radius: 4px;
+}
+.slotStamp:hover:not(:disabled) { background: var(--gf-active); color: var(--gf-seal); }
+.slotStamp:focus-visible { outline: 2px solid var(--gf-accent); outline-offset: 0; }
+.slotStamp:disabled { opacity: 0.45; cursor: default; }
+.slotStampOn { color: var(--gf-seal); }
+
+/* 分支图节点上的"已定稿"小印(场景工作台用);素材槽那颗印是 `.slotStamp`。 */
 .slotSealGlyph { color: var(--gf-seal); font-size: 12px; line-height: 1; margin-left: 1px; }
+
+/* 点槽名展开的那一张图(一次一张;文件不在就如实说"还没出图",不塞一张裂图)。 */
+.slotPreview {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 0.5px solid var(--gf-border-2);
+  border-radius: 10px;
+  background: var(--gf-surface);
+}
+.slotPreviewImg {
+  display: block;
+  flex: none;
+  width: 180px;
+  max-height: 240px;
+  object-fit: contain;
+  border-radius: 6px;
+  background: var(--gf-hover);
+}
+.slotPreviewEmpty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 180px;
+  height: 120px;
+  color: var(--gf-text-4);
+  font-size: 12px;
+  border: 0.5px dashed var(--gf-border-2);
+  border-radius: 6px;
+}
+.slotPreviewMeta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 
 /* ─── 文件树 ───────────────────────────────────────────────────────── */
 
@@ -420,6 +484,42 @@ button.slotChip:disabled { opacity: 0.5; cursor: default; }
   background: rgba(209, 36, 47, 0.07);
   color: var(--gf-danger);
   margin-top: 6px;
+}
+
+/* 「全部认可」的确认行(T39):与回滚确认**同一个形态**,但语气是**印章**而不是危险 ——
+   它要提醒的是"这一下会盖掉很多",不是"你要删东西"。数字用朱砂色挑出来。 */
+.confirmSeal {
+  background: rgba(179, 53, 43, 0.07);
+  color: var(--gf-text-2);
+  margin: 0 0 12px;
+  line-height: 1.6;
+}
+.confirmSeal b { color: var(--gf-seal); font-weight: 600; }
+
+/* 结构问题的每一行都**点得动**(跳到"要改的那份文件")。它是按钮,但外观上仍然是一行字,
+   不长成卡片;右边给一个 `→ 目标`,让人点之前就知道会去哪。 */
+.problemRow {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 3px 6px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.problemRow:hover { background: var(--gf-hover); }
+.problemRow:focus-visible { outline: 2px solid var(--gf-accent); outline-offset: -1px; }
+.problemJump {
+  margin-left: 6px;
+  font-family: var(--gf-mono);
+  font-size: 11px;
+  color: var(--gf-text-4);
+  white-space: nowrap;
 }
 
 /* ─── 目录选择抽屉 ─────────────────────────────────────────────────── */

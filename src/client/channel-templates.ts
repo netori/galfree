@@ -89,17 +89,6 @@ const SEEDANCE_MUSIC_MODELS = JSON.stringify([
   },
 ], null, 2)
 
-/** 语音:同一家网关的异步音频任务(`/v1/audio/generations`),终态 `SUCCESS` + `data.result_url`。 */
-const SEEDANCE_VOICE_MODELS = JSON.stringify([
-  {
-    id: 'doubao-seed-audio-1.0',
-    purpose: 'voice',
-    adapter: 'async-task-rest',
-    label: 'seedance.nz · Seed Audio(豆包语音)',
-    capabilities: { textToSpeech: true, voiceId: true },
-  },
-], null, 2)
-
 /**
  * 小米 MiMo TTS 的模型目录。两条模型走**同一个端点**(`/v1/chat/completions`),
  * 只差 `model` 的值 —— 所以一个适配器写一次,两条都通。
@@ -127,16 +116,17 @@ const MIMO_VOICE_MODELS = JSON.stringify([
 ], null, 2)
 
 /**
- * 四条模板。**顺序即面板上的顺序**(按渠道分组,同渠道内按常用度)。
+ * **三条模板**。**顺序即面板上的顺序**(按渠道分组,同渠道内按常用度)——
+ * 而且每一组**第一条就是那一组的默认起点**(面板每组渲染一行按钮,第一条在最左)。
  *
  * `basis` 一栏是**实测口径**,逐条如实:
- *  · seedance.nz 三条:端点在**发起人的生产配置里跑通过**(不是我们验证的),形状来自该站官方文档;
+ *  · seedance.nz 两条(图像/音乐):端点在**发起人的生产配置里跑通过**(不是我们验证的),形状来自该站官方文档;
  *    音乐那条另有仓库里 2026-09-13 的真机验收记录(真发一次上游 + 只读轮询一次)。
- *  · 小米那条:协议由 2026-09-26 真机探针实测(音频在 `choices[0].message.audio.data` 的 base64;
+ *  · 小米那条(语音):协议由 2026-09-26 真机探针实测(音频在 `choices[0].message.audio.data` 的 base64;
  *    `format` 请求 mp3 回 MP3、请求 wav 回 WAV —— 两个 magic 字节都验过);
- *    适配器本身另走过一次**闭环验证**(调真适配器 → 真出网 → 落盘 → ffprobe 认成 24kHz 单声道 mp3)。
- *  两份记录都不是"照文档抄的"那一类 —— 但也**不是**"我们跑遍了所有路径":
- *  出图、出曲、Seed Audio 这三条我们没跑过(发起人自己跑过前两条)。
+ *    适配器本身另走过一次**闭环验证**(调真适配器 → 真出网 → 落盘 → ffprobe 认成 24kHz 单声道 mp3),
+ *    2026-09-30 又复验过一次(那次还试出**它不给 ogg**:`Supported formats: wav, mp3, pcm, pcm16`)。
+ *  两份记录都不是"照文档抄的"那一类 —— 但也**不是**"我们跑遍了所有路径":出图、出曲这两条我们没跑过。
  */
 export const CHANNEL_TEMPLATES: readonly ChannelTemplate[] = [
   {
@@ -162,17 +152,6 @@ export const CHANNEL_TEMPLATES: readonly ChannelTemplate[] = [
     note: '计费按**路径 SKU**(`suno-*`),不是请求体里的 model;跑完上游回真扣费金额(`usage.amount`)。',
   },
   {
-    site: 'seedance.nz',
-    channel: 'voice',
-    baseUrl: 'https://api.seedance.nz/v1',
-    channelName: 'seedance.nz',
-    models: SEEDANCE_VOICE_MODELS,
-    consoleUrl: 'https://api.seedance.nz/console/topup',
-    capturedAt: '2026-09-26',
-    basis: '端点与终态口径来自该站文档(`SUCCESS` + `data.result_url`),适配器认的终态集合里已含 `success`;⚠️ **这条语音我们没真跑过** —— 发起人跑通的是图像与音乐。',
-    note: '同一把嗓子靠 `metadata.speaker`(音色 id)或参考音频 —— 二选一且互斥。牌价约 ¥0.004/秒。',
-  },
-  {
     site: 'xiaomimimo.com',
     channel: 'voice',
     baseUrl: 'https://api.xiaomimimo.com/v1',
@@ -181,7 +160,18 @@ export const CHANNEL_TEMPLATES: readonly ChannelTemplate[] = [
     consoleUrl: 'https://platform.xiaomimimo.com/console/balance',
     capturedAt: '2026-09-26',
     basis: '协议 2026-09-26 真机探针实测,适配器另走过一次**闭环验证**:调真适配器 → 真出网 → 落盘,ffprobe 认成 24kHz 单声道 mp3(预置音色与 voicedesign 两条都过)。',
-    note: '**限时免费,官方没有公布免费期结束后的价格** —— 这条模板可能过期,以站点价格页为准。',
+    // ⚠️ 两条 2026-09-30 从官方文档读出来的事实 —— 它们解释了一类**看着像密钥坏了**的 401:
+    // 那家平台有**两套凭证,而且各自的 BASE_URL 不同**(官方「首次调用 API」):按量付费是
+    // `sk-` 开头 + `https://api.xiaomimimo.com/v1`;Token Plan 是 `tp-`/`ttp-` 开头 +
+    // **`https://token-plan-cn.xiaomimimo.com/v1`**。官方错误码页明写 401 的一种成因就是
+    // "API Key that mixes Token Plan and Pay-as-you-go API" —— 也就是**把这把钥匙插错了门**。
+    //
+    // 2026-09-30:语音这一段**只留小米这一条**(发起人定的 —— 也是这里唯一真跑通过的一条)。
+    // 被删掉的是 seedance.nz 那条(`doubao-seed-audio-1.0` / 「Seed Audio(豆包语音)」):
+    // 它的 `basis` 当年就写着"⚠️ **这条语音我们没真跑过**",留着等于给用户一个没人验过的起点。
+    // 想再用它:`adapter: 'async-task-rest'` + `/v1/audio/generations`(终态 `SUCCESS` + `data.result_url`),
+    // 手工填进语音那一段即可。
+    note: '**限时免费**,官方没公布免费期结束后的价格。⚠️ 两套凭证别插错门:按量付费的 `sk-…` 配 `api.xiaomimimo.com/v1`;Token Plan 的 `tp-…`/`ttp-…` 要配 `token-plan-cn.xiaomimimo.com/v1`(配错就是 401 Invalid API Key,看着像密钥失效)。',
   },
 ]
 

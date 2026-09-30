@@ -33,6 +33,8 @@ export interface SceneRow {
   role?: 'show' | 'scene' | 'hide'
   tag?: string
   attributes?: string[]
+  /** `show … at <变换名…>` 的站位子句(T39);空数组 = 没写。 */
+  at?: string[]
   target?: string
   transition?: string
   seconds?: number | null
@@ -77,7 +79,7 @@ function classify(raw: string, line: number, statement: Statement | undefined): 
       case 'dialogue':
         return { kind: 'dialogue', line, raw, speaker: statement.speaker, text: statement.text }
       case 'image':
-        return { kind: 'image', line, raw, role: statement.role, tag: statement.tag, attributes: [...statement.attributes] }
+        return { kind: 'image', line, raw, role: statement.role, tag: statement.tag, attributes: [...statement.attributes], at: [...statement.at] }
       case 'jump':
         return { kind: 'jump', line, raw, target: statement.target, note: '结构行:改跳转请用源文本模式' }
       case 'call':
@@ -152,9 +154,13 @@ export function serializeDialogue(indent: string, speaker: string | null, text: 
   return `${indent}${name}"${escaped}"`
 }
 
-export function serializeImage(indent: string, role: 'show' | 'scene' | 'hide', tag: string, attributes: string[]): string {
+export function serializeImage(indent: string, role: 'show' | 'scene' | 'hide', tag: string, attributes: string[], at: string[] = []): string {
   const rest = attributes.filter((attribute) => attribute.trim() !== '')
-  return `${indent}${role} ${tag}${rest.length === 0 ? '' : ` ${rest.join(' ')}`}`
+  const transforms = at.map((name) => name.trim()).filter((name) => name !== '')
+  // 顺序是引擎的语法顺序:`show <tag> <属性…> at <变换…>` —— 反过来引擎读不懂。
+  return `${indent}${role} ${tag}`
+    + (rest.length === 0 ? '' : ` ${rest.join(' ')}`)
+    + (transforms.length === 0 ? '' : ` at ${transforms.join(', ')}`)
 }
 
 /**
@@ -180,7 +186,7 @@ export function serializeAudio(
 /** 编辑指令:只动被指定的行(其余逐字保留)。 */
 export type SceneEdit =
   | { kind: 'setDialogue'; line: number; speaker: string | null; text: string }
-  | { kind: 'setImage'; line: number; role: 'show' | 'scene' | 'hide'; tag: string; attributes: string[] }
+  | { kind: 'setImage'; line: number; role: 'show' | 'scene' | 'hide'; tag: string; attributes: string[]; at?: string[] }
   /** 改一行的音频接线(T17);`play` 必须给文件,`stop` 不给。 */
   | { kind: 'setAudio'; line: number; action: 'play' | 'stop'; channel: 'music' | 'sound' | 'voice'; file: string | null; loop: boolean }
   /** 插在 `anchor` 文本那一行之后;`anchor` 省略时插在 `afterLine` 之后。 */
@@ -227,7 +233,7 @@ export function applySceneEdit(text: string, edit: SceneEdit): string {
       if (edit.role !== 'show' && edit.role !== 'scene' && edit.role !== 'hide') {
         throw new Error(`图像动作只能是 show / scene / hide:${String(edit.role)}`)
       }
-      lines[edit.line - 1] = serializeImage(indentOf(at(edit.line)), edit.role, edit.tag, edit.attributes)
+      lines[edit.line - 1] = serializeImage(indentOf(at(edit.line)), edit.role, edit.tag, edit.attributes, edit.at ?? [])
       return lines.join('\n')
     }
     case 'setAudio': {

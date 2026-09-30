@@ -68,7 +68,7 @@ describe('agent 工具(T10)', () => {
     return registry.tools
   }
 
-  it('注册出模型看到的契约:二十四个工具,参数与输出声明齐备', () => {
+  it('注册出模型看到的契约:二十五个工具,参数与输出声明齐备', () => {
     const tools = register()
     // 剧本环节两个 + 美术环节(T15)五个 + 参考链回路(T16)两个 + 发布(T18)一个
     // + 项目工作周期 / 设定集 / 场景编辑 / 音频接线 / 试玩 / 快照(T20)六个
@@ -95,6 +95,7 @@ describe('agent 工具(T10)', () => {
       'galfree_reference_chain',
       'galfree_reroll_image',
       'galfree_snapshot',
+      'galfree_stage',
       'galfree_story_bible',
       'galfree_theme',
       'galfree_voice_anchor',

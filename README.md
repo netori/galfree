@@ -82,6 +82,8 @@ src/
   service/            ★ 项目服务(seam)——独占逻辑全在这里
     project-service.ts   注册表 + 模板新建 + 全部环节方法
     progress.ts          推导引擎(含 deriveSceneMarks:舞台标记的唯一出处)
+    stage.ts             舞台层:图片定义 + 立绘站位(生成物 game/zz_galfree_stage.rpy)
+    text-color.ts        演出字色:调色板 / 对比度闸门 / 分寸(全部是 warning)
     images.ts            图像子系统:渠道/模型能力/适配器/降级判定/任务账本(纯逻辑)
     write-gateway.ts     串行 CAS 原子批 + 二进制写 + 外部观察(唯一写通道)
     snapshot.ts          写批后 git commit(作者 GALFree,永不 push)

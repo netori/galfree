@@ -22,7 +22,23 @@ export type Statement =
       /** 该句发生时的画面图像引用(舞台状态快照)。 */ showing: string[]
       line: number
     }
-  | { kind: 'image'; role: 'show' | 'scene' | 'hide'; tag: string; attributes: string[]; line: number }
+  | {
+      kind: 'image'
+      role: 'show' | 'scene' | 'hide'
+      tag: string
+      attributes: string[]
+      /**
+       * 行尾 `at <变换名>[, <变换名>…]` 子句 —— **立绘站位**(T39)。
+       *
+       * 为什么必须解析它(不能像 `with` 那样只当噪声跳过):两个立绘同时在场时
+       * 都落在引擎默认位置 ⇒ **重叠**(用户实测报的 bug)。站位是"这一场画面对不对"
+       * 的一部分,推导要能看见它才算看见。
+       *
+       * `at` 只对 `show` 有意义;`scene`/`hide` 上写了也如实记下来(不猜、不吞)。
+       */
+      at: string[]
+      line: number
+    }
   | { kind: 'jump'; target: string; line: number }
   | { kind: 'return'; line: number }
   | { kind: 'call'; target: string; line: number }

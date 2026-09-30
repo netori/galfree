@@ -16,6 +16,8 @@
  *  3. 名字不合规则 / 同一场里重名 = **error**(重名会让两句抢同一个语音文件)。
  */
 
+import { stripManagedPlacement } from './stage.ts'
+
 /** 引擎 `l.name` 的形态。 */
 export const DIALOGUE_ID_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
@@ -90,18 +92,20 @@ export function idClauseTextOf(body: string): string {
 }
 
 /**
- * 场景文本 → **指纹口径的文本**:逐行剔掉行尾 id 子句。
+ * 场景文本 → **指纹口径的文本**:逐行剔掉行尾 id 子句,以及**插件管理的站位子句**。
  *
- * 单独成函数是因为它必须与解析器用**同一条**规则:两处各写一遍,迟早一处改了另一处没改
- * (指纹是审读戳的输入,分叉的后果是"改了台词戳不动"或"没改台词戳乱动")。
+ * 单独成函数是因为它必须与解析器/整备用**同一条**规则:几处各写一遍,迟早一处改了
+ * 另一处没改(指纹是审读戳的输入,分叉的后果是"改了台词戳不动"或"没改台词戳乱动")。
+ *
+ * 站位那一半的理由与 id 一模一样(T39):`at gf_duo_left` 是**整备**机械补上去的,
+ * 不是人写的叙述。把它算进指纹的后果是"点一次整备,审读戳全部作废" ——
+ * 而整备恰恰是出完图之后的常规动作。所以:**插件管的那一半不算内容**;
+ * 人自己写的 transform(`at left`、`at my_transform`)照旧算内容(整备也不碰它们)。
  */
 export function sceneTextForFingerprint(text: string): string {
   return text
     .split('\n')
-    .map((line) => {
-      const stripped = stripDialogueId(line)
-      return stripped === line ? line : stripped
-    })
+    .map((line) => stripManagedPlacement(stripDialogueId(line)))
     .join('\n')
 }
 

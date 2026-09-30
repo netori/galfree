@@ -187,10 +187,78 @@ export function matchVoiceFiles(rows: Array<Pick<VoiceBatchRow, 'dialogueId' | '
 // ─── 语音接线落地(ADR-0013 的两条前提)────────────────────────────────
 
 /**
- * 项目里那行"引擎按 id 找语音文件"的配置。**与模板写的那行逐字一致**
- * (`template.ts` 的 `game/options.rpy`)—— 对不上就等于没配。
+ * 项目里那行"引擎按 id 找语音文件"的配置(**字符串形态**)。
+ *
+ * **与模板写的那行逐字一致**(`template.ts` 的 `game/options.rpy`)—— 对不上就等于没配。
+ * 2026-09-30 起它只是**老项目/老模板**的形态:新模板写的是函数形态
+ * (`AUTO_VOICE_FUNCTION_RPY`,见下),两种引擎都认。
  */
 export const AUTO_VOICE_LINE = 'define config.auto_voice = "voice/{id}.ogg"'
+
+/**
+ * **函数形态**的 `config.auto_voice`(T39 追加)—— 新模板默认写这一份,
+ * `voiceWiring` 升级老项目时也用同一份(两处各写一遍必然分叉)。
+ *
+ * 为什么必须能是函数(实测,不是口味问题):不同的 TTS 给**不同的容器** ——
+ * 小米 MiMo 只给 `wav / mp3 / pcm / pcm16`(向上游要 ogg 会被回
+ * `Unsupported audio format: ogg`),本地 IndexTTS 给 ogg。字符串形态只能钉**一个**后缀,
+ * 钉错了的表现是最坏的那一种:**引擎不报错、试玩也照过、就是没声音**
+ * (9/19 那次"655 个语音文件一个不差、一句都不响"是同一个形状)。
+ *
+ * 引擎那边认这一条:`renpy/common/00voice.rpy:364-367` —— 字符串就
+ * `config.auto_voice.format(id=tlid)`,**否则当可调用对象调**(所以这里返回的是
+ * **相对 `game/` 的路径**,与字符串形态同一个口径)。
+ */
+export const AUTO_VOICE_FUNCTION_RPY = [
+  '# 语音(T26 / ADR-0013):按**对话 id** 找 `game/voice/<id>.<后缀>` —— 剧本里不写 voice 语句。',
+  '#',
+  '# 为什么是**函数**不是字符串:不同的 TTS 给不同的容器(小米 MiMo 只给 wav/mp3,',
+  '# 本地 IndexTTS 给 ogg)。字符串只能钉一个后缀,钉错了就是**引擎不报错、试玩也照过、',
+  '# 就是没声音**;函数按磁盘上真有的后缀找,两种可以混着用。',
+  '# 引擎认这一条:renpy/common/00voice.rpy:364-367(非字符串就当可调用对象调)。',
+  'init python:',
+  '    def _galfree_voice(voice_id):',
+  '        for _ext in ("ogg", "oga", "opus", "mp3", "wav", "m4a", "flac"):',
+  '            _name = "voice/{}.{}".format(voice_id, _ext)',
+  '            if renpy.loadable(_name):',
+  '                return _name',
+  '        return "voice/{}.ogg".format(voice_id)',
+  '',
+  '    config.auto_voice = _galfree_voice',
+].join('\n')
+
+/** `config.auto_voice` 的形态(**推导**,不是配置)。 */
+export type AutoVoiceForm = 'absent' | 'string' | 'function'
+
+/**
+ * 从 `options.rpy` 的原文里读出 `config.auto_voice` 是**哪种形态**。
+ *
+ * 为什么要有它(而不是 `includes('config.auto_voice')` 一句话):两种形态的**后果不同** ——
+ * 字符串形态钉死一个后缀,磁盘上是别的后缀时引擎够不着(静默无声);函数形态不会。
+ * 报告要说得出区别,就必须先分得出形态。
+ */
+export function readAutoVoice(optionsRpy: string): { form: AutoVoiceForm; extension: string | null; line: string } {
+  if (!/config\s*\.\s*auto_voice/.test(optionsRpy)) return { form: 'absent', extension: null, line: '' }
+  const stringForm = /config\s*\.\s*auto_voice\s*=\s*"([^"]*)"/.exec(optionsRpy)
+  if (stringForm === null) return { form: 'function', extension: null, line: 'config.auto_voice = <函数>' }
+  // `voice/{id}.ogg` → 取最后一个后缀;取不到后缀就如实给 null(不猜一个)。
+  const tail = stringForm[1]!.replace(/\{id\}/g, 'x')
+  const extension = /\.([A-Za-z0-9]+)$/.exec(tail)?.[1]?.toLowerCase() ?? null
+  return { form: 'string', extension, line: stringForm[0].trim() }
+}
+
+/**
+ * 把字符串形态那一行**整行换成**函数形态(找不到那一行 = 原样返回,不硬来)。
+ *
+ * 只动那一行:`options.rpy` 是**人的文件**,多改一个字都是越界。
+ */
+export function upgradeAutoVoice(optionsRpy: string): { text: string; upgraded: boolean } {
+  const lines = optionsRpy.split('\n')
+  const index = lines.findIndex((line) => /^\s*define\s+config\s*\.\s*auto_voice\s*=\s*"/.test(line))
+  if (index < 0) return { text: optionsRpy, upgraded: false }
+  lines.splice(index, 1, ...AUTO_VOICE_FUNCTION_RPY.split('\n'))
+  return { text: lines.join('\n'), upgraded: true }
+}
 
 /** 一个场景的接线处境。 */
 export interface VoiceWiringScene {
@@ -211,11 +279,23 @@ export interface VoiceWiringScene {
 }
 
 export interface VoiceWiringReport {
-  /** `config.auto_voice` 在不在(没有它引擎根本不找语音文件)。 */
-  autoVoice: { present: boolean; file: string; line: string }
+  /**
+   * `config.auto_voice` 在不在、是哪种形态。
+   *
+   * `form: 'string'` 时 `extension` 就是它钉死的那个后缀 —— 磁盘上是别的后缀时,
+   * 那些文件**引擎够不着**(见 `unreachable`)。
+   */
+  autoVoice: { present: boolean; file: string; line: string; form: AutoVoiceForm; extension: string | null }
+  /** `game/voice/` 下真有哪些后缀、各几个(推导:扫磁盘,不靠登记)。 */
+  voiceFiles: { count: number; extensions: Array<{ extension: string; count: number }> }
+  /**
+   * 引擎**够不着**的语音文件数 —— 只可能出现在字符串形态下,而且它**不报错**:
+   * 引擎按 `voice/{id}.<钉死的后缀>` 找,磁盘上是别的后缀 ⇒ 那一句就是没声音。
+   */
+  unreachable: { count: number; extensions: string[]; hint: string }
   scenes: VoiceWiringScene[]
   /** 本次真的动了哪些文件(`apply` 时才有)。 */
   changed: string[]
-  /** 还有没有该补的(配置缺 / 有场景没盖全)。 */
+  /** 还有没有该补的(配置缺 / 形态够不着文件 / 有场景没盖全)。 */
   needsWiring: boolean
 }
